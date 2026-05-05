@@ -50,7 +50,58 @@ CREATE TABLE IF NOT EXISTS measurements (
   assembly_id INTEGER REFERENCES assemblies(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  default_wall_height NUMERIC NOT NULL DEFAULT 9,
+  exterior_sheathing TEXT NOT NULL DEFAULT '7/16_osb',
+  roof_sheathing TEXT NOT NULL DEFAULT '1/2_csp',
+  drywall TEXT NOT NULL DEFAULT '1/2_drywall',
+  stud_spacing NUMERIC NOT NULL DEFAULT 16,
+  corner_style TEXT NOT NULL DEFAULT '3_stud',
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  CONSTRAINT settings_singleton CHECK (id = 1)
+);
+
+CREATE TABLE IF NOT EXISTS walls (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  x1 NUMERIC NOT NULL,
+  y1 NUMERIC NOT NULL,
+  x2 NUMERIC NOT NULL,
+  y2 NUMERIC NOT NULL,
+  height NUMERIC,
+  wall_type TEXT NOT NULL,
+  sheathing_override TEXT,
+  drywall_override TEXT,
+  extra_corner_studs INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS walls_project_id_idx ON walls(project_id);
 `;
+
+const PROJECT_COLUMN_ALTERS = [
+  // Project-level overrides for settings (NULL = inherit global)
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS default_wall_height NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS exterior_sheathing TEXT`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS roof_sheathing TEXT`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS drywall TEXT`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS stud_spacing NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS corner_style TEXT`,
+  // Sketch / canvas settings (these have project-level defaults, not global)
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS scale_ft_per_grid NUMERIC NOT NULL DEFAULT 1`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS viewport_pan_x NUMERIC NOT NULL DEFAULT 0`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS viewport_pan_y NUMERIC NOT NULL DEFAULT 0`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS viewport_zoom NUMERIC NOT NULL DEFAULT 1`,
+];
+
+async function ensureSettings() {
+  await pool.query(`
+    INSERT INTO settings (id) VALUES (1)
+    ON CONFLICT (id) DO NOTHING
+  `);
+}
 
 async function ensureUser() {
   const username = 'admin';
@@ -141,6 +192,12 @@ async function run() {
   try {
     await pool.query(SCHEMA);
     console.log('Schema ensured.');
+    for (const stmt of PROJECT_COLUMN_ALTERS) {
+      await pool.query(stmt);
+    }
+    console.log('Project columns ensured.');
+    await ensureSettings();
+    console.log('Settings row ensured.');
     await ensureUser();
     await seedExamples();
     console.log('Migration done.');

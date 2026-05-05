@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "migrate": "node src/migrate.js"
+    "migrate": "node src/migrate.js",
+    "verify-schema": "node src/verifySchema.js",
+    "test-rules": "node src/wallRules.test.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

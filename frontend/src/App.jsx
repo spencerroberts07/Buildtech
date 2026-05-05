@@ -6,6 +6,7 @@ import ProjectDetail from './components/ProjectDetail.jsx';
 import Assemblies from './components/Assemblies.jsx';
 import AssemblyEditor from './components/AssemblyEditor.jsx';
 import Materials from './components/Materials.jsx';
+import Settings from './components/Settings.jsx';
 
 function useAuth() {
   const [token, setToken] = React.useState(localStorage.getItem('token'));
@@ -33,6 +34,7 @@ function Shell({ user, onLogout, children }) {
         <NavLink to="/projects" className={({isActive}) => isActive ? 'active' : ''}>Projects</NavLink>
         <NavLink to="/assemblies" className={({isActive}) => isActive ? 'active' : ''}>Assemblies</NavLink>
         <NavLink to="/materials" className={({isActive}) => isActive ? 'active' : ''}>Materials</NavLink>
+        <NavLink to="/settings" className={({isActive}) => isActive ? 'active' : ''}>Settings</NavLink>
         <div className="spacer" />
         <span className="user">{user?.username}</span>
         <button onClick={onLogout}>Log out</button>
@@ -65,6 +67,7 @@ export default function App() {
         <Route path="/assemblies/new" element={<AssemblyEditor />} />
         <Route path="/assemblies/:id" element={<AssemblyEditor />} />
         <Route path="/materials" element={<Materials />} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/projects" replace />} />
       </Routes>
     </Shell>

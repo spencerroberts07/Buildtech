@@ -1,7 +1,30 @@
 import { Router } from 'express';
 import { query } from '../db.js';
+import { computeWallMaterials, sumMaterials, resolveProjectSettings } from '../wallRules.js';
+import { ensureMaterial } from '../materialUpsert.js';
 
 const router = Router();
+
+const PROJECT_SETTING_FIELDS = [
+  'default_wall_height',
+  'exterior_sheathing',
+  'roof_sheathing',
+  'drywall',
+  'stud_spacing',
+  'corner_style',
+  'scale_ft_per_grid',
+  'viewport_pan_x',
+  'viewport_pan_y',
+  'viewport_zoom',
+];
+
+const WALL_TYPES = ['exterior_2x6', 'interior_2x4', 'interior_2x6'];
+const WALL_FIELDS = [
+  'x1', 'y1', 'x2', 'y2',
+  'height', 'wall_type',
+  'sheathing_override', 'drywall_override',
+  'extra_corner_studs',
+];
 
 router.get('/', async (req, res) => {
   const { rows } = await query(
@@ -87,10 +110,134 @@ router.delete('/:id/measurements/:mid', async (req, res) => {
   res.status(204).end();
 });
 
-// Material list rollup
+// Project settings (overrides + scale + viewport)
+router.get('/:id/settings', async (req, res) => {
+  const { id } = req.params;
+  const cols = PROJECT_SETTING_FIELDS.join(', ');
+  const { rows } = await query(
+    `SELECT id, ${cols} FROM projects WHERE id = $1`,
+    [id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  res.json(rows[0]);
+});
+
+router.put('/:id/settings', async (req, res) => {
+  const { id } = req.params;
+  const body = req.body || {};
+  const updates = {};
+  for (const f of PROJECT_SETTING_FIELDS) {
+    if (f in body) updates[f] = body[f] === '' ? null : body[f];
+  }
+  const keys = Object.keys(updates);
+  const cols = PROJECT_SETTING_FIELDS.join(', ');
+  if (keys.length === 0) {
+    const { rows } = await query(
+      `SELECT id, ${cols} FROM projects WHERE id = $1`,
+      [id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'not found' });
+    return res.json(rows[0]);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(id);
+  const { rows } = await query(
+    `UPDATE projects SET ${setParts}, updated_at = NOW()
+     WHERE id = $${values.length}
+     RETURNING id, ${cols}`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  res.json(rows[0]);
+});
+
+// Walls CRUD
+router.get('/:id/walls', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    'SELECT * FROM walls WHERE project_id = $1 ORDER BY id',
+    [id]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/walls', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  if (b.x1 == null || b.y1 == null || b.x2 == null || b.y2 == null) {
+    return res.status(400).json({ error: 'x1, y1, x2, y2 required' });
+  }
+  if (!WALL_TYPES.includes(b.wall_type)) {
+    return res.status(400).json({
+      error: `wall_type must be one of: ${WALL_TYPES.join(', ')}`,
+    });
+  }
+  const { rows } = await query(
+    `INSERT INTO walls
+       (project_id, x1, y1, x2, y2, height, wall_type,
+        sheathing_override, drywall_override, extra_corner_studs)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [
+      id, b.x1, b.y1, b.x2, b.y2,
+      b.height ?? null, b.wall_type,
+      b.sheathing_override ?? null,
+      b.drywall_override ?? null,
+      b.extra_corner_studs ?? 0,
+    ]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.put('/:id/walls/:wid', async (req, res) => {
+  const { id, wid } = req.params;
+  const b = req.body || {};
+  const updates = {};
+  for (const f of WALL_FIELDS) {
+    if (f in b) {
+      if (f === 'wall_type' && !WALL_TYPES.includes(b[f])) {
+        return res.status(400).json({ error: 'invalid wall_type' });
+      }
+      updates[f] = b[f] === '' ? null : b[f];
+    }
+  }
+  const keys = Object.keys(updates);
+  if (keys.length === 0) {
+    const { rows } = await query(
+      'SELECT * FROM walls WHERE id = $1 AND project_id = $2',
+      [wid, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'not found' });
+    return res.json(rows[0]);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(wid, id);
+  const { rows } = await query(
+    `UPDATE walls SET ${setParts}
+     WHERE id = $${values.length - 1} AND project_id = $${values.length}
+     RETURNING *`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
+router.delete('/:id/walls/:wid', async (req, res) => {
+  const { id, wid } = req.params;
+  await query('DELETE FROM walls WHERE id = $1 AND project_id = $2', [wid, id]);
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
+// Material list — combined rollup of typed measurements + sketched walls
 router.get('/:id/material-list', async (req, res) => {
   const { id } = req.params;
-  const { rows } = await query(`
+
+  // Existing measurement-based rollup (unchanged SQL)
+  const measurementRollup = await query(`
     SELECT
       m.id AS material_id,
       m.name AS material_name,
@@ -102,9 +249,56 @@ router.get('/:id/material-list', async (req, res) => {
     JOIN materials m ON m.id = ai.material_id
     WHERE meas.project_id = $1
     GROUP BY m.id, m.name, m.unit
-    ORDER BY m.name
   `, [id]);
-  res.json(rows);
+
+  // Wall-based rollup
+  const projectRow = (await query('SELECT * FROM projects WHERE id = $1', [id])).rows[0];
+  if (!projectRow) return res.status(404).json({ error: 'not found' });
+  const globalRow = (await query('SELECT * FROM settings WHERE id = 1')).rows[0];
+  const settings = resolveProjectSettings(projectRow, globalRow);
+  const walls = (await query('SELECT * FROM walls WHERE project_id = $1', [id])).rows;
+
+  const wallItems = [];
+  for (const w of walls) {
+    wallItems.push(...computeWallMaterials(w, settings));
+  }
+  const wallRolled = sumMaterials(wallItems);
+
+  // Lazy-create material rows for any wall-derived names not yet in the table.
+  const wallWithIds = [];
+  for (const item of wallRolled) {
+    const matId = await ensureMaterial(item.name, item.unit);
+    wallWithIds.push({
+      material_id: matId,
+      material_name: item.name,
+      material_unit: item.unit,
+      total_quantity: item.quantity,
+    });
+  }
+
+  // Merge by material_id
+  const merged = new Map();
+  for (const r of measurementRollup.rows) {
+    merged.set(r.material_id, {
+      material_id: r.material_id,
+      material_name: r.material_name,
+      material_unit: r.material_unit,
+      total_quantity: Number(r.total_quantity),
+    });
+  }
+  for (const r of wallWithIds) {
+    const existing = merged.get(r.material_id);
+    if (existing) {
+      existing.total_quantity += r.total_quantity;
+    } else {
+      merged.set(r.material_id, r);
+    }
+  }
+
+  const out = Array.from(merged.values()).sort((a, b) =>
+    a.material_name.localeCompare(b.material_name)
+  );
+  res.json(out);
 });
 
 export default router;

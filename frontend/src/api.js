@@ -55,4 +55,19 @@ export const api = {
     request(`/projects/${projectId}/measurements/${mid}`, { method: 'DELETE' }),
 
   materialList: (projectId) => request(`/projects/${projectId}/material-list`),
+
+  getSettings: () => request('/settings'),
+  updateSettings: (data) => request('/settings', { method: 'PUT', body: JSON.stringify(data) }),
+
+  getProjectSettings: (id) => request(`/projects/${id}/settings`),
+  updateProjectSettings: (id, data) =>
+    request(`/projects/${id}/settings`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  listWalls: (projectId) => request(`/projects/${projectId}/walls`),
+  createWall: (projectId, data) =>
+    request(`/projects/${projectId}/walls`, { method: 'POST', body: JSON.stringify(data) }),
+  updateWall: (projectId, wid, data) =>
+    request(`/projects/${projectId}/walls/${wid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteWall: (projectId, wid) =>
+    request(`/projects/${projectId}/walls/${wid}`, { method: 'DELETE' }),
 };
