@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS walls (
 );
 
 CREATE INDEX IF NOT EXISTS walls_project_id_idx ON walls(project_id);
+
+CREATE TABLE IF NOT EXISTS openings (
+  id SERIAL PRIMARY KEY,
+  wall_id INTEGER NOT NULL REFERENCES walls(id) ON DELETE CASCADE,
+  project_id INTEGER NOT NULL,
+  type TEXT NOT NULL DEFAULT 'window',
+  rough_opening_width NUMERIC NOT NULL,
+  rough_opening_height NUMERIC NOT NULL,
+  label TEXT,
+  position_along_wall NUMERIC NOT NULL DEFAULT 0.5,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS openings_project_id_idx ON openings(project_id);
+CREATE INDEX IF NOT EXISTS openings_wall_id_idx ON openings(wall_id);
 `;
 
 const PROJECT_COLUMN_ALTERS = [
@@ -94,6 +109,13 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS viewport_pan_x NUMERIC NOT NULL DEFAULT 0`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS viewport_pan_y NUMERIC NOT NULL DEFAULT 0`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS viewport_zoom NUMERIC NOT NULL DEFAULT 1`,
+  // Insulation selection (project-level)
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS insulation_type TEXT NOT NULL DEFAULT 'pink_r22_15'`,
+  // Silverboard exterior rigid insulation
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS silverboard_type TEXT NOT NULL DEFAULT 'silverboard_1'`,
+  // Project setup metadata
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS num_storeys INTEGER NOT NULL DEFAULT 1`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS floor2_wall_height INTEGER NOT NULL DEFAULT 9`,
 ];
 
 async function ensureSettings() {

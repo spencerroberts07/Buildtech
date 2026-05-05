@@ -1,6 +1,13 @@
 import { Router } from 'express';
 import { query } from '../db.js';
-import { computeWallMaterials, sumMaterials, resolveProjectSettings } from '../wallRules.js';
+import {
+  computeWallMaterials,
+  computeProjectMaterials,
+  sumMaterials,
+  resolveProjectSettings,
+  sectionRank,
+  categoryRank,
+} from '../wallRules.js';
 import { ensureMaterial } from '../materialUpsert.js';
 
 const router = Router();
@@ -16,6 +23,10 @@ const PROJECT_SETTING_FIELDS = [
   'viewport_pan_x',
   'viewport_pan_y',
   'viewport_zoom',
+  'insulation_type',
+  'silverboard_type',
+  'num_storeys',
+  'floor2_wall_height',
 ];
 
 const WALL_TYPES = ['exterior_2x6', 'interior_2x4', 'interior_2x6'];
@@ -48,11 +59,19 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { name, customer, notes } = req.body;
+  const { name, customer, notes, num_storeys, floor2_wall_height, default_wall_height } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const { rows } = await query(
-    'INSERT INTO projects (name, customer, notes) VALUES ($1,$2,$3) RETURNING *',
-    [name, customer || null, notes || null]
+    `INSERT INTO projects (name, customer, notes, num_storeys, floor2_wall_height, default_wall_height)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [
+      name,
+      customer || null,
+      notes || null,
+      num_storeys ?? 1,
+      floor2_wall_height ?? 9,
+      default_wall_height ?? null,
+    ]
   );
   res.status(201).json(rows[0]);
 });
@@ -232,6 +251,89 @@ router.delete('/:id/walls/:wid', async (req, res) => {
   res.status(204).end();
 });
 
+// Openings CRUD
+const OPENING_TYPES = ['window', 'door'];
+const OPENING_FIELDS = [
+  'wall_id', 'type', 'rough_opening_width', 'rough_opening_height',
+  'label', 'position_along_wall',
+];
+
+router.get('/:id/openings', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    'SELECT * FROM openings WHERE project_id = $1 ORDER BY id',
+    [id]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/openings', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  if (!b.wall_id) return res.status(400).json({ error: 'wall_id required' });
+  if (b.rough_opening_width == null || b.rough_opening_height == null) {
+    return res.status(400).json({ error: 'rough_opening_width and rough_opening_height required' });
+  }
+  const type = b.type || 'window';
+  if (!OPENING_TYPES.includes(type)) {
+    return res.status(400).json({ error: `type must be one of: ${OPENING_TYPES.join(', ')}` });
+  }
+  // Confirm wall belongs to project
+  const wall = await query('SELECT id FROM walls WHERE id = $1 AND project_id = $2', [b.wall_id, id]);
+  if (!wall.rows[0]) return res.status(400).json({ error: 'wall not found in this project' });
+  const { rows } = await query(
+    `INSERT INTO openings
+       (project_id, wall_id, type, rough_opening_width, rough_opening_height, label, position_along_wall)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [id, b.wall_id, type, b.rough_opening_width, b.rough_opening_height,
+     b.label || null, b.position_along_wall ?? 0.5],
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.put('/:id/openings/:oid', async (req, res) => {
+  const { id, oid } = req.params;
+  const b = req.body || {};
+  const updates = {};
+  for (const f of OPENING_FIELDS) {
+    if (f in b) {
+      if (f === 'type' && !OPENING_TYPES.includes(b[f])) {
+        return res.status(400).json({ error: 'invalid opening type' });
+      }
+      updates[f] = b[f] === '' ? null : b[f];
+    }
+  }
+  const keys = Object.keys(updates);
+  if (keys.length === 0) {
+    const { rows } = await query(
+      'SELECT * FROM openings WHERE id = $1 AND project_id = $2',
+      [oid, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'not found' });
+    return res.json(rows[0]);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(oid, id);
+  const { rows } = await query(
+    `UPDATE openings SET ${setParts}
+     WHERE id = $${values.length - 1} AND project_id = $${values.length}
+     RETURNING *`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
+router.delete('/:id/openings/:oid', async (req, res) => {
+  const { id, oid } = req.params;
+  await query('DELETE FROM openings WHERE id = $1 AND project_id = $2', [oid, id]);
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
 // Material list — combined rollup of typed measurements + sketched walls
 router.get('/:id/material-list', async (req, res) => {
   const { id } = req.params;
@@ -258,10 +360,26 @@ router.get('/:id/material-list', async (req, res) => {
   const settings = resolveProjectSettings(projectRow, globalRow);
   const walls = (await query('SELECT * FROM walls WHERE project_id = $1', [id])).rows;
 
+  const openings = (await query(
+    'SELECT * FROM openings WHERE project_id = $1', [id]
+  )).rows;
+
+  // Group openings by wall_id for per-wall calc; enrich with wall_type for project-level
+  const wallById = new Map(walls.map((w) => [w.id, w]));
+  const openingsByWall = new Map();
+  const enrichedOpenings = [];
+  for (const o of openings) {
+    if (!openingsByWall.has(o.wall_id)) openingsByWall.set(o.wall_id, []);
+    openingsByWall.get(o.wall_id).push(o);
+    enrichedOpenings.push({ ...o, wall_type: wallById.get(o.wall_id)?.wall_type });
+  }
+
+  // Per-wall items + project-level rollups (housewrap, insulation, gasket, headers, shims, etc.)
   const wallItems = [];
   for (const w of walls) {
-    wallItems.push(...computeWallMaterials(w, settings));
+    wallItems.push(...computeWallMaterials(w, settings, openingsByWall.get(w.id) || []));
   }
+  wallItems.push(...computeProjectMaterials(walls, settings, enrichedOpenings));
   const wallRolled = sumMaterials(wallItems);
 
   // Lazy-create material rows for any wall-derived names not yet in the table.
@@ -272,32 +390,44 @@ router.get('/:id/material-list', async (req, res) => {
       material_id: matId,
       material_name: item.name,
       material_unit: item.unit,
+      section: item.section,
+      category: item.category,
       total_quantity: item.quantity,
     });
   }
 
-  // Merge by material_id
+  // Merge by (material_id, section, category). Typed-measurement rows have
+  // section/category null so they merge on material_id alone.
   const merged = new Map();
+  const mkKey = (matId, section, category) => `${matId}|${section ?? ''}|${category ?? ''}`;
   for (const r of measurementRollup.rows) {
-    merged.set(r.material_id, {
+    merged.set(mkKey(r.material_id, null, null), {
       material_id: r.material_id,
       material_name: r.material_name,
       material_unit: r.material_unit,
+      section: null,
+      category: null,
       total_quantity: Number(r.total_quantity),
     });
   }
   for (const r of wallWithIds) {
-    const existing = merged.get(r.material_id);
-    if (existing) {
-      existing.total_quantity += r.total_quantity;
-    } else {
-      merged.set(r.material_id, r);
-    }
+    const k = mkKey(r.material_id, r.section, r.category);
+    const existing = merged.get(k);
+    if (existing) existing.total_quantity += r.total_quantity;
+    else merged.set(k, r);
   }
 
-  const out = Array.from(merged.values()).sort((a, b) =>
-    a.material_name.localeCompare(b.material_name)
-  );
+  const out = Array.from(merged.values())
+    .map((r) => ({ ...r, total_quantity: Math.ceil(r.total_quantity) }))
+    .sort((a, b) => {
+      const ra = sectionRank(a.section);
+      const rb = sectionRank(b.section);
+      if (ra !== rb) return ra - rb;
+      const ca = categoryRank(a.category);
+      const cb = categoryRank(b.category);
+      if (ca !== cb) return ca - cb;
+      return a.material_name.localeCompare(b.material_name);
+    });
   res.json(out);
 });
 

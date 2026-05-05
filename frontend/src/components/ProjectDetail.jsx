@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import Sketch from './Sketch.jsx';
 import ProjectSettings from './ProjectSettings.jsx';
+import OpeningsTable from './OpeningsTable.jsx';
 
 export default function ProjectDetail() {
   const { id } = useParams();
@@ -11,8 +12,16 @@ export default function ProjectDetail() {
   const [materialList, setMaterialList] = useState([]);
   const [projectSettings, setProjectSettings] = useState(null);
   const [globalSettings, setGlobalSettings] = useState(null);
+  const [openings, setOpenings] = useState([]);
+  const [walls, setWalls] = useState([]);
   const [tab, setTab] = useState('measurements');
   const [error, setError] = useState('');
+  // Per-section collapsed state (true = collapsed, false/undefined = expanded)
+  const [collapsedSections, setCollapsedSections] = useState({});
+
+  function toggleSection(sec) {
+    setCollapsedSections((cur) => ({ ...cur, [sec]: !cur[sec] }));
+  }
 
   // new measurement form
   const [desc, setDesc] = useState('');
@@ -21,24 +30,36 @@ export default function ProjectDetail() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [p, a, ml, ps, gs] = await Promise.all([
+      const [p, a, ml, ps, gs, ws, ops] = await Promise.all([
         api.getProject(id),
         api.listAssemblies(),
         api.materialList(id),
         api.getProjectSettings(id),
         api.getSettings(),
+        api.listWalls(id),
+        api.listOpenings(id),
       ]);
       setProject(p);
       setAssemblies(a);
       setMaterialList(ml);
       setProjectSettings(ps);
       setGlobalSettings(gs);
+      setWalls(ws);
+      setOpenings(ops);
     } catch (e) { setError(e.message); }
   }, [id]);
 
   const refetchMaterialList = useCallback(async () => {
     try { setMaterialList(await api.materialList(id)); }
     catch (e) { setError(e.message); }
+  }, [id]);
+
+  const refetchOpenings = useCallback(async () => {
+    try {
+      const [ops, ws] = await Promise.all([api.listOpenings(id), api.listWalls(id)]);
+      setOpenings(ops);
+      setWalls(ws);
+    } catch (e) { setError(e.message); }
   }, [id]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -84,11 +105,13 @@ export default function ProjectDetail() {
   }
 
   function exportCsv() {
-    const header = ['Material', 'Unit', 'Total quantity (incl. waste)'];
+    const header = ['Group', 'Section', 'Material', 'Unit', 'Total quantity (incl. waste)'];
     const rows = materialList.map(r => [
+      r.section || '—',
+      r.category || '—',
       r.material_name,
       r.material_unit,
-      Number(r.total_quantity).toFixed(3),
+      String(Number(r.total_quantity)),
     ]);
     const csv = [header, ...rows].map(r => r.map(escapeCsv).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -184,6 +207,7 @@ export default function ProjectDetail() {
           projectSettings={projectSettings}
           onProjectSettingsChange={handleProjectSettingsChange}
           onMaterialsChanged={refetchMaterialList}
+          onOpeningsChanged={refetchOpenings}
         />
       )}
 
@@ -194,6 +218,8 @@ export default function ProjectDetail() {
           onChange={(field, value) => handleProjectSettingsChange({ [field]: value })}
         />
       )}
+
+      <OpeningsTable openings={openings} walls={walls} />
 
       <h2>Material list</h2>
       <p className="muted" style={{ marginTop: 0 }}>
@@ -209,16 +235,10 @@ export default function ProjectDetail() {
       ) : (
         <table>
           <thead>
-            <tr><th>Material</th><th>Unit</th><th>Total quantity</th></tr>
+            <tr><th>Section</th><th>Material</th><th>Quantity</th><th>Unit</th></tr>
           </thead>
           <tbody>
-            {materialList.map(r => (
-              <tr key={r.material_id}>
-                <td>{r.material_name}</td>
-                <td>{r.material_unit}</td>
-                <td>{Number(r.total_quantity).toFixed(2)}</td>
-              </tr>
-            ))}
+            {renderGroupedMaterialRows(materialList, collapsedSections, toggleSection)}
           </tbody>
         </table>
       )}
@@ -231,4 +251,62 @@ function escapeCsv(v) {
   const s = String(v ?? '');
   if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
   return s;
+}
+
+// Render the material list as collapsible group bands.
+// Server already returns rows sorted by section then category, so we just
+// inject a clickable group header before each new section. Within a section
+// the per-row "Section" column shows the material's category (Bottom Plate,
+// Studs, Sheathing, etc.).
+function renderGroupedMaterialRows(rows, collapsedSections, toggleSection) {
+  // Group rows by section (preserves order)
+  const groups = [];
+  let cur = null;
+  for (const r of rows) {
+    const sec = r.section || null;
+    if (!cur || cur.section !== sec) {
+      cur = { section: sec, rows: [] };
+      groups.push(cur);
+    }
+    cur.rows.push(r);
+  }
+
+  const out = [];
+  groups.forEach((g, gi) => {
+    const label = g.section || 'Other';
+    const isCollapsed = !!collapsedSections[label];
+    out.push(
+      <tr
+        key={`hdr|${label}|${gi}`}
+        className="material-section-header"
+        onClick={() => toggleSection(label)}
+        style={{ cursor: 'pointer' }}
+      >
+        <td colSpan={4}>
+          <span style={{ display: 'inline-block', width: '1.2em' }}>
+            {isCollapsed ? '▶' : '▼'}
+          </span>
+          {label}
+          <span style={{ marginLeft: '0.6rem', opacity: 0.6, fontWeight: 400, fontSize: '0.85rem' }}>
+            ({g.rows.length})
+          </span>
+        </td>
+      </tr>
+    );
+    if (!isCollapsed) {
+      g.rows.forEach((r, i) => {
+        out.push(
+          <tr key={`${r.material_id}|${g.section ?? ''}|${r.category ?? ''}|${i}`} className="material-row">
+            <td className="material-row-section-cell">
+              {r.category || <span className="muted">—</span>}
+            </td>
+            <td>{r.material_name}</td>
+            <td>{Number(r.total_quantity)}</td>
+            <td>{r.material_unit}</td>
+          </tr>
+        );
+      });
+    }
+  });
+  return out;
 }

@@ -70,4 +70,12 @@ export const api = {
     request(`/projects/${projectId}/walls/${wid}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteWall: (projectId, wid) =>
     request(`/projects/${projectId}/walls/${wid}`, { method: 'DELETE' }),
+
+  listOpenings: (projectId) => request(`/projects/${projectId}/openings`),
+  createOpening: (projectId, data) =>
+    request(`/projects/${projectId}/openings`, { method: 'POST', body: JSON.stringify(data) }),
+  updateOpening: (projectId, oid, data) =>
+    request(`/projects/${projectId}/openings/${oid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteOpening: (projectId, oid) =>
+    request(`/projects/${projectId}/openings/${oid}`, { method: 'DELETE' }),
 };
