@@ -688,7 +688,7 @@ function PolygonSketch({
             onMouseLeave={onMouseLeave}
             onWheel={onWheel}
             onContextMenu={onContextMenu}
-            style={{ cursor: spaceDown.current ? 'grab' : (mode === 'placing' ? 'crosshair' : 'default'), display: 'block', background: '#fafafa' }}
+            style={{ cursor: spaceDown.current ? 'grab' : (mode === 'placing' ? 'crosshair' : 'default'), display: 'block', background: GRID_BG }}
           />
         </div>
         {selectedOpening && (
@@ -1069,7 +1069,7 @@ function OpeningEditor({ opening, onChange, onDelete, onClose }) {
 // ---------- canvas drawing ----------
 function drawScene(ctx, size, vp, S) {
   const { corners, walls, openings, mode, selectedCornerIdx, selectedWallIdx, selectedOpeningId, hoverWorld, scale, dragLabel } = S;
-  ctx.fillStyle = '#fafafa';
+  ctx.fillStyle = GRID_BG;
   ctx.fillRect(0, 0, size.w, size.h);
   drawGrid(ctx, size, vp);
 
@@ -1090,16 +1090,16 @@ function drawScene(ctx, size, vp, S) {
     const last = corners[corners.length - 1];
     const a = worldToScreen(last.x, last.y, vp);
     const b = worldToScreen(hoverWorld.x, hoverWorld.y, vp);
-    ctx.strokeStyle = '#2563eb';
+    ctx.strokeStyle = ACCENT_RUST;
     ctx.lineWidth = 2;
     ctx.setLineDash([6, 4]);
     ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     ctx.setLineDash([]);
     const dx = hoverWorld.x - last.x, dy = hoverWorld.y - last.y;
     const lengthFt = Math.sqrt(dx * dx + dy * dy) * scale;
-    ctx.font = '12px -apple-system, Segoe UI, Roboto, sans-serif';
+    ctx.font = '12px "Segoe UI", -apple-system, sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#2563eb';
+    ctx.fillStyle = ACCENT_RUST;
     ctx.fillText(`${lengthFt.toFixed(2)} ft`, (a.x + b.x) / 2, (a.y + b.y) / 2 - 12);
   }
 
@@ -1108,11 +1108,16 @@ function drawScene(ctx, size, vp, S) {
     const s = worldToScreen(corners[i].x, corners[i].y, vp);
     const selected = i === selectedCornerIdx;
     if (selected) {
-      ctx.fillStyle = 'rgba(251,191,36,0.35)';
-      ctx.beginPath(); ctx.arc(s.x, s.y, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(217,119,6,0.18)';
+      ctx.beginPath(); ctx.arc(s.x, s.y, 11, 0, Math.PI * 2); ctx.fill();
     }
-    ctx.fillStyle = i === 0 && mode === 'placing' ? '#2563eb' : '#1f2937';
-    ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, Math.PI * 2); ctx.fill();
+    if (selected) {
+      ctx.fillStyle = ACCENT_RUST;
+      ctx.beginPath(); ctx.arc(s.x, s.y, 6, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = i === 0 && mode === 'placing' ? ACCENT_RUST : CORNER_GRAY;
+      ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, Math.PI * 2); ctx.fill();
+    }
   }
 
   // Openings
@@ -1123,16 +1128,16 @@ function drawScene(ctx, size, vp, S) {
   // Hover marker (placing mode)
   if (mode === 'placing' && hoverWorld) {
     const s = worldToScreen(hoverWorld.x, hoverWorld.y, vp);
-    ctx.strokeStyle = '#2563eb';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = ACCENT_RUST;
+    ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, Math.PI * 2); ctx.stroke();
   }
 
   if (dragLabel) {
-    ctx.font = 'bold 12px -apple-system, Segoe UI, Roboto, sans-serif';
+    ctx.font = 'bold 12px "Segoe UI", -apple-system, sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     const m = ctx.measureText(dragLabel.text);
-    ctx.fillStyle = 'rgba(31,41,55,0.95)';
+    ctx.fillStyle = ACCENT_RUST;
     ctx.fillRect(dragLabel.x - m.width / 2 - 6, dragLabel.y - 10, m.width + 12, 20);
     ctx.fillStyle = 'white';
     ctx.fillText(dragLabel.text, dragLabel.x, dragLabel.y);
@@ -1144,56 +1149,94 @@ function drawGrid(ctx, size, vp) {
   if (step < 4) return;
   const startX = vp.panX % step;
   const startY = vp.panY % step;
-  ctx.lineWidth = 1; ctx.strokeStyle = '#e5e7eb';
+  ctx.lineWidth = 1; ctx.strokeStyle = GRID_LINE;
   ctx.beginPath();
   for (let x = startX; x < size.w; x += step) { ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, size.h); }
   for (let y = startY; y < size.h; y += step) { ctx.moveTo(0, y + 0.5); ctx.lineTo(size.w, y + 0.5); }
   ctx.stroke();
   const origin = worldToScreen(0, 0, vp);
   if (origin.x >= 0 && origin.x <= size.w) {
-    ctx.strokeStyle = '#cbd5e1'; ctx.beginPath();
+    ctx.strokeStyle = '#D1D5DB'; ctx.beginPath();
     ctx.moveTo(origin.x + 0.5, 0); ctx.lineTo(origin.x + 0.5, size.h); ctx.stroke();
   }
   if (origin.y >= 0 && origin.y <= size.h) {
-    ctx.strokeStyle = '#cbd5e1'; ctx.beginPath();
+    ctx.strokeStyle = '#D1D5DB'; ctx.beginPath();
     ctx.moveTo(0, origin.y + 0.5); ctx.lineTo(size.w, origin.y + 0.5); ctx.stroke();
   }
 }
 
+// Option A: walls all use #1F2937; differentiation by stroke-width only
 const WALL_STYLES = {
-  exterior_2x6: { width: 5, color: '#1f2937' },
-  interior_2x6: { width: 4, color: '#475569' },
-  interior_2x4: { width: 3, color: '#64748b' },
+  exterior_2x6: { width: 5, color: '#1F2937' },
+  interior_2x6: { width: 4, color: '#1F2937' },
+  interior_2x4: { width: 3, color: '#1F2937' },
 };
+const ACCENT_RUST = '#D97706';
+const CORNER_GRAY = '#6B7280';
+const WINDOW_COLOR = '#3B82F6';
+const DOOR_COLOR = '#10B981';
+const GRID_BG = '#FFFBF0';
+const GRID_LINE = '#E5E7EB';
+const LABEL_TEXT = '#1F2937';
 
 function drawEdge(ctx, a, b, vp, scale, idx, wall, selected) {
   const sa = worldToScreen(a.x, a.y, vp);
   const sb = worldToScreen(b.x, b.y, vp);
   const wallType = wall?.wall_type || 'exterior_2x6';
   const style = WALL_STYLES[wallType] || WALL_STYLES.exterior_2x6;
+
   if (selected) {
-    ctx.strokeStyle = '#fbbf24';
-    ctx.lineWidth = style.width + 6;
+    // Soft outer glow halo
+    ctx.save();
+    ctx.shadowColor = 'rgba(217,119,6,0.45)';
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = ACCENT_RUST;
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.strokeStyle = style.color;
+    ctx.lineWidth = style.width;
     ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
   }
-  ctx.strokeStyle = style.color;
-  ctx.lineWidth = style.width;
-  ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
 
-  // Length + type label at midpoint
+  // Length + type label at midpoint (white pill, dark text)
   const lengthFt = Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2) * scale;
   const mx = (sa.x + sb.x) / 2; const my = (sa.y + sb.y) / 2;
   const text = `${lengthFt.toFixed(2)} ft · ${WALL_TYPE_SHORT[wallType] || wallType}`;
-  ctx.font = '12px -apple-system, Segoe UI, Roboto, sans-serif';
+  ctx.font = '500 12px "Segoe UI", -apple-system, sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const padding = 3;
+  const padding = 4;
   const metrics = ctx.measureText(text);
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  ctx.fillRect(mx - metrics.width / 2 - padding, my - 8 - padding, metrics.width + padding * 2, 16 + padding * 2);
-  ctx.fillStyle = '#111827';
+  // White pill with rust border accent
+  const pillX = mx - metrics.width / 2 - padding;
+  const pillY = my - 9 - padding;
+  const pillW = metrics.width + padding * 2;
+  const pillH = 18 + padding * 2;
+  ctx.fillStyle = 'white';
+  roundRect(ctx, pillX, pillY, pillW, pillH, 4);
+  ctx.fill();
+  ctx.strokeStyle = '#E5E7EB';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = LABEL_TEXT;
   ctx.fillText(text, mx, my);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
 }
 
 function drawOpening(ctx, opening, walls, corners, vp, selected) {
@@ -1213,7 +1256,7 @@ function drawOpening(ctx, opening, walls, corners, vp, selected) {
   const ux = (bS.x - aS.x) / len, uy = (bS.y - aS.y) / len;
   const nx = -uy, ny = ux;
   const halfL = OPENING_MARKER_HALF_LEN_PX, halfT = OPENING_MARKER_HALF_THICK_PX;
-  const fill = opening.type === 'door' ? '#16a34a' : '#2563eb';
+  const fill = opening.type === 'door' ? DOOR_COLOR : WINDOW_COLOR;
   const corners4 = [
     [sc.x - halfL * ux + halfT * nx, sc.y - halfL * uy + halfT * ny],
     [sc.x + halfL * ux + halfT * nx, sc.y + halfL * uy + halfT * ny],
@@ -1221,10 +1264,14 @@ function drawOpening(ctx, opening, walls, corners, vp, selected) {
     [sc.x - halfL * ux - halfT * nx, sc.y - halfL * uy - halfT * ny],
   ];
   if (selected) {
-    ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 3;
+    ctx.save();
+    ctx.shadowColor = 'rgba(217,119,6,0.5)';
+    ctx.shadowBlur = 8;
+    ctx.strokeStyle = ACCENT_RUST; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(corners4[0][0], corners4[0][1]);
     for (let i = 1; i < 4; i++) ctx.lineTo(corners4[i][0], corners4[i][1]);
     ctx.closePath(); ctx.stroke();
+    ctx.restore();
   }
   ctx.fillStyle = fill;
   ctx.beginPath(); ctx.moveTo(corners4[0][0], corners4[0][1]);
@@ -1233,7 +1280,7 @@ function drawOpening(ctx, opening, walls, corners, vp, selected) {
 
   const presetLabel = findPresetLabel(opening.type, opening.rough_opening_width, opening.rough_opening_height);
   const labelText = opening.label || presetLabel;
-  ctx.font = '11px -apple-system, Segoe UI, Roboto, sans-serif';
+  ctx.font = '500 11px "Segoe UI", -apple-system, sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   const offX = sc.x + 14 * nx;
   const offY = sc.y + 14 * ny;

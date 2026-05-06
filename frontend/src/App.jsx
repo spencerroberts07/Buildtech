@@ -26,20 +26,44 @@ function useAuth() {
   return { token, user, login, logout };
 }
 
+function BrandLogo() {
+  return (
+    <div className="brand">
+      <div className="brand-mark" aria-hidden="true">BT</div>
+      <span className="brand-text">BuildTech</span>
+    </div>
+  );
+}
+
 function Shell({ user, onLogout, children }) {
   return (
     <div className="app-shell">
-      <div className="topbar">
-        <strong>Takeoff</strong>
-        <NavLink to="/projects" className={({isActive}) => isActive ? 'active' : ''}>Projects</NavLink>
-        <NavLink to="/assemblies" className={({isActive}) => isActive ? 'active' : ''}>Assemblies</NavLink>
-        <NavLink to="/materials" className={({isActive}) => isActive ? 'active' : ''}>Materials</NavLink>
-        <NavLink to="/settings" className={({isActive}) => isActive ? 'active' : ''}>Settings</NavLink>
+      <header className="topbar">
+        <BrandLogo />
         <div className="spacer" />
+        <NavLink to="/settings" className="topbar-link">Settings</NavLink>
         <span className="user">{user?.username}</span>
-        <button onClick={onLogout}>Log out</button>
+        <button className="topbar-btn" onClick={onLogout}>Log out</button>
+      </header>
+      <div className="app-body">
+        <aside className="app-sidebar">
+          <div className="sidebar-section-title">Navigation</div>
+          <nav className="sidebar-nav">
+            <NavLink to="/projects" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
+              Projects
+            </NavLink>
+            <NavLink to="/assemblies" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
+              Assemblies
+            </NavLink>
+            <NavLink to="/materials" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
+              Materials
+            </NavLink>
+          </nav>
+        </aside>
+        <main className="app-main">
+          <div className="container">{children}</div>
+        </main>
       </div>
-      <div className="container">{children}</div>
     </div>
   );
 }
@@ -51,7 +75,7 @@ export default function App() {
   if (!auth.token) {
     return (
       <Routes>
-        <Route path="/login" element={<Login onLogin={(t,u) => { auth.login(t,u); navigate('/projects'); }} />} />
+        <Route path="/login" element={<Login onLogin={(t, u) => { auth.login(t, u); navigate('/projects'); }} />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     );
