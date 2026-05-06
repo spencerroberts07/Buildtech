@@ -4,12 +4,18 @@ import assert from 'node:assert/strict';
 import {
   computeWallMaterials,
   computeProjectMaterials,
+  computeFloorPlanMaterials,
+  computeRoofMaterials,
+  buildFloorPlanWalls,
   sumMaterials,
   resolveProjectSettings,
+  sectionFor,
   SECTIONS,
   SECTION_ORDER,
+  LEVELS,
   INSULATION_TYPES,
   SILVERBOARD_TYPES,
+  ROOF_PITCH_MULTIPLIER,
 } from './wallRules.js';
 
 let passed = 0;
@@ -41,25 +47,23 @@ test('silverboard project override', () => {
 });
 
 console.log('\n=== Section names match the spec exactly ===');
-test('SECTIONS contains all 7 expected subsection labels', () => {
-  assert.equal(SECTIONS.EXTERIOR_WALLS,      'First Floor — Exterior Walls');
-  assert.equal(SECTIONS.INSULATION,          'First Floor — Insulation');
+test('SECTIONS pins to Floor 1 prefix labels', () => {
+  assert.equal(SECTIONS.EXTERIOR_WALLS,      'Floor 1 — Exterior Walls');
+  assert.equal(SECTIONS.INSULATION,          'Floor 1 — Insulation');
   assert.equal(SECTIONS.EXTERIOR_INSULATION, 'Exterior Insulation');
-  assert.equal(SECTIONS.INTERIOR_WALLS,      'First Floor — Interior Walls');
-  assert.equal(SECTIONS.WINDOWS,             'First Floor — Windows');
-  assert.equal(SECTIONS.DOORS,               'First Floor — Doors');
-  assert.equal(SECTIONS.FINISHINGS,          'First Floor — Finishings');
+  assert.equal(SECTIONS.INTERIOR_WALLS,      'Floor 1 — Interior Walls');
+  assert.equal(SECTIONS.WINDOWS,             'Floor 1 — Windows');
+  assert.equal(SECTIONS.DOORS,               'Floor 1 — Doors');
+  assert.equal(SECTIONS.FINISHINGS,          'Floor 1 — Finishings');
 });
-test('SECTION_ORDER matches: Ext Walls → Insul → Ext Insul → Int Walls → Windows → Doors → Finishings', () => {
-  assert.deepEqual(SECTION_ORDER, [
-    SECTIONS.EXTERIOR_WALLS,
-    SECTIONS.INSULATION,
-    SECTIONS.EXTERIOR_INSULATION,
-    SECTIONS.INTERIOR_WALLS,
-    SECTIONS.WINDOWS,
-    SECTIONS.DOORS,
-    SECTIONS.FINISHINGS,
-  ]);
+test('SECTION_ORDER includes all level groupings then solo sections', () => {
+  // Floor 1 sections all present in correct order relative to each other
+  const idx = (s) => SECTION_ORDER.indexOf(s);
+  assert.ok(idx(SECTIONS.EXTERIOR_WALLS) < idx(SECTIONS.INSULATION));
+  assert.ok(idx(SECTIONS.INSULATION) < idx(SECTIONS.INTERIOR_WALLS));
+  assert.ok(idx(SECTIONS.INTERIOR_WALLS) < idx(SECTIONS.WINDOWS));
+  assert.ok(idx(SECTIONS.WINDOWS) < idx(SECTIONS.DOORS));
+  assert.ok(idx(SECTIONS.DOORS) < idx(SECTIONS.FINISHINGS));
 });
 
 console.log('\n=== Round-up: lumberyards do not sell partial units ===');
@@ -432,6 +436,253 @@ test('zero-length wall produces no items', () => {
 });
 test('empty walls list produces no project items', () => {
   assert.equal(computeProjectMaterials([], baseSettings).length, 0);
+});
+
+console.log('\n=== Floor plan polygon ===');
+test('buildFloorPlanWalls: rectangle 24×30 produces 4 walls with correct edge lengths', () => {
+  const corners = [{x:0,y:0},{x:24,y:0},{x:24,y:30},{x:0,y:30}];
+  const walls = buildFloorPlanWalls(corners, []);
+  assert.equal(walls.length, 4);
+  // Edge 0: (0,0)→(24,0) length 24
+  // Edge 1: (24,0)→(24,30) length 30
+  // Edge 2: (24,30)→(0,30) length 24
+  // Edge 3: (0,30)→(0,0) length 30
+  const lens = walls.map((w) => Math.sqrt((w.x2-w.x1)**2 + (w.y2-w.y1)**2));
+  assert.deepEqual(lens, [24, 30, 24, 30]);
+  // All default to exterior_2x6
+  for (const w of walls) assert.equal(w.wall_type, 'exterior_2x6');
+});
+test('buildFloorPlanWalls: empty/insufficient corners returns []', () => {
+  assert.deepEqual(buildFloorPlanWalls([], []), []);
+  assert.deepEqual(buildFloorPlanWalls([{x:0,y:0}], []), []);
+  assert.deepEqual(buildFloorPlanWalls([{x:0,y:0},{x:1,y:0}], []), []);
+});
+test('buildFloorPlanWalls: per-edge wall_type override flows from floor_plan_walls', () => {
+  const corners = [{x:0,y:0},{x:10,y:0},{x:10,y:10},{x:0,y:10}];
+  const fpWalls = [
+    { id: 1, wall_index: 0, wall_type: 'exterior_2x6' },
+    { id: 2, wall_index: 1, wall_type: 'interior_2x4' },
+    { id: 3, wall_index: 2, wall_type: 'exterior_2x6' },
+    { id: 4, wall_index: 3, wall_type: 'interior_2x6' },
+  ];
+  const walls = buildFloorPlanWalls(corners, fpWalls);
+  assert.equal(walls[0].wall_type, 'exterior_2x6');
+  assert.equal(walls[1].wall_type, 'interior_2x4');
+  assert.equal(walls[2].wall_type, 'exterior_2x6');
+  assert.equal(walls[3].wall_type, 'interior_2x6');
+});
+
+console.log('\n=== 24×30 rectangle floor plan worked example ===');
+const rectCorners = [{x:0,y:0},{x:24,y:0},{x:24,y:30},{x:0,y:30}];
+const rectFpWalls = [
+  { id: 1, wall_index: 0, wall_type: 'exterior_2x6' },
+  { id: 2, wall_index: 1, wall_type: 'exterior_2x6' },
+  { id: 3, wall_index: 2, wall_type: 'exterior_2x6' },
+  { id: 4, wall_index: 3, wall_type: 'exterior_2x6' },
+];
+const rectItems = computeFloorPlanMaterials(rectCorners, rectFpWalls, baseSettings, []);
+const rectRolled = sumMaterials(rectItems);
+
+const expectedRect = [
+  [SECTIONS.EXTERIOR_WALLS, 'Bottom Plate', '2 X 6 X 16 PREMIUM SPRUCE', 9],
+  [SECTIONS.EXTERIOR_WALLS, 'Top Plate',    '2 X 6 X 16 PREMIUM SPRUCE', 15],
+  [SECTIONS.EXTERIOR_WALLS, 'Studs',        '2 X 6 X 104-5/8 PREMIUM SPRUCE', 86],
+  [SECTIONS.EXTERIOR_WALLS, 'Sheathing',    '4 X 8 - 7/16 ORIENTED STRAND BOARD', 36],
+  [SECTIONS.EXTERIOR_WALLS, 'Building Wrap', "9'X100' TYPAR HOUSEWRAP", 2],
+  [SECTIONS.EXTERIOR_WALLS, 'Building Wrap Tape', 'TAPE,SHEATHING PLY RED 60MMX55M', 1],
+  [SECTIONS.EXTERIOR_WALLS, 'Sill Gasket', 'GASKET,SILL 3/16 WHITE 5.5X82', 2],
+  [SECTIONS.EXTERIOR_WALLS, 'Wall Bracing', '2 X 4 X 16 PREMIUM SPRUCE', 14],
+  [SECTIONS.INSULATION,     'Insulation',   'R22-15 FIBREGLASS INSUL. 49.0 SQ FT', 20],
+  [SECTIONS.EXTERIOR_INSULATION, 'Exterior Insulation', 'SILVERBOARD GRAPHITE 4X8 1" R5', 36],
+  [SECTIONS.FINISHINGS,     'Drywall',      '4 X 12 - 1/2 DRYWALL', 25],
+];
+for (const [section, category, name, qty] of expectedRect) {
+  test(`rectangle ${category} / ${name} = ${qty}`, () => {
+    const r = rectRolled.find((x) => x.section === section && x.category === category && x.name === name);
+    assert.ok(r, `row missing: ${section} / ${category} / ${name}`);
+    assert.equal(r.quantity, qty);
+  });
+}
+
+console.log('\n=== L-shape floor plan (6 corners) ===');
+test('L-shape produces 6 walls with correct edge lengths', () => {
+  // L-shape: (0,0)→(20,0)→(20,10)→(10,10)→(10,20)→(0,20)→back to (0,0)
+  const corners = [
+    {x:0,y:0},{x:20,y:0},{x:20,y:10},
+    {x:10,y:10},{x:10,y:20},{x:0,y:20},
+  ];
+  const walls = buildFloorPlanWalls(corners, []);
+  assert.equal(walls.length, 6);
+  const lens = walls.map((w) => Math.round(Math.sqrt((w.x2-w.x1)**2 + (w.y2-w.y1)**2)));
+  assert.deepEqual(lens, [20, 10, 10, 10, 10, 20]);
+  // Total perimeter = 80 lf
+});
+
+console.log('\n=== Corner drag invariance ===');
+test('moving one corner changes only the two adjacent edge lengths', () => {
+  const before = buildFloorPlanWalls(
+    [{x:0,y:0},{x:24,y:0},{x:24,y:30},{x:0,y:30}], [],
+  );
+  // Move ONLY corner 1 from (24,0) to (30,0); corner 2 stays at (24,30)
+  const after = buildFloorPlanWalls(
+    [{x:0,y:0},{x:30,y:0},{x:24,y:30},{x:0,y:30}], [],
+  );
+  const lenOf = (w) => Math.sqrt((w.x2-w.x1)**2 + (w.y2-w.y1)**2);
+  // Edge 0: was 24 (0,0→24,0), now 30 (0,0→30,0)
+  assert.equal(lenOf(before[0]), 24);
+  assert.equal(lenOf(after[0]), 30);
+  // Edge 1: was 30 (24,0→24,30), now sqrt(36+900)=30.59 (30,0→24,30)
+  assert.ok(Math.abs(lenOf(after[1]) - Math.sqrt(36 + 900)) < 1e-9);
+  // Edges 2 and 3 untouched
+  assert.equal(lenOf(before[2]), lenOf(after[2]));
+  assert.equal(lenOf(before[3]), lenOf(after[3]));
+});
+
+console.log('\n=== Openings tied to floor_plan_wall_id ===');
+test('opening with floor_plan_wall_id deducts area from its edge', () => {
+  const corners = [{x:0,y:0},{x:24,y:0},{x:24,y:9},{x:0,y:9}];
+  const fpWalls = [
+    { id: 100, wall_index: 0, wall_type: 'exterior_2x6' },
+    { id: 101, wall_index: 1, wall_type: 'exterior_2x6' },
+    { id: 102, wall_index: 2, wall_type: 'exterior_2x6' },
+    { id: 103, wall_index: 3, wall_type: 'exterior_2x6' },
+  ];
+  // Opening on edge 0 (the 24ft wall, but height = 9 from corners y-extent? No — height comes from settings)
+  // Actually edges in this rectangle have computed length-by-distance: edge 0 = 24, edge 1 = 9, edge 2 = 24, edge 3 = 9.
+  // Wall height is 9ft (default).
+  // Edge 0 area = 24×9 = 216 sf. Opening 36×48 (12 sf) on edge 0 → net 204 sf for sheathing on that edge.
+  const opens = [
+    { id: 1, floor_plan_wall_id: 100, type: 'window', rough_opening_width: 36, rough_opening_height: 48 },
+  ];
+  const items = computeFloorPlanMaterials(corners, fpWalls, baseSettings, opens);
+  const rolled = sumMaterials(items);
+  // Sheathing across all 4 walls: 24×9, 9×9, 24×9, 9×9 = 216+81+216+81 = 594 sf gross
+  //   Edge 0 (with deduction): ceil((216-12)/32)*1.10 = ceil(204/32)=7 ×1.10 = 7.7
+  //   Edge 1: ceil(81/32)=3 ×1.10 = 3.3
+  //   Edge 2: ceil(216/32)=7 ×1.10 = 7.7
+  //   Edge 3: ceil(81/32)=3 ×1.10 = 3.3
+  //   Total: 22.0 → ceil 22
+  const r = rolled.find((x) => x.category === 'Sheathing');
+  assert.equal(r.quantity, 22);
+});
+
+console.log('\n=== Multi-storey: section labels ===');
+test('Default level is Floor 1; SECTIONS pin to Floor 1', () => {
+  assert.equal(SECTIONS.EXTERIOR_WALLS, 'Floor 1 — Exterior Walls');
+  assert.equal(SECTIONS.FINISHINGS, 'Floor 1 — Finishings');
+});
+test('sectionFor produces level-prefixed labels', () => {
+  assert.equal(sectionFor('EXTERIOR_WALLS', 'foundation'), 'Foundation — Exterior Walls');
+  assert.equal(sectionFor('EXTERIOR_WALLS', 'floor1'), 'Floor 1 — Exterior Walls');
+  assert.equal(sectionFor('EXTERIOR_WALLS', 'floor2'), 'Floor 2 — Exterior Walls');
+  assert.equal(sectionFor('EXTERIOR_INSULATION', 'floor2'), 'Exterior Insulation');
+  assert.equal(sectionFor('ROOF', 'roof'), 'Roof');
+});
+test('SECTION_ORDER places Foundation before Floor 1 before Floor 2', () => {
+  const i1 = SECTION_ORDER.indexOf('Foundation — Exterior Walls');
+  const i2 = SECTION_ORDER.indexOf('Floor 1 — Exterior Walls');
+  const i3 = SECTION_ORDER.indexOf('Floor 2 — Exterior Walls');
+  const iRoof = SECTION_ORDER.indexOf('Roof');
+  const iExtIns = SECTION_ORDER.indexOf('Exterior Insulation');
+  assert.ok(i1 >= 0 && i2 > i1 && i3 > i2);
+  assert.ok(iRoof > i3);
+  assert.ok(iExtIns > i3);
+});
+
+console.log('\n=== Multi-storey: per-level materials ===');
+test('Floor 2 wall materials use Floor 2 — prefix', () => {
+  const proj = { ...PG_PROJECT, floor2_wall_height: '8' };
+  const settings = resolveProjectSettings(proj, PG_GLOBAL, 'floor2');
+  assert.equal(settings.wallHeight, 8);
+  const wall = { x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
+  const items = sumMaterials(computeWallMaterials(wall, settings, [], 'floor2'));
+  // Plates land in Floor 2 — Exterior Walls
+  assert.ok(items.find((r) => r.section === 'Floor 2 — Exterior Walls' && r.category === 'Bottom Plate'));
+  // Studs use 92-5/8 precut for 8ft wall
+  const studs = items.find((r) => r.category === 'Studs');
+  assert.equal(studs.name, '2 X 6 X 92-5/8 PREMIUM SPRUCE');
+  assert.equal(studs.section, 'Floor 2 — Exterior Walls');
+});
+test('Floor 1 + Floor 2 stacked rectangles produce per-level prefixes (no merging)', () => {
+  const corners = [{x:0,y:0},{x:24,y:0},{x:24,y:30},{x:0,y:30}];
+  const fpWalls = [
+    { id: 1, wall_index: 0, wall_type: 'exterior_2x6' },
+    { id: 2, wall_index: 1, wall_type: 'exterior_2x6' },
+    { id: 3, wall_index: 2, wall_type: 'exterior_2x6' },
+    { id: 4, wall_index: 3, wall_type: 'exterior_2x6' },
+  ];
+  const settings1 = resolveProjectSettings(PG_PROJECT, PG_GLOBAL, 'floor1');
+  const items1 = computeFloorPlanMaterials(corners, fpWalls, settings1, [], 'floor1');
+  const fpWalls2 = [
+    { id: 5, wall_index: 0, wall_type: 'exterior_2x6' },
+    { id: 6, wall_index: 1, wall_type: 'exterior_2x6' },
+    { id: 7, wall_index: 2, wall_type: 'exterior_2x6' },
+    { id: 8, wall_index: 3, wall_type: 'exterior_2x6' },
+  ];
+  const settings2 = resolveProjectSettings({ ...PG_PROJECT, floor2_wall_height: '8' }, PG_GLOBAL, 'floor2');
+  const items2 = computeFloorPlanMaterials(corners, fpWalls2, settings2, [], 'floor2');
+  const rolled = sumMaterials([...items1, ...items2]);
+  // Both levels' housewrap appear as separate rows (per-level rollup, M1)
+  const f1Wrap = rolled.find((r) => r.section === 'Floor 1 — Exterior Walls' && r.name === "9'X100' TYPAR HOUSEWRAP");
+  const f2Wrap = rolled.find((r) => r.section === 'Floor 2 — Exterior Walls' && r.name === "9'X100' TYPAR HOUSEWRAP");
+  assert.ok(f1Wrap); assert.ok(f2Wrap);
+  // Floor 2 studs are 92-5/8 (different SKU from Floor 1)
+  assert.ok(rolled.find((r) => r.section === 'Floor 2 — Exterior Walls' && r.name === '2 X 6 X 92-5/8 PREMIUM SPRUCE'));
+  assert.ok(rolled.find((r) => r.section === 'Floor 1 — Exterior Walls' && r.name === '2 X 6 X 104-5/8 PREMIUM SPRUCE'));
+  // Silverboard merges across levels (no level prefix)
+  const allSilver = rolled.filter((r) => r.name === 'SILVERBOARD GRAPHITE 4X8 1" R5');
+  assert.equal(allSilver.length, 1);
+  assert.equal(allSilver[0].section, 'Exterior Insulation');
+});
+
+console.log('\n=== Roof materials (Session 3) ===');
+test('Pitch multipliers match spec: 6:12 ≈ 1.118', () => {
+  assert.ok(Math.abs(ROOF_PITCH_MULTIPLIER['6:12'] - Math.sqrt(1 + 0.25)) < 1e-9);
+});
+test('40×50 roof, 6:12 pitch, 24" oc, 1/2 CSP plywood: ~154 sheets, 2 boxes H-clips', () => {
+  const items = computeRoofMaterials({
+    width_ft: 40, depth_ft: 50, pitch: '6:12',
+    sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc',
+  });
+  const rolled = sumMaterials(items);
+  // Roof area = 40 × 50 × 1.118... × 2 = ~4472 sf
+  // ceil(4472/32) = 140, × 1.10 = 154 sheets
+  const sheath = rolled.find((r) => r.category === 'Sheathing' && r.name === '4 X 8 - 1/2 CSP PLYWOOD');
+  assert.equal(sheath.quantity, 154);
+  // H-clips: 140 × 2 × 1.05 = 294 / 250 = ceil(1.176) = 2 boxes
+  const clips = rolled.find((r) => r.name === 'H-CLIPS ROOF 250/BOX 20GA 1/2');
+  assert.equal(clips.quantity, 2);
+  assert.equal(clips.unit, 'BX');
+  // Hurricane ties: perimeter 180, spacing 2 → 90 ties
+  const ties = rolled.find((r) => r.name === 'HURRICANE TIE H2.5A');
+  assert.equal(ties.quantity, 90);
+  // Blocking: 180/12 = 15 boards
+  const block = rolled.find((r) => r.name === '2 X 6 X 16 PREMIUM SPRUCE' && r.category === 'Blocking');
+  assert.equal(block.quantity, 15);
+});
+test('All roof rows land in section "Roof" (no level prefix)', () => {
+  const items = computeRoofMaterials({
+    width_ft: 40, depth_ft: 50, pitch: '6:12',
+    sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc',
+  });
+  for (const it of items) assert.equal(it.section, 'Roof');
+});
+test('Empty roof returns []', () => {
+  assert.deepEqual(computeRoofMaterials(null), []);
+  assert.deepEqual(computeRoofMaterials({ width_ft: 0, depth_ft: 50 }), []);
+});
+test('16" oc spacing yields 3 clips per sheet (more H-clips, more blocking)', () => {
+  const items = computeRoofMaterials({
+    width_ft: 40, depth_ft: 50, pitch: '6:12',
+    sheathing_type: 'osb_7_16', rafter_spacing: '16_oc',
+  });
+  const rolled = sumMaterials(items);
+  // 140 sheets × 3 × 1.05 = 441 / 250 = 2 boxes
+  const clips = rolled.find((r) => r.name === 'H-CLIPS ROOF 250/BOX 20GA 1/2');
+  assert.equal(clips.quantity, 2);
+  // Hurricane ties: 180/(16/12) = 180 × 0.75 = 135 ties
+  const ties = rolled.find((r) => r.name === 'HURRICANE TIE H2.5A');
+  assert.equal(ties.quantity, 135);
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.`);

@@ -14,6 +14,7 @@ export default function ProjectDetail() {
   const [globalSettings, setGlobalSettings] = useState(null);
   const [openings, setOpenings] = useState([]);
   const [walls, setWalls] = useState([]);
+  const [floorPlanWalls, setFloorPlanWalls] = useState([]);
   const [tab, setTab] = useState('measurements');
   const [error, setError] = useState('');
   // Per-section collapsed state (true = collapsed, false/undefined = expanded)
@@ -30,7 +31,7 @@ export default function ProjectDetail() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [p, a, ml, ps, gs, ws, ops] = await Promise.all([
+      const [p, a, ml, ps, gs, ws, ops, fps] = await Promise.all([
         api.getProject(id),
         api.listAssemblies(),
         api.materialList(id),
@@ -38,6 +39,7 @@ export default function ProjectDetail() {
         api.getSettings(),
         api.listWalls(id),
         api.listOpenings(id),
+        api.listFloorPlans(id),
       ]);
       setProject(p);
       setAssemblies(a);
@@ -46,6 +48,14 @@ export default function ProjectDetail() {
       setGlobalSettings(gs);
       setWalls(ws);
       setOpenings(ops);
+      // For now there's just one floor plan per project — fetch its walls for the openings table label
+      if (fps && fps[0]) {
+        const full = await api.getFloorPlan(id, fps[0].id);
+        setFloorPlanWalls(full.walls || []);
+        setOpenings(full.openings || ops);
+      } else {
+        setFloorPlanWalls([]);
+      }
     } catch (e) { setError(e.message); }
   }, [id]);
 
@@ -56,9 +66,18 @@ export default function ProjectDetail() {
 
   const refetchOpenings = useCallback(async () => {
     try {
-      const [ops, ws] = await Promise.all([api.listOpenings(id), api.listWalls(id)]);
-      setOpenings(ops);
-      setWalls(ws);
+      const fps = await api.listFloorPlans(id);
+      if (fps && fps[0]) {
+        const full = await api.getFloorPlan(id, fps[0].id);
+        setFloorPlanWalls(full.walls || []);
+        setOpenings(full.openings || []);
+        setWalls(await api.listWalls(id));
+      } else {
+        const [ops, ws] = await Promise.all([api.listOpenings(id), api.listWalls(id)]);
+        setOpenings(ops);
+        setWalls(ws);
+        setFloorPlanWalls([]);
+      }
     } catch (e) { setError(e.message); }
   }, [id]);
 
@@ -205,6 +224,7 @@ export default function ProjectDetail() {
         <Sketch
           projectId={id}
           projectSettings={projectSettings}
+          numStoreys={Number(project.num_storeys) || 1}
           onProjectSettingsChange={handleProjectSettingsChange}
           onMaterialsChanged={refetchMaterialList}
           onOpeningsChanged={refetchOpenings}
@@ -219,7 +239,7 @@ export default function ProjectDetail() {
         />
       )}
 
-      <OpeningsTable openings={openings} walls={walls} />
+      <OpeningsTable openings={openings} walls={walls} floorPlanWalls={floorPlanWalls} />
 
       <h2>Material list</h2>
       <p className="muted" style={{ marginTop: 0 }}>

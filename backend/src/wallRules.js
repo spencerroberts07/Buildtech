@@ -6,26 +6,71 @@
 
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
-// ---------- sections (floor-prefixed subsections) ----------
-export const SECTIONS = {
-  EXTERIOR_WALLS:      'First Floor — Exterior Walls',
-  INSULATION:          'First Floor — Insulation',
+// ---------- sections (level-prefixed subsections) ----------
+export const LEVELS = {
+  FOUNDATION: 'foundation',
+  FLOOR1: 'floor1',
+  FLOOR2: 'floor2',
+  ROOF: 'roof',
+};
+export const LEVEL_LABELS = {
+  foundation: 'Foundation',
+  floor1: 'Floor 1',
+  floor2: 'Floor 2',
+  roof: 'Roof',
+};
+const BASE_SECTIONS = {
+  EXTERIOR_WALLS: 'Exterior Walls',
+  INSULATION: 'Insulation',
+  INTERIOR_WALLS: 'Interior Walls',
+  WINDOWS: 'Windows',
+  DOORS: 'Doors',
+  FINISHINGS: 'Finishings',
+};
+const SOLO_SECTIONS = {
   EXTERIOR_INSULATION: 'Exterior Insulation',
-  INTERIOR_WALLS:      'First Floor — Interior Walls',
-  WINDOWS:             'First Floor — Windows',
-  DOORS:               'First Floor — Doors',
-  FINISHINGS:          'First Floor — Finishings',
+  ROOF: 'Roof',
 };
 
-export const SECTION_ORDER = [
-  SECTIONS.EXTERIOR_WALLS,
-  SECTIONS.INSULATION,
-  SECTIONS.EXTERIOR_INSULATION,
-  SECTIONS.INTERIOR_WALLS,
-  SECTIONS.WINDOWS,
-  SECTIONS.DOORS,
-  SECTIONS.FINISHINGS,
-];
+export function sectionFor(baseKey, level = LEVELS.FLOOR1) {
+  if (baseKey === 'EXTERIOR_INSULATION') return SOLO_SECTIONS.EXTERIOR_INSULATION;
+  if (baseKey === 'ROOF') return SOLO_SECTIONS.ROOF;
+  const base = BASE_SECTIONS[baseKey];
+  if (!base) throw new Error(`Unknown base section: ${baseKey}`);
+  const lvl = LEVEL_LABELS[level] || LEVEL_LABELS.floor1;
+  return `${lvl} — ${base}`;
+}
+
+// Backward-compatible flat constants (default to Floor 1 — used by existing tests).
+export const SECTIONS = {
+  EXTERIOR_WALLS:      sectionFor('EXTERIOR_WALLS', LEVELS.FLOOR1),
+  INSULATION:          sectionFor('INSULATION', LEVELS.FLOOR1),
+  EXTERIOR_INSULATION: SOLO_SECTIONS.EXTERIOR_INSULATION,
+  INTERIOR_WALLS:      sectionFor('INTERIOR_WALLS', LEVELS.FLOOR1),
+  WINDOWS:             sectionFor('WINDOWS', LEVELS.FLOOR1),
+  DOORS:               sectionFor('DOORS', LEVELS.FLOOR1),
+  FINISHINGS:          sectionFor('FINISHINGS', LEVELS.FLOOR1),
+  ROOF:                SOLO_SECTIONS.ROOF,
+};
+
+// Section order: every level's sections in order, then no-prefix solos.
+function buildSectionOrder() {
+  const out = [];
+  for (const level of [LEVELS.FOUNDATION, LEVELS.FLOOR1, LEVELS.FLOOR2]) {
+    out.push(
+      sectionFor('EXTERIOR_WALLS', level),
+      sectionFor('INSULATION', level),
+      sectionFor('INTERIOR_WALLS', level),
+      sectionFor('WINDOWS', level),
+      sectionFor('DOORS', level),
+      sectionFor('FINISHINGS', level),
+    );
+  }
+  out.push(SOLO_SECTIONS.ROOF);
+  out.push(SOLO_SECTIONS.EXTERIOR_INSULATION);
+  return out;
+}
+export const SECTION_ORDER = buildSectionOrder();
 
 export function sectionRank(section) {
   if (!section) return SECTION_ORDER.length + 1;
@@ -67,6 +112,8 @@ export const CATEGORY_ORDER = [
   CATEGORIES.INSULATION,
   CATEGORIES.PLATE_POLY,
   CATEGORIES.DRYWALL,
+  'Hardware',
+  'Blocking',
 ];
 export function categoryRank(category) {
   if (!category) return CATEGORY_ORDER.length + 1;
@@ -175,11 +222,22 @@ function wallHeightFt(wall, settings) {
 }
 
 // ---------- settings resolver ----------
-export function resolveProjectSettings(projectRow, globalRow) {
+export function resolveProjectSettings(projectRow, globalRow, level = LEVELS.FLOOR1) {
   const g = globalRow || {};
   const p = projectRow || {};
+  // Per-level wall height default. Foundation has no default (per-wall only);
+  // Floor 1 → project.default_wall_height; Floor 2 → project.floor2_wall_height.
+  let levelHeight = null;
+  if (level === LEVELS.FLOOR2) {
+    levelHeight = num(p.floor2_wall_height) ?? 9;
+  } else if (level === LEVELS.FLOOR1) {
+    levelHeight = num(p.default_wall_height) ?? num(g.default_wall_height) ?? 9;
+  } else {
+    // Foundation/roof: no level default; per-wall only
+    levelHeight = num(p.default_wall_height) ?? num(g.default_wall_height) ?? 9;
+  }
   return {
-    wallHeight:        num(p.default_wall_height) ?? num(g.default_wall_height) ?? 9,
+    wallHeight:        levelHeight,
     exteriorSheathing: p.exterior_sheathing || g.exterior_sheathing || '7/16_osb',
     roofSheathing:     p.roof_sheathing || g.roof_sheathing || '1/2_csp',
     drywall:           p.drywall || g.drywall || '1/2_drywall',
@@ -192,7 +250,7 @@ export function resolveProjectSettings(projectRow, globalRow) {
 }
 
 // ---------- per-wall items ----------
-export function computeWallMaterials(wall, settings, wallOpenings = []) {
+export function computeWallMaterials(wall, settings, wallOpenings = [], level = LEVELS.FLOOR1) {
   const lengthFt = wallLengthFt(wall, settings.scaleFtPerGrid);
   if (lengthFt <= 0) return [];
 
@@ -208,7 +266,10 @@ export function computeWallMaterials(wall, settings, wallOpenings = []) {
   const netArea = Math.max(0, wallArea - openingArea);
 
   const isExterior = EXTERIOR_TYPES.has(wallType);
-  const wallSection = isExterior ? SECTIONS.EXTERIOR_WALLS : SECTIONS.INTERIOR_WALLS;
+  const wallSection = isExterior
+    ? sectionFor('EXTERIOR_WALLS', level)
+    : sectionFor('INTERIOR_WALLS', level);
+  const finishingsSection = sectionFor('FINISHINGS', level);
 
   const items = [];
 
@@ -235,7 +296,7 @@ export function computeWallMaterials(wall, settings, wallOpenings = []) {
 
   if (isExterior) {
     items.push({
-      section: SECTIONS.EXTERIOR_WALLS, category: CATEGORIES.SHEATHING,
+      section: wallSection, category: CATEGORIES.SHEATHING,
       name: OSB_NAME,
       unit: 'sheet',
       quantity: Math.ceil(netArea / sheetAreaFromName(OSB_NAME)) * (1 + SHEET_WASTE),
@@ -244,21 +305,21 @@ export function computeWallMaterials(wall, settings, wallOpenings = []) {
       const sb = SILVERBOARD_TYPES[settings.silverboardType];
       if (!sb) throw new Error(`Unknown silverboard_type: ${settings.silverboardType}`);
       items.push({
-        section: SECTIONS.EXTERIOR_INSULATION, category: CATEGORIES.EXTERIOR_INSULATION,
+        section: SOLO_SECTIONS.EXTERIOR_INSULATION, category: CATEGORIES.EXTERIOR_INSULATION,
         name: sb.name,
         unit: 'EA',
         quantity: Math.ceil(netArea / SILVERBOARD_SHEET_AREA_SF) * (1 + SHEET_WASTE),
       });
     }
     items.push({
-      section: SECTIONS.FINISHINGS, category: CATEGORIES.DRYWALL,
+      section: finishingsSection, category: CATEGORIES.DRYWALL,
       name: DRYWALL_NAME,
       unit: 'sheet',
       quantity: Math.ceil(netArea / sheetAreaFromName(DRYWALL_NAME)) * (1 + SHEET_WASTE),
     });
   } else {
     items.push({
-      section: SECTIONS.FINISHINGS, category: CATEGORIES.DRYWALL,
+      section: finishingsSection, category: CATEGORIES.DRYWALL,
       name: DRYWALL_NAME,
       unit: 'sheet',
       quantity: Math.ceil((netArea * 2) / sheetAreaFromName(DRYWALL_NAME)) * (1 + SHEET_WASTE),
@@ -269,7 +330,7 @@ export function computeWallMaterials(wall, settings, wallOpenings = []) {
 }
 
 // ---------- project-level rollups ----------
-export function computeProjectMaterials(walls, settings, openings = []) {
+export function computeProjectMaterials(walls, settings, openings = [], level = LEVELS.FLOOR1) {
   let totalExteriorLf = 0;
   let totalExteriorArea = 0;
   let hasInterior = false;
@@ -294,16 +355,21 @@ export function computeProjectMaterials(walls, settings, openings = []) {
   const netInsulationArea = Math.max(0, totalExteriorArea - exteriorOpeningArea);
 
   const items = [];
+  const extSection = sectionFor('EXTERIOR_WALLS', level);
+  const intSection = sectionFor('INTERIOR_WALLS', level);
+  const insSection = sectionFor('INSULATION', level);
+  const winSection = sectionFor('WINDOWS', level);
+  const doorSection = sectionFor('DOORS', level);
 
   if (totalExteriorLf > 0) {
     const wrapRolls = Math.ceil(totalExteriorLf / HOUSEWRAP_ROLL_LF);
-    items.push({ section: SECTIONS.EXTERIOR_WALLS, category: CATEGORIES.BUILDING_WRAP,
+    items.push({ section: extSection, category: CATEGORIES.BUILDING_WRAP,
       name: HOUSEWRAP_NAME, unit: 'RL', quantity: wrapRolls });
-    items.push({ section: SECTIONS.EXTERIOR_WALLS, category: CATEGORIES.BUILDING_WRAP_TAPE,
+    items.push({ section: extSection, category: CATEGORIES.BUILDING_WRAP_TAPE,
       name: WRAP_TAPE_NAME, unit: 'RL', quantity: Math.ceil(wrapRolls / 2) });
-    items.push({ section: SECTIONS.EXTERIOR_WALLS, category: CATEGORIES.SILL_GASKET,
+    items.push({ section: extSection, category: CATEGORIES.SILL_GASKET,
       name: SILL_GASKET_NAME, unit: 'RL', quantity: Math.ceil(totalExteriorLf / SILL_GASKET_ROLL_LF) });
-    items.push({ section: SECTIONS.EXTERIOR_WALLS, category: CATEGORIES.WALL_BRACING,
+    items.push({ section: extSection, category: CATEGORIES.WALL_BRACING,
       name: BRACING_NAME, unit: 'EA', quantity: Math.ceil(totalExteriorLf / BRACING_LF_PER_BRACE) });
   }
 
@@ -312,7 +378,7 @@ export function computeProjectMaterials(walls, settings, openings = []) {
     const spec = INSULATION_TYPES[key];
     if (!spec) throw new Error(`Unknown insulation type: ${key}`);
     items.push({
-      section: SECTIONS.INSULATION, category: CATEGORIES.INSULATION,
+      section: insSection, category: CATEGORIES.INSULATION,
       name: spec.name,
       unit: 'EA',
       quantity: Math.ceil(netInsulationArea / spec.coverage_sf),
@@ -320,12 +386,12 @@ export function computeProjectMaterials(walls, settings, openings = []) {
   }
 
   if (hasInterior) {
-    items.push({ section: SECTIONS.INTERIOR_WALLS, category: CATEGORIES.PLATE_POLY,
+    items.push({ section: intSection, category: CATEGORIES.PLATE_POLY,
       name: PLATE_POLY_NAME, unit: 'RL', quantity: 1 });
   }
 
   for (const o of openings) {
-    const sec = o.type === 'door' ? SECTIONS.DOORS : SECTIONS.WINDOWS;
+    const sec = o.type === 'door' ? doorSection : winSection;
     const widthFt = Number(o.rough_opening_width) / 12;
     const heightFt = Number(o.rough_opening_height) / 12;
     const headerBoards = Math.max(1, Math.ceil((widthFt + HEADER_BEARING_FT) / 16 * 2));
@@ -349,7 +415,7 @@ export function computeProjectMaterials(walls, settings, openings = []) {
   if (openings.length > 0) {
     const shimBags = Math.max(1, Math.ceil((openings.length * SHIMS_PER_OPENING) / SHIMS_PER_BAG));
     items.push({
-      section: SECTIONS.WINDOWS, category: CATEGORIES.SHIMS,
+      section: winSection, category: CATEGORIES.SHIMS,
       name: SHIMS_NAME,
       unit: 'BAG',
       quantity: shimBags,
@@ -357,6 +423,137 @@ export function computeProjectMaterials(walls, settings, openings = []) {
   }
 
   return items;
+}
+
+// ---------- floor plan (polygon) ----------
+/**
+ * Build synthetic wall rows from a closed polygon of corners.
+ * Each edge i goes from corners[i] → corners[(i+1) % corners.length].
+ * floorPlanWalls is the list of floor_plan_walls rows; the row matching
+ * `wall_index === i` provides wall_type/height/overrides; missing rows fall back
+ * to defaults (exterior_2x6, no overrides).
+ *
+ * Returns: { walls, openingsByWallId } shaped so the existing computeWallMaterials
+ * + computeProjectMaterials pipeline can be reused unchanged.
+ */
+export function buildFloorPlanWalls(corners, floorPlanWalls) {
+  if (!Array.isArray(corners) || corners.length < 3) return [];
+  const wallByIndex = new Map(
+    (floorPlanWalls || []).map((w) => [Number(w.wall_index), w])
+  );
+  const out = [];
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    const fpWall = wallByIndex.get(i) || {};
+    out.push({
+      // Use fp wall id as the synthetic id so opening lookups work
+      id: fpWall.id != null ? fpWall.id : `fp-${i}`,
+      wall_index: i,
+      x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+      wall_type: fpWall.wall_type || 'exterior_2x6',
+      height: fpWall.height != null ? fpWall.height : null,
+      sheathing_override: fpWall.sheathing_override ?? null,
+      drywall_override: fpWall.drywall_override ?? null,
+      extra_corner_studs: 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * Compute the full materials list for a closed-polygon floor plan.
+ * Wraps the existing wall + project pipelines.
+ */
+export function computeFloorPlanMaterials(corners, floorPlanWalls, settings, openings = [], level = LEVELS.FLOOR1) {
+  const walls = buildFloorPlanWalls(corners, floorPlanWalls);
+  if (walls.length === 0) return [];
+
+  const openingsByWallId = new Map();
+  for (const o of openings) {
+    const key = o.floor_plan_wall_id;
+    if (key == null) continue;
+    if (!openingsByWallId.has(key)) openingsByWallId.set(key, []);
+    openingsByWallId.get(key).push(o);
+  }
+
+  const enrichedOpenings = openings.map((o) => {
+    const w = walls.find((x) => x.id === o.floor_plan_wall_id);
+    return { ...o, wall_id: o.floor_plan_wall_id, wall_type: w?.wall_type };
+  });
+
+  const items = [];
+  for (const w of walls) {
+    items.push(...computeWallMaterials(w, settings, openingsByWallId.get(w.id) || [], level));
+  }
+  items.push(...computeProjectMaterials(walls, settings, enrichedOpenings, level));
+  return items;
+}
+
+// ---------- roof ----------
+export const ROOF_PITCH_MULTIPLIER = {
+  '4:12':  Math.sqrt(1 + (4 / 12) ** 2),
+  '6:12':  Math.sqrt(1 + (6 / 12) ** 2),
+  '8:12':  Math.sqrt(1 + (8 / 12) ** 2),
+  '10:12': Math.sqrt(1 + (10 / 12) ** 2),
+  '12:12': Math.sqrt(2),
+};
+export const ROOF_SHEATHING_NAMES = {
+  plywood_1_2_csp: '4 X 8 - 1/2 CSP PLYWOOD',
+  osb_7_16:        '4 X 8 - 7/16 ORIENTED STRAND BOARD',
+  plywood_5_8:     '4 X 8 - 5/8 PLYWOOD',
+};
+const HCLIP_NAME = 'H-CLIPS ROOF 250/BOX 20GA 1/2';
+const HCLIP_PER_BOX = 250;
+const HCLIP_WASTE = 0.05;
+const HURRICANE_TIE_NAME = 'HURRICANE TIE H2.5A';
+const ROOF_BLOCKING_NAME = '2 X 6 X 16 PREMIUM SPRUCE';
+
+/**
+ * Compute roof material rows: sheathing, H-clips, blocking, hurricane ties.
+ * roofRecord: { width_ft, depth_ft, pitch, sheathing_type, rafter_spacing }
+ * Per spec: roof_area = width × depth × pitch_multiplier × 2 (both sides).
+ */
+export function computeRoofMaterials(roofRecord) {
+  if (!roofRecord) return [];
+  const w = num(roofRecord.width_ft) ?? 0;
+  const d = num(roofRecord.depth_ft) ?? 0;
+  if (w <= 0 || d <= 0) return [];
+  const pitch = roofRecord.pitch || '6:12';
+  const mult = ROOF_PITCH_MULTIPLIER[pitch];
+  if (!mult) throw new Error(`Unknown roof pitch: ${pitch}`);
+  const sheathingKey = roofRecord.sheathing_type || 'plywood_1_2_csp';
+  const sheathingName = ROOF_SHEATHING_NAMES[sheathingKey];
+  if (!sheathingName) throw new Error(`Unknown roof sheathing type: ${sheathingKey}`);
+  const spacing = roofRecord.rafter_spacing || '24_oc';
+  const spacingInches = spacing === '16_oc' ? 16 : 24;
+  const clipsPerSheet = spacing === '16_oc' ? 3 : 2;
+
+  const roofArea = w * d * mult * 2;
+  const sheets = Math.ceil(roofArea / 32) * (1 + SHEET_WASTE);
+  // For H-clips, compute clip count from CEIL'd sheet count (whole sheets only).
+  const wholeSheets = Math.ceil(sheets - 1e-9);
+  const hclipBoxes = Math.ceil((wholeSheets * clipsPerSheet * (1 + HCLIP_WASTE)) / HCLIP_PER_BOX);
+
+  // Perimeter & blocking & hurricane ties
+  const perimeter = 2 * (w + d);
+  // Blocking: one 2 X 6 X 16 board yields ~6-8 short blocks for 24" / 16" spacing → covers
+  // ~12 ft of perimeter for 24" oc, ~8 ft for 16" oc. Approximation.
+  const blockingFtPerBoard = spacing === '16_oc' ? 8 : 12;
+  const blockingBoards = Math.ceil(perimeter / blockingFtPerBoard);
+  // Hurricane ties: 1 per rafter location
+  const hurricaneTies = Math.ceil(perimeter / (spacingInches / 12));
+
+  return [
+    { section: SOLO_SECTIONS.ROOF, category: CATEGORIES.SHEATHING,
+      name: sheathingName, unit: 'EA', quantity: sheets },
+    { section: SOLO_SECTIONS.ROOF, category: 'Hardware',
+      name: HCLIP_NAME, unit: 'BX', quantity: hclipBoxes },
+    { section: SOLO_SECTIONS.ROOF, category: 'Blocking',
+      name: ROOF_BLOCKING_NAME, unit: 'EA', quantity: blockingBoards },
+    { section: SOLO_SECTIONS.ROOF, category: 'Hardware',
+      name: HURRICANE_TIE_NAME, unit: 'EA', quantity: hurricaneTies },
+  ];
 }
 
 // ---------- rollup ----------
@@ -374,8 +571,11 @@ export function sumMaterials(items) {
       quantity: it.quantity,
     });
   }
+  // Subtract a tiny epsilon before ceil to absorb IEEE-754 noise from summing
+  // waste-adjusted floats (e.g. 7.7+3.3+7.7+3.3 = 22.000000000000004 → ceil 23).
+  // Real fractional waste is always >> 1e-9.
   return Array.from(map.values())
-    .map((r) => ({ ...r, quantity: Math.ceil(r.quantity) }))
+    .map((r) => ({ ...r, quantity: Math.max(0, Math.ceil(r.quantity - 1e-9)) }))
     .sort((a, b) => {
       const ra = sectionRank(a.section);
       const rb = sectionRank(b.section);

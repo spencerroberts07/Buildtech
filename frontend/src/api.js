@@ -71,6 +71,29 @@ export const api = {
   deleteWall: (projectId, wid) =>
     request(`/projects/${projectId}/walls/${wid}`, { method: 'DELETE' }),
 
+  listFloorPlans: (projectId) => request(`/projects/${projectId}/floor-plans`),
+  getFloorPlan: (projectId, fpid) => request(`/projects/${projectId}/floor-plans/${fpid}`),
+  createFloorPlan: (projectId, data = {}) =>
+    request(`/projects/${projectId}/floor-plans`, { method: 'POST', body: JSON.stringify(data) }),
+  updateFloorPlan: (projectId, fpid, data) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  updateFloorPlanWall: (projectId, fpid, widx, data) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}/walls/${widx}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteFloorPlanWall: (projectId, fpid, widx) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}/walls/${widx}`, { method: 'DELETE' }),
+  copyFloorPlanLevel: (projectId, from_level, to_level) =>
+    request(`/projects/${projectId}/floor-plans/copy-level`, {
+      method: 'POST', body: JSON.stringify({ from_level, to_level }),
+    }),
+
+  getRoof: (projectId) => request(`/projects/${projectId}/roof`),
+  createRoof: (projectId, data) =>
+    request(`/projects/${projectId}/roof`, { method: 'POST', body: JSON.stringify(data) }),
+  updateRoof: (projectId, data) =>
+    request(`/projects/${projectId}/roof`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteRoof: (projectId) =>
+    request(`/projects/${projectId}/roof`, { method: 'DELETE' }),
+
   listOpenings: (projectId) => request(`/projects/${projectId}/openings`),
   createOpening: (projectId, data) =>
     request(`/projects/${projectId}/openings`, { method: 'POST', body: JSON.stringify(data) }),

@@ -153,6 +153,16 @@ export default function ProjectSettings({ settings, globalSettings, onChange }) 
             <option value="silverboard_2">SILVERBOARD GRAPHITE 4X8 2" R10</option>
           </select>
         </div>
+        <div>
+          <label>Rafter / truss spacing (Roof default)</label>
+          <select
+            value={settings.rafter_spacing ?? '24_oc'}
+            onChange={(e) => onChange('rafter_spacing', e.target.value)}
+          >
+            <option value="24_oc">24" o.c.</option>
+            <option value="16_oc">16" o.c.</option>
+          </select>
+        </div>
       </div>
     </div>
   );

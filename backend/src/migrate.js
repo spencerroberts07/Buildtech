@@ -94,6 +94,48 @@ CREATE TABLE IF NOT EXISTS openings (
 
 CREATE INDEX IF NOT EXISTS openings_project_id_idx ON openings(project_id);
 CREATE INDEX IF NOT EXISTS openings_wall_id_idx ON openings(wall_id);
+
+CREATE TABLE IF NOT EXISTS floor_plans (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  level TEXT NOT NULL DEFAULT 'floor1',
+  corners JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS floor_plans_project_id_idx ON floor_plans(project_id);
+
+CREATE TABLE IF NOT EXISTS floor_plan_walls (
+  id SERIAL PRIMARY KEY,
+  floor_plan_id INTEGER NOT NULL REFERENCES floor_plans(id) ON DELETE CASCADE,
+  wall_index INTEGER NOT NULL,
+  wall_type TEXT NOT NULL DEFAULT 'exterior_2x6',
+  height NUMERIC,
+  sheathing_override TEXT,
+  drywall_override TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS floor_plan_walls_fp_idx ON floor_plan_walls(floor_plan_id);
+
+CREATE TABLE IF NOT EXISTS roofs (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  width_ft NUMERIC NOT NULL,
+  depth_ft NUMERIC NOT NULL,
+  pitch TEXT NOT NULL DEFAULT '6:12',
+  sheathing_type TEXT NOT NULL DEFAULT 'plywood_1_2_csp',
+  rafter_spacing TEXT NOT NULL DEFAULT '24_oc',
+  north_side TEXT NOT NULL DEFAULT 'gable',
+  south_side TEXT NOT NULL DEFAULT 'gable',
+  east_side TEXT NOT NULL DEFAULT 'gable',
+  west_side TEXT NOT NULL DEFAULT 'gable',
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS roofs_project_id_idx ON roofs(project_id);
 `;
 
 const PROJECT_COLUMN_ALTERS = [
@@ -116,6 +158,10 @@ const PROJECT_COLUMN_ALTERS = [
   // Project setup metadata
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS num_storeys INTEGER NOT NULL DEFAULT 1`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS floor2_wall_height INTEGER NOT NULL DEFAULT 9`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS rafter_spacing TEXT NOT NULL DEFAULT '24_oc'`,
+  // Openings: optional FK to floor_plan_walls (new polygon flow); legacy wall_id stays nullable
+  `ALTER TABLE openings ADD COLUMN IF NOT EXISTS floor_plan_wall_id INTEGER REFERENCES floor_plan_walls(id) ON DELETE CASCADE`,
+  `ALTER TABLE openings ALTER COLUMN wall_id DROP NOT NULL`,
 ];
 
 async function ensureSettings() {
