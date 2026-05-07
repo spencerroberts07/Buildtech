@@ -52,7 +52,11 @@ export default function Projects() {
                   <Link to={`/projects/${p.id}`}>{p.name}</Link>
                   <span className="storey-badge">{Number(p.num_storeys) === 2 ? '2 Storey' : '1 Storey'}</span>
                 </td>
-                <td>{p.customer || ''}</td>
+                <td>
+                  {p.customer_id ? (
+                    <Link to={`/customers/${p.customer_id}`}>{p.customer_name || p.customer || ''}</Link>
+                  ) : (p.customer || '')}
+                </td>
                 <td>{new Date(p.updated_at).toLocaleString()}</td>
                 <td><button className="danger" onClick={() => remove(p.id)}>Delete</button></td>
               </tr>

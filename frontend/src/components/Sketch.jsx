@@ -73,6 +73,7 @@ function screenToWorld(sx, sy, vp) {
   return { x: (sx - vp.panX) / (BASE_GRID_PX * vp.zoom), y: (sy - vp.panY) / (BASE_GRID_PX * vp.zoom) };
 }
 function snapWorld(p) { return { x: Math.round(p.x), y: Math.round(p.y) }; }
+function snapHalf(v) { return Math.round(v * 2) / 2; }
 function distPointToSegment(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
   const lenSq = dx * dx + dy * dy;
@@ -103,9 +104,115 @@ export default function Sketch({
   onProjectSettingsChange,
   onMaterialsChanged,
   onOpeningsChanged,
+  refetchProjectSettings,
 }) {
   const [activeLevel, setActiveLevel] = useState('floor1');
   const visibleLevels = LEVEL_TABS_BASE.filter((l) => l.value !== 'floor2' || Number(numStoreys) >= 2);
+
+  // ---- PDF state lives at this level so it survives level switches. ----
+  const pdfFilename = projectSettings?.pdf_filename || null;
+  const pdfPageStored = Number(projectSettings?.pdf_page) || 1;
+  const [pdfDoc, setPdfDoc] = useState(null);
+  const [pdfPage, setPdfPage] = useState(pdfPageStored);
+  const [pdfNumPages, setPdfNumPages] = useState(0);
+  const [pdfStatus, setPdfStatus] = useState(pdfFilename ? 'loading' : 'none'); // none | loading | ready | missing
+  const [pdfPageCanvas, setPdfPageCanvas] = useState(null);
+  const [pdfOpacity, setPdfOpacity] = useState(0.4);
+
+  // Load (or unload) the PDF when filename changes.
+  useEffect(() => {
+    let cancelled = false;
+    if (!pdfFilename) {
+      setPdfDoc(null); setPdfNumPages(0); setPdfPageCanvas(null);
+      setPdfStatus('none');
+      return () => { cancelled = true; };
+    }
+    if (!window.pdfjsLib) {
+      // Wait briefly for CDN to load; bail with missing if it never arrives.
+      let tries = 0;
+      const iv = setInterval(() => {
+        tries++;
+        if (window.pdfjsLib) { clearInterval(iv); load(); }
+        else if (tries > 20) { clearInterval(iv); setPdfStatus('missing'); }
+      }, 100);
+      return () => { cancelled = true; clearInterval(iv); };
+    }
+    load();
+    return () => { cancelled = true; };
+
+    async function load() {
+      setPdfStatus('loading');
+      try {
+        const blob = await api.fetchPdfBlob(projectId);
+        if (cancelled) return;
+        const url = URL.createObjectURL(blob);
+        const doc = await window.pdfjsLib.getDocument(url).promise;
+        if (cancelled) { URL.revokeObjectURL(url); return; }
+        setPdfDoc(doc);
+        setPdfNumPages(doc.numPages);
+        setPdfStatus('ready');
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        if (cancelled) return;
+        setPdfStatus(e.code === 'pdf_missing' ? 'missing' : 'none');
+        setPdfDoc(null); setPdfNumPages(0); setPdfPageCanvas(null);
+      }
+    }
+  }, [pdfFilename, projectId]);
+
+  // Render the selected page to an offscreen canvas whenever doc or page changes.
+  useEffect(() => {
+    let cancelled = false;
+    if (!pdfDoc) { setPdfPageCanvas(null); return; }
+    const page = Math.max(1, Math.min(pdfDoc.numPages, pdfPage));
+    pdfDoc.getPage(page).then((p) => {
+      if (cancelled) return;
+      const viewport = p.getViewport({ scale: 1 });
+      const off = document.createElement('canvas');
+      off.width = Math.ceil(viewport.width);
+      off.height = Math.ceil(viewport.height);
+      const ctx = off.getContext('2d');
+      p.render({ canvasContext: ctx, viewport }).promise.then(() => {
+        if (cancelled) return;
+        setPdfPageCanvas(off);
+      }).catch(() => {});
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [pdfDoc, pdfPage]);
+
+  async function uploadPdf(file) {
+    try {
+      await api.uploadPdf(projectId, file);
+      // The server set the canonical filename. Re-fetch settings so the load effect sees it.
+      setPdfPage(1);
+      await refetchProjectSettings?.();
+    } catch (e) {
+      alert(`Upload failed: ${e.message}`);
+    }
+  }
+
+  async function removePdf() {
+    if (!confirm('Remove the PDF underlay?')) return;
+    try {
+      await api.deletePdf(projectId);
+      setPdfDoc(null); setPdfPageCanvas(null); setPdfNumPages(0);
+      setPdfStatus('none');
+      await refetchProjectSettings?.();
+    } catch (e) { alert(`Remove failed: ${e.message}`); }
+  }
+
+  function changePage(delta) {
+    if (!pdfDoc) return;
+    const next = Math.max(1, Math.min(pdfDoc.numPages, pdfPage + delta));
+    if (next === pdfPage) return;
+    setPdfPage(next);
+    onProjectSettingsChange?.({ pdf_page: next });
+  }
+
+  const pdfControls = {
+    pdfFilename, pdfStatus, pdfNumPages, pdfPage, pdfOpacity, pdfPageCanvas,
+    setPdfOpacity, uploadPdf, removePdf, changePage,
+  };
 
   if (activeLevel === 'roof') {
     return (
@@ -127,6 +234,7 @@ export default function Sketch({
         onProjectSettingsChange={onProjectSettingsChange}
         onMaterialsChanged={onMaterialsChanged}
         onOpeningsChanged={onOpeningsChanged}
+        pdfControls={pdfControls}
       />
     </div>
   );
@@ -159,6 +267,7 @@ function PolygonSketch({
   onProjectSettingsChange,
   onMaterialsChanged,
   onOpeningsChanged,
+  pdfControls,
 }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
@@ -167,6 +276,13 @@ function PolygonSketch({
   const [corners, setCorners] = useState([]);
   const [walls, setWalls] = useState([]); // floor_plan_walls rows
   const [openings, setOpenings] = useState([]);
+  const [interiorWalls, setInteriorWalls] = useState([]); // floor_plan_interior_walls rows
+  const [drawingPhase, setDrawingPhase] = useState('exterior'); // 'exterior' | 'interior'
+  const [pendingInteriorEndpoint, setPendingInteriorEndpoint] = useState(null); // first click of a 2-click segment
+  const [selectedInteriorWallId, setSelectedInteriorWallId] = useState(null);
+  const [wallDragPreview, setWallDragPreview] = useState(null); // { idx, deltaPerp, newCorners }
+  const [hoverCursor, setHoverCursor] = useState(null); // 'move' | null
+  const [toast, setToast] = useState(null);
   const [mode, setMode] = useState('placing'); // 'placing' | 'editing'
   const [selectedCornerIdx, setSelectedCornerIdx] = useState(null);
   const [selectedWallIdx, setSelectedWallIdx] = useState(null);
@@ -185,7 +301,26 @@ function PolygonSketch({
   const dragState = useRef({ active: false, type: null, idx: null, openingId: null, moved: false });
   const cornerSaveTimer = useRef(null);
   const openingSaveTimers = useRef({});
+  const interiorWallSaveTimers = useRef({});
+  const toastTimer = useRef(null);
   const [dragLabel, setDragLabel] = useState(null);
+
+  // Auxiliary tools that take over canvas clicks (calibrate, measure).
+  // 'idle' = normal canvas behavior. 'calibrate' = pick 2 pts → enter real distance.
+  // 'measure' = pick 2 pts → persist a measurement line; repeat.
+  const [tool, setTool] = useState('idle');
+  // Click-to-pick state shared by both tools (one or two world points).
+  const [toolPoints, setToolPoints] = useState([]);
+  // Persistent measurement lines drawn while in measure mode.
+  const [measurements, setMeasurements] = useState([]);
+  // Calibration dialog state: appears once 2 points have been picked in calibrate mode.
+  const [calibDialog, setCalibDialog] = useState({ open: false, distFt: '' });
+
+  function showToast(msg) {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  }
 
   const scaleFtPerGrid = num(projectSettings?.scale_ft_per_grid) || 1;
   const wallByIndex = new Map(walls.map((w) => [Number(w.wall_index), w]));
@@ -205,6 +340,10 @@ function PolygonSketch({
         setCorners(cs);
         setWalls(full.walls || []);
         setOpenings(full.openings || []);
+        setInteriorWalls(full.interior_walls || []);
+        const phase = full.drawing_phase === 'interior' ? 'interior' : 'exterior';
+        setDrawingPhase(phase);
+        // Editing mode if polygon is closed; otherwise placing.
         setMode(cs.length >= 3 ? 'editing' : 'placing');
       } catch (e) { setError(e.message); }
     })();
@@ -219,6 +358,8 @@ function PolygonSketch({
       setCorners(Array.isArray(updated.corners) ? updated.corners : []);
       setWalls(updated.walls || []);
       setOpenings(updated.openings || []);
+      setInteriorWalls(updated.interior_walls || []);
+      setDrawingPhase(updated.drawing_phase === 'interior' ? 'interior' : 'exterior');
       setMode((updated.corners || []).length >= 3 ? 'editing' : 'placing');
       onMaterialsChanged?.();
       onOpeningsChanged?.();
@@ -272,9 +413,19 @@ function PolygonSketch({
     drawScene(ctx, canvasSize, viewport, {
       corners, walls, openings, mode, selectedCornerIdx, selectedWallIdx, selectedOpeningId,
       hoverWorld, scale: scaleFtPerGrid, dragLabel,
+      interiorWalls, selectedInteriorWallId, drawingPhase,
+      pendingInteriorEndpoint, wallDragPreview,
+      pdfPageCanvas: pdfControls?.pdfPageCanvas || null,
+      pdfOpacity: pdfControls?.pdfOpacity ?? 0.4,
+      pdfStatus: pdfControls?.pdfStatus || 'none',
+      tool, toolPoints, measurements,
     });
   }, [canvasSize, viewport, corners, walls, openings, mode, selectedCornerIdx, selectedWallIdx,
-      selectedOpeningId, hoverWorld, scaleFtPerGrid, dragLabel]);
+      selectedOpeningId, hoverWorld, scaleFtPerGrid, dragLabel,
+      interiorWalls, selectedInteriorWallId, drawingPhase,
+      pendingInteriorEndpoint, wallDragPreview,
+      pdfControls?.pdfPageCanvas, pdfControls?.pdfOpacity, pdfControls?.pdfStatus,
+      tool, toolPoints, measurements]);
 
   // ---- helpers ----
   function getMouseWorld(e) {
@@ -333,16 +484,140 @@ function PolygonSketch({
     return null;
   }
 
+  // Hit-test an interior wall (line segment). Returns { id, end: 'a' | 'b' | null }
+  // where end indicates whether the hit was on an endpoint (within CORNER_HIT_PX) or
+  // on the segment body. Null if no hit.
+  function hitTestInteriorWall(sx, sy, world) {
+    const tol = HIT_TOLERANCE_PX / (BASE_GRID_PX * viewport.zoom);
+    let best = null;
+    for (const iw of interiorWalls) {
+      const ax = Number(iw.x1), ay = Number(iw.y1);
+      const bx = Number(iw.x2), by = Number(iw.y2);
+      // Endpoint hits (priority, in screen pixels for consistency with corners)
+      const aS = worldToScreen(ax, ay, viewport);
+      const bS = worldToScreen(bx, by, viewport);
+      if (Math.hypot(aS.x - sx, aS.y - sy) <= CORNER_HIT_PX) {
+        return { id: iw.id, end: 'a' };
+      }
+      if (Math.hypot(bS.x - sx, bS.y - sy) <= CORNER_HIT_PX) {
+        return { id: iw.id, end: 'b' };
+      }
+      const d = distPointToSegment(world.x, world.y, ax, ay, bx, by);
+      if (d <= tol && (best == null || d < best.d)) best = { d, id: iw.id, end: null };
+    }
+    return best ? { id: best.id, end: null } : null;
+  }
+
+  // Find a snap target near the cursor: existing exterior corner, exterior midpoint,
+  // or interior wall endpoint. Returns world coords if within snap distance, else null.
+  function findInteriorSnapTarget(world) {
+    const tol = (CORNER_HIT_PX * 1.2) / (BASE_GRID_PX * viewport.zoom);
+    let best = null;
+    const tryPt = (x, y) => {
+      const d = Math.hypot(world.x - x, world.y - y);
+      if (d <= tol && (best == null || d < best.d)) best = { d, x, y };
+    };
+    for (const c of corners) tryPt(c.x, c.y);
+    for (let i = 0; i < corners.length; i++) {
+      const a = corners[i];
+      const b = corners[(i + 1) % corners.length];
+      tryPt((a.x + b.x) / 2, (a.y + b.y) / 2);
+    }
+    for (const iw of interiorWalls) {
+      tryPt(Number(iw.x1), Number(iw.y1));
+      tryPt(Number(iw.x2), Number(iw.y2));
+    }
+    return best ? { x: best.x, y: best.y } : null;
+  }
+
+  // Perpendicular drag math for exterior wall segment idx:
+  // returns the maximum |t| (along the perpendicular unit vector n) such that both
+  // adjacent edges keep length >= minLenWorld. Solves |v + t*n|^2 >= L^2 for each.
+  function maxPerpendicularDelta(idx, n, minLenWorld) {
+    if (corners.length < 3) return Infinity;
+    const N = corners.length;
+    const a = corners[idx];
+    const b = corners[(idx + 1) % N];
+    const c0 = corners[(idx - 1 + N) % N]; // before a
+    const c3 = corners[(idx + 2) % N];     // after b
+    const limit = (vx, vy, signOk) => {
+      // Solve (vx + t*nx)^2 + (vy + t*ny)^2 = L^2 → t^2 + 2(v·n)t + (|v|^2 - L^2) = 0
+      const vDotN = vx * n.x + vy * n.y;
+      const vSq = vx * vx + vy * vy;
+      const c = vSq - minLenWorld * minLenWorld;
+      const disc = vDotN * vDotN - c;
+      if (disc < 0) return 0; // already below min — can't move further on this side
+      const sq = Math.sqrt(disc);
+      // Roots: t = -vDotN ± sq. Adjacent edge stays >= minLen for t in (-inf, t1] U [t2, inf)
+      // where t1 = -vDotN - sq, t2 = -vDotN + sq. We want the allowed window around t=0.
+      const t1 = -vDotN - sq;
+      const t2 = -vDotN + sq;
+      // Currently (t=0) length is |v|. If |v| >= minLen, t=0 is in an allowed region.
+      // The forbidden interval is (t1, t2). Allowed: t <= t1 or t >= t2.
+      if (vSq >= minLenWorld * minLenWorld) {
+        // t=0 is in allowed region. The two boundaries to clamp at are t1 and t2.
+        // Whichever is on the same side as desired sign limits motion.
+        return signOk > 0 ? Math.max(0, t2) : Math.min(0, t1);
+      }
+      return 0;
+    };
+    // Edge before: a moves to a + t*n. Length = |a' - c0| = |(a - c0) + t*n|
+    const va = { x: a.x - c0.x, y: a.y - c0.y };
+    // Edge after: b moves to b + t*n. Length = |c3 - b'| = |(c3 - b) - t*n| → equivalent to |v' - t*n| with v' = c3 - b
+    const vb = { x: c3.x - b.x, y: c3.y - b.y };
+    // For edge after: |v' - t*n|^2 = same form with vDotN replaced by -(v'·n)
+    const limitAfter = (vx, vy, signOk) => {
+      const vDotN = -(vx * n.x + vy * n.y);
+      const vSq = vx * vx + vy * vy;
+      const c = vSq - minLenWorld * minLenWorld;
+      const disc = vDotN * vDotN - c;
+      if (disc < 0) return 0;
+      const sq = Math.sqrt(disc);
+      const t1 = -vDotN - sq;
+      const t2 = -vDotN + sq;
+      if (vSq >= minLenWorld * minLenWorld) {
+        return signOk > 0 ? Math.max(0, t2) : Math.min(0, t1);
+      }
+      return 0;
+    };
+    const tPos = Math.min(limit(va.x, va.y, +1), limitAfter(vb.x, vb.y, +1));
+    const tNeg = Math.max(limit(va.x, va.y, -1), limitAfter(vb.x, vb.y, -1));
+    return { tPos, tNeg };
+  }
+
   // ---- mouse handlers ----
   function onMouseDown(e) {
     canvasRef.current.focus();
     const { sx, sy, world } = getMouseWorld(e);
-    if (e.button === 1 || (e.button === 0 && spaceDown.current)) {
+    // Pan triggers: middle-click, space+drag, or Ctrl+drag.
+    if (e.button === 1 || (e.button === 0 && (spaceDown.current || e.ctrlKey))) {
       e.preventDefault();
       panState.current = { active: true, startX: sx, startY: sy, basePan: { x: viewport.panX, y: viewport.panY } };
       return;
     }
     if (e.button !== 0) return;
+
+    // Aux tools (calibrate / measure) intercept clicks BEFORE normal canvas logic.
+    if (tool === 'calibrate' || tool === 'measure') {
+      e.preventDefault();
+      const snapped = snapWorld(world);
+      if (toolPoints.length === 0) {
+        setToolPoints([snapped]);
+      } else {
+        const a = toolPoints[0];
+        const b = snapped;
+        if (tool === 'calibrate') {
+          // Open the distance dialog; commit happens on dialog submit.
+          setCalibDialog({ open: true, distFt: '' });
+          setToolPoints([a, b]);
+        } else {
+          // measure: push the line and reset for the next pair
+          setMeasurements((cur) => [...cur, { a, b }]);
+          setToolPoints([]);
+        }
+      }
+      return;
+    }
     if (mode === 'editing') {
       // Check opening drag first
       const hitO = hitTestOpening(sx, sy);
@@ -356,6 +631,47 @@ function PolygonSketch({
       if (hitC != null) {
         e.preventDefault();
         dragState.current = { active: true, type: 'corner', idx: hitC, moved: false };
+        return;
+      }
+      // Check interior wall (endpoint drag if on endpoint, else click-to-select on body)
+      const hitI = hitTestInteriorWall(sx, sy, world);
+      if (hitI) {
+        e.preventDefault();
+        if (hitI.end) {
+          dragState.current = {
+            active: true, type: 'interior_endpoint',
+            interiorId: hitI.id, end: hitI.end, moved: false,
+            startX: sx, startY: sy,
+          };
+        } else {
+          // body of interior wall — defer to mouseUp click-select (no drag)
+          dragState.current = {
+            active: true, type: 'interior_select',
+            interiorId: hitI.id, moved: false,
+            startX: sx, startY: sy,
+          };
+        }
+        return;
+      }
+      // Check exterior wall drag zone (on the polygon edge body)
+      const hitE = hitTestEdge(world);
+      if (hitE != null) {
+        e.preventDefault();
+        const a = corners[hitE];
+        const b = corners[(hitE + 1) % corners.length];
+        const len = Math.hypot(b.x - a.x, b.y - a.y);
+        if (len > 0) {
+          const ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+          const nx = -uy, ny = ux; // perpendicular (left of direction)
+          dragState.current = {
+            active: true, type: 'wall',
+            idx: hitE, moved: false,
+            startX: sx, startY: sy,
+            startWorld: { x: world.x, y: world.y },
+            n: { x: nx, y: ny },
+            origCorners: corners.map((c) => ({ x: c.x, y: c.y })),
+          };
+        }
         return;
       }
     }
@@ -374,6 +690,59 @@ function PolygonSketch({
       const idx = dragState.current.idx;
       setCorners((cur) => cur.map((c, i) => (i === idx ? snapped : c)));
       dragState.current.moved = true;
+      return;
+    }
+    if (dragState.current.active && dragState.current.type === 'wall') {
+      const ds = dragState.current;
+      // Project world delta onto perpendicular n
+      const dxw = world.x - ds.startWorld.x;
+      const dyw = world.y - ds.startWorld.y;
+      let t = dxw * ds.n.x + dyw * ds.n.y;
+      // Snap perpendicular distance to 0.5 ft (world units == ft when scale=1)
+      t = snapHalf(t / scaleFtPerGrid) * scaleFtPerGrid;
+      // Clamp so adjacent walls stay >= 2 ft
+      const minLenWorld = 2 / scaleFtPerGrid;
+      const { tPos, tNeg } = maxPerpendicularDelta(ds.idx, ds.n, minLenWorld);
+      if (t > 0) t = Math.min(t, tPos);
+      else t = Math.max(t, tNeg);
+      // Threshold: ignore moves under 3 px in screen space
+      if (Math.hypot(sx - ds.startX, sy - ds.startY) < 3 && Math.abs(t) < 1e-9) return;
+      ds.moved = true;
+      const idx = ds.idx;
+      const N = ds.origCorners.length;
+      const newCorners = ds.origCorners.map((c, i) => {
+        if (i === idx || i === (idx + 1) % N) {
+          return { x: c.x + t * ds.n.x, y: c.y + t * ds.n.y };
+        }
+        return c;
+      });
+      setWallDragPreview({ idx, t, newCorners });
+      // Distance label at edge midpoint of the new wall position
+      const a2 = newCorners[idx];
+      const b2 = newCorners[(idx + 1) % N];
+      const mid = worldToScreen((a2.x + b2.x) / 2, (a2.y + b2.y) / 2, viewport);
+      const ftLabel = (t * scaleFtPerGrid >= 0 ? '+' : '') + (t * scaleFtPerGrid).toFixed(1);
+      setDragLabel({ x: mid.x, y: mid.y - 22, text: `${ftLabel} ft` });
+      return;
+    }
+    if (dragState.current.active && dragState.current.type === 'interior_endpoint') {
+      const ds = dragState.current;
+      const snapped = snapWorld(world);
+      // Threshold for click vs drag
+      if (!ds.moved && Math.hypot(sx - ds.startX, sy - ds.startY) < 3) return;
+      ds.moved = true;
+      setInteriorWalls((cur) => cur.map((iw) => {
+        if (iw.id !== ds.interiorId) return iw;
+        if (ds.end === 'a') return { ...iw, x1: snapped.x, y1: snapped.y };
+        return { ...iw, x2: snapped.x, y2: snapped.y };
+      }));
+      return;
+    }
+    if (dragState.current.active && dragState.current.type === 'interior_select') {
+      // Mark moved if cursor strays beyond click threshold (we still treat as click on up)
+      if (Math.hypot(sx - dragState.current.startX, sy - dragState.current.startY) >= 3) {
+        dragState.current.moved = true;
+      }
       return;
     }
     if (dragState.current.active && dragState.current.type === 'opening') {
@@ -402,10 +771,23 @@ function PolygonSketch({
       return;
     }
     setHoverWorld(snapWorld(world));
+    // Cursor hint: if hovering over an exterior edge body (and not over a corner/opening),
+    // show the move cursor for wall drag affordance.
+    if (mode === 'editing' && corners.length >= 3) {
+      const overCorner = hitTestCorner(sx, sy) != null;
+      const overOpening = !!hitTestOpening(sx, sy);
+      const overInterior = !!hitTestInteriorWall(sx, sy, world);
+      const overEdge = hitTestEdge(world) != null;
+      setHoverCursor(overEdge && !overCorner && !overOpening && !overInterior ? 'move' : null);
+    } else {
+      setHoverCursor(null);
+    }
   }
 
   function onMouseUp(e) {
     if (panState.current.active) { panState.current.active = false; return; }
+    // Calibrate / measure modes consumed the click on mousedown.
+    if (tool === 'calibrate' || tool === 'measure') return;
     if (dragState.current.active) {
       const ds = { ...dragState.current };
       dragState.current = { active: false, type: null, idx: null, openingId: null, moved: false };
@@ -424,6 +806,7 @@ function PolygonSketch({
           setSelectedCornerIdx(ds.idx);
           setSelectedWallIdx(null);
           setSelectedOpeningId(null);
+          setSelectedInteriorWallId(null);
         }
       } else if (ds.type === 'opening') {
         if (ds.moved) {
@@ -439,6 +822,54 @@ function PolygonSketch({
           setSelectedOpeningId(ds.openingId);
           setSelectedCornerIdx(null);
           setSelectedWallIdx(null);
+          setSelectedInteriorWallId(null);
+        }
+      } else if (ds.type === 'wall') {
+        if (ds.moved && wallDragPreview) {
+          const newCorners = wallDragPreview.newCorners;
+          setCorners(newCorners);
+          setWallDragPreview(null);
+          clearTimeout(cornerSaveTimer.current);
+          cornerSaveTimer.current = setTimeout(() => {
+            api.updateFloorPlan(projectId, floorPlanId, { corners: newCorners })
+              .then(() => onMaterialsChanged?.())
+              .catch((err) => setError(err.message));
+          }, 300);
+        } else {
+          // Treat as click — select the edge
+          setWallDragPreview(null);
+          setSelectedWallIdx(ds.idx);
+          setSelectedCornerIdx(null);
+          setSelectedOpeningId(null);
+          setSelectedInteriorWallId(null);
+        }
+      } else if (ds.type === 'interior_endpoint') {
+        if (ds.moved) {
+          const iw = interiorWalls.find((x) => x.id === ds.interiorId);
+          if (iw) {
+            const patch = ds.end === 'a'
+              ? { x1: iw.x1, y1: iw.y1 }
+              : { x2: iw.x2, y2: iw.y2 };
+            clearTimeout(interiorWallSaveTimers.current[ds.interiorId]);
+            interiorWallSaveTimers.current[ds.interiorId] = setTimeout(() => {
+              api.updateInteriorWall(projectId, floorPlanId, ds.interiorId, patch)
+                .then(() => onMaterialsChanged?.())
+                .catch((err) => setError(err.message));
+            }, 300);
+          }
+        } else {
+          // Click on endpoint = select wall
+          setSelectedInteriorWallId(ds.interiorId);
+          setSelectedCornerIdx(null);
+          setSelectedWallIdx(null);
+          setSelectedOpeningId(null);
+        }
+      } else if (ds.type === 'interior_select') {
+        if (!ds.moved) {
+          setSelectedInteriorWallId(ds.interiorId);
+          setSelectedCornerIdx(null);
+          setSelectedWallIdx(null);
+          setSelectedOpeningId(null);
         }
       }
       return;
@@ -449,26 +880,56 @@ function PolygonSketch({
     const { sx, sy, world } = getMouseWorld(e);
 
     if (mode === 'placing') {
-      // Place a corner
+      if (drawingPhase === 'interior') {
+        // Two-click interior wall placement.
+        const snapTarget = findInteriorSnapTarget(world);
+        const placed = snapTarget || snapWorld(world);
+        if (!pendingInteriorEndpoint) {
+          setPendingInteriorEndpoint(placed);
+        } else {
+          // Don't create zero-length walls
+          if (placed.x === pendingInteriorEndpoint.x && placed.y === pendingInteriorEndpoint.y) return;
+          createInteriorWall(pendingInteriorEndpoint, placed);
+          setPendingInteriorEndpoint(null);
+        }
+        return;
+      }
+      // Exterior placing: click on first corner closes the polygon.
+      if (corners.length >= 3) {
+        const firstHit = hitTestCorner(sx, sy);
+        if (firstHit === 0) {
+          closePolygonAndSwitchToInterior();
+          return;
+        }
+      }
       const snapped = snapWorld(world);
-      // Don't add a duplicate of the last corner
       const last = corners[corners.length - 1];
       if (last && last.x === snapped.x && last.y === snapped.y) return;
       setCorners((cur) => [...cur, snapped]);
       return;
     }
 
-    // Editing mode: hit-test opening → corner → edge
+    // Editing mode: hit-test opening → corner → interior wall → edge
     const hitO = hitTestOpening(sx, sy);
     if (hitO) {
       setSelectedOpeningId(hitO.id);
       setSelectedCornerIdx(null);
       setSelectedWallIdx(null);
+      setSelectedInteriorWallId(null);
       return;
     }
     const hitC = hitTestCorner(sx, sy);
     if (hitC != null) {
       setSelectedCornerIdx(hitC);
+      setSelectedWallIdx(null);
+      setSelectedOpeningId(null);
+      setSelectedInteriorWallId(null);
+      return;
+    }
+    const hitI = hitTestInteriorWall(sx, sy, world);
+    if (hitI) {
+      setSelectedInteriorWallId(hitI.id);
+      setSelectedCornerIdx(null);
       setSelectedWallIdx(null);
       setSelectedOpeningId(null);
       return;
@@ -478,15 +939,19 @@ function PolygonSketch({
       setSelectedWallIdx(hitE);
       setSelectedCornerIdx(null);
       setSelectedOpeningId(null);
+      setSelectedInteriorWallId(null);
       return;
     }
     // Click on empty canvas — deselect
     setSelectedCornerIdx(null);
     setSelectedWallIdx(null);
     setSelectedOpeningId(null);
+    setSelectedInteriorWallId(null);
   }
 
   function onWheel(e) {
+    // Plain scroll passes through to the page. Hold Ctrl to zoom the canvas.
+    if (!e.ctrlKey) return;
     e.preventDefault();
     const { sx, sy } = getMouseWorld(e);
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -549,28 +1014,33 @@ function PolygonSketch({
     async function onKeyDown(e) {
       if (e.code === 'Space') { spaceDown.current = true; return; }
       if (isTypingTarget(e.target)) return;
-      if (e.code === 'Enter' && mode === 'placing' && corners.length >= 3) {
-        // Close polygon, switch to editing, persist
-        try {
-          const updated = await api.updateFloorPlan(projectId, floorPlanId, { corners });
-          setCorners(updated.corners || corners);
-          setWalls(updated.walls || []);
-          setOpenings(updated.openings || []);
-          setMode('editing');
-          onMaterialsChanged?.();
-          onOpeningsChanged?.();
-        } catch (err) { setError(err.message); }
+      if (e.code === 'Enter' && mode === 'placing' && drawingPhase === 'exterior' && corners.length >= 3) {
+        await closePolygonAndSwitchToInterior();
       } else if (e.code === 'Escape') {
-        if (mode === 'placing' && corners.length > 0) {
+        if (tool !== 'idle') {
+          setTool('idle');
+          setToolPoints([]);
+          setMeasurements([]);
+          setCalibDialog({ open: false, distFt: '' });
+          return;
+        }
+        if (pendingInteriorEndpoint) {
+          setPendingInteriorEndpoint(null);
+        } else if (mode === 'placing' && drawingPhase === 'exterior' && corners.length > 0) {
           // Pop the last placed corner
           setCorners((cur) => cur.slice(0, -1));
         } else {
           setSelectedCornerIdx(null);
           setSelectedWallIdx(null);
           setSelectedOpeningId(null);
+          setSelectedInteriorWallId(null);
         }
       } else if (e.code === 'Delete' || e.code === 'Backspace') {
         if (selectedOpeningId != null) { e.preventDefault(); deleteSelectedOpening(); }
+        else if (selectedInteriorWallId != null) {
+          e.preventDefault();
+          deleteInteriorWall(selectedInteriorWallId);
+        }
       }
     }
     function onKeyUp(e) { if (e.code === 'Space') spaceDown.current = false; }
@@ -581,15 +1051,106 @@ function PolygonSketch({
       window.removeEventListener('keyup', onKeyUp);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, corners, selectedOpeningId, floorPlanId, projectId]);
+  }, [mode, corners, selectedOpeningId, selectedInteriorWallId, floorPlanId, projectId, drawingPhase, pendingInteriorEndpoint, tool]);
 
   // ---- mutations ----
-  async function clearFloorPlan() {
-    if (!confirm('Clear floor plan? This deletes all corners, walls, and openings.')) return;
+  async function closePolygonAndSwitchToInterior() {
     try {
-      const updated = await api.updateFloorPlan(projectId, floorPlanId, { corners: [] });
+      const updated = await api.updateFloorPlan(projectId, floorPlanId, {
+        corners,
+        drawing_phase: 'interior',
+      });
+      setCorners(updated.corners || corners);
+      setWalls(updated.walls || []);
+      setOpenings(updated.openings || []);
+      setInteriorWalls(updated.interior_walls || []);
+      setDrawingPhase('interior');
+      setMode('placing'); // stay in placing so user can immediately draw interior walls
+      setPendingInteriorEndpoint(null);
+      showToast('Exterior walls complete — now drawing interior walls.');
+      onMaterialsChanged?.();
+      onOpeningsChanged?.();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function setDrawingPhasePersist(phase) {
+    setDrawingPhase(phase);
+    setPendingInteriorEndpoint(null);
+    try {
+      await api.updateFloorPlan(projectId, floorPlanId, { drawing_phase: phase });
+    } catch (err) { setError(err.message); }
+  }
+
+  async function createInteriorWall(a, b) {
+    try {
+      const created = await api.createInteriorWall(projectId, floorPlanId, {
+        x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+        wall_type: 'interior_2x4',
+      });
+      setInteriorWalls((cur) => [...cur, created]);
+      onMaterialsChanged?.();
+    } catch (err) { setError(err.message); }
+  }
+
+  const updateInteriorWallById = useCallback((iwid, patch, { immediate = false } = {}) => {
+    setInteriorWalls((cur) => cur.map((iw) => (iw.id === iwid ? { ...iw, ...patch } : iw)));
+    const send = () => api.updateInteriorWall(projectId, floorPlanId, iwid, patch)
+      .then(() => onMaterialsChanged?.())
+      .catch((e) => setError(e.message));
+    if (immediate) return send();
+    clearTimeout(interiorWallSaveTimers.current[iwid]);
+    interiorWallSaveTimers.current[iwid] = setTimeout(send, 500);
+  }, [projectId, floorPlanId, onMaterialsChanged]);
+
+  function commitCalibration() {
+    const realFt = Number(calibDialog.distFt);
+    if (!realFt || realFt <= 0) return;
+    if (toolPoints.length < 2) return;
+    const [a, b] = toolPoints;
+    const worldDist = Math.hypot(b.x - a.x, b.y - a.y);
+    if (worldDist <= 0) return;
+    const newScale = realFt / worldDist; // ft per grid unit
+    const pdfScalePxPerFt = BASE_GRID_PX / newScale; // for record per spec
+    onProjectSettingsChange?.({
+      scale_ft_per_grid: newScale,
+      pdf_scale: pdfScalePxPerFt,
+    });
+    setCalibDialog({ open: false, distFt: '' });
+    setToolPoints([]);
+    setTool('idle');
+    showToast(`Scale calibrated: ${realFt.toFixed(2)} ft over ${worldDist.toFixed(2)} grid units`);
+  }
+
+  function cancelCalibration() {
+    setCalibDialog({ open: false, distFt: '' });
+    setToolPoints([]);
+  }
+
+  async function deleteInteriorWall(iwid) {
+    try {
+      await api.deleteInteriorWall(projectId, floorPlanId, iwid);
+      setInteriorWalls((cur) => cur.filter((iw) => iw.id !== iwid));
+      if (selectedInteriorWallId === iwid) setSelectedInteriorWallId(null);
+      onMaterialsChanged?.();
+    } catch (err) { setError(err.message); }
+  }
+
+  async function clearFloorPlan() {
+    if (!confirm('Clear floor plan? This deletes all corners, walls, openings, and interior walls.')) return;
+    try {
+      // Reset drawing_phase too so a fresh sketch starts in exterior mode.
+      const updated = await api.updateFloorPlan(projectId, floorPlanId, { corners: [], drawing_phase: 'exterior' });
       setCorners([]); setWalls([]); setOpenings([]);
+      // Wipe any interior walls — server cascades on floor_plan delete but not on corners reset,
+      // so issue an explicit cleanup.
+      for (const iw of interiorWalls) {
+        try { await api.deleteInteriorWall(projectId, floorPlanId, iw.id); } catch {}
+      }
+      setInteriorWalls([]);
+      setDrawingPhase('exterior');
       setSelectedCornerIdx(null); setSelectedWallIdx(null); setSelectedOpeningId(null);
+      setSelectedInteriorWallId(null);
+      setPendingInteriorEndpoint(null);
       setMode('placing');
       onMaterialsChanged?.();
       onOpeningsChanged?.();
@@ -655,21 +1216,66 @@ function PolygonSketch({
     : 0;
   const areaSf = polygonAreaSf(corners, scaleFtPerGrid);
 
+  const polygonClosed = corners.length >= 3 && (mode === 'editing' || drawingPhase === 'interior');
+  const selectedInteriorWall = interiorWalls.find((iw) => iw.id === selectedInteriorWallId) || null;
+  const cursorStyle = spaceDown.current
+    ? 'grab'
+    : (tool === 'calibrate' || tool === 'measure'
+        ? 'crosshair'
+        : (mode === 'placing'
+            ? 'crosshair'
+            : (hoverCursor === 'move' ? 'move' : 'default')));
+
   return (
     <div>
+      <PdfToolbar
+        controls={pdfControls}
+        tool={tool}
+        setTool={(t) => { setTool(t); setToolPoints([]); setMeasurements([]); }}
+      />
       <div className="sketch-toolbar">
-        {mode === 'placing' ? (
+        {tool === 'calibrate' ? (
           <span className="muted">
-            <strong>{level}</strong> · <strong>Click</strong> to place corners ({corners.length} placed) · <strong>Enter</strong> to close polygon (need 3+) · <strong>Esc</strong> undoes last
+            <strong>Calibrate scale:</strong> click two points on the plan that you know the distance between ({toolPoints.length}/2). <strong>Esc</strong> cancels.
           </span>
+        ) : tool === 'measure' ? (
+          <span className="muted">
+            <strong>Measure:</strong> click two points to draw a measurement line. Repeat for more. <strong>Esc</strong> exits.
+          </span>
+        ) : mode === 'placing' ? (
+          drawingPhase === 'interior' ? (
+            <span className="muted">
+              <strong>{level}</strong> · drawing <strong>interior walls</strong> · click two points to place a wall · <strong>Esc</strong> cancels pending point
+            </span>
+          ) : (
+            <span className="muted">
+              <strong>{level}</strong> · drawing <strong>exterior walls</strong> · click to place corners ({corners.length} placed) · click first corner or press <strong>Enter</strong> to close (need 3+) · <strong>Esc</strong> undoes last
+            </span>
+          )
         ) : (
           <span className="muted">
-            <strong>{level}</strong> · click corner/edge/opening to select · drag corners · right-click corner to delete · Space+drag pans · wheel zooms
+            <strong>{level}</strong> · click corner/edge/wall to select · drag corner or wall · right-click corner to delete · <strong>Ctrl+drag</strong> pans · <strong>Ctrl+wheel</strong> zooms
           </span>
         )}
         <span className="right muted">
-          {corners.length} corner{corners.length === 1 ? '' : 's'} · {openings.length} opening{openings.length === 1 ? '' : 's'} · {perimeterFt.toFixed(1)} lf · {areaSf.toFixed(0)} sf
+          {corners.length} corner{corners.length === 1 ? '' : 's'} · {interiorWalls.length} interior · {openings.length} opening{openings.length === 1 ? '' : 's'} · {perimeterFt.toFixed(1)} lf · {areaSf.toFixed(0)} sf
         </span>
+        {polygonClosed && (
+          <div style={{ display: 'inline-flex', flex: '0 0 auto', borderRadius: 6, overflow: 'hidden', border: '1px solid #d1d5db' }}>
+            <button
+              type="button"
+              className={drawingPhase === 'exterior' ? 'tab active' : 'tab'}
+              style={{ padding: '0.35rem 0.8rem', borderRadius: 0 }}
+              onClick={() => { setDrawingPhasePersist('exterior'); setMode('editing'); }}
+            >Exterior</button>
+            <button
+              type="button"
+              className={drawingPhase === 'interior' ? 'tab active' : 'tab'}
+              style={{ padding: '0.35rem 0.8rem', borderRadius: 0 }}
+              onClick={() => { setDrawingPhasePersist('interior'); setMode('placing'); }}
+            >Interior</button>
+          </div>
+        )}
         {level !== 'floor1' && corners.length === 0 && (
           <button className="secondary" style={{ flex: '0 0 auto' }} onClick={copyFromFloor1}>Copy from Floor 1</button>
         )}
@@ -678,7 +1284,7 @@ function PolygonSketch({
         )}
       </div>
       <div className="sketch-area">
-        <div className="sketch-canvas-wrap" ref={wrapRef}>
+        <div className="sketch-canvas-wrap" ref={wrapRef} style={{ position: 'relative' }}>
           <canvas
             ref={canvasRef}
             tabIndex={0}
@@ -688,8 +1294,55 @@ function PolygonSketch({
             onMouseLeave={onMouseLeave}
             onWheel={onWheel}
             onContextMenu={onContextMenu}
-            style={{ cursor: spaceDown.current ? 'grab' : (mode === 'placing' ? 'crosshair' : 'default'), display: 'block', background: GRID_BG }}
+            style={{ cursor: cursorStyle, display: 'block', background: GRID_BG }}
           />
+          {mode === 'placing' && (
+            <div style={{
+              position: 'absolute', top: 8, left: 8,
+              padding: '0.3rem 0.6rem',
+              background: 'rgba(31,41,55,0.85)', color: 'white',
+              fontSize: '12px', fontWeight: 600, borderRadius: 4,
+              pointerEvents: 'none',
+            }}>
+              Drawing: {drawingPhase === 'interior' ? 'Interior Walls' : 'Exterior Walls'}
+            </div>
+          )}
+          {toast && (
+            <div style={{
+              position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
+              padding: '0.5rem 1rem',
+              background: 'rgba(31,41,55,0.92)', color: 'white',
+              fontSize: '13px', borderRadius: 6,
+              pointerEvents: 'none',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
+            }}>{toast}</div>
+          )}
+          {calibDialog.open && (
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+              background: 'white', border: '1px solid #E5E7EB', borderRadius: 8,
+              padding: '1rem', minWidth: 320, boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
+            }}>
+              <strong style={{ display: 'block', marginBottom: '0.5rem' }}>Set scale</strong>
+              <p className="muted" style={{ margin: '0 0 0.5rem 0', fontSize: '0.85rem' }}>
+                What is the real-world distance between these two points?
+              </p>
+              <input
+                type="number"
+                step="0.1"
+                autoFocus
+                value={calibDialog.distFt}
+                onChange={(e) => setCalibDialog({ ...calibDialog, distFt: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitCalibration(); }}
+                placeholder="ft"
+                style={{ width: '100%' }}
+              />
+              <div className="row" style={{ marginTop: '0.75rem' }}>
+                <button className="primary" style={{ flex: 1 }} onClick={commitCalibration}>Set scale</button>
+                <button className="secondary" style={{ flex: 1 }} onClick={cancelCalibration}>Cancel</button>
+              </div>
+            </div>
+          )}
         </div>
         {selectedOpening && (
           <OpeningEditor
@@ -712,7 +1365,16 @@ function PolygonSketch({
             onSelectOpening={(oid) => { setSelectedOpeningId(oid); setSelectedWallIdx(null); }}
           />
         )}
-        {!selectedOpening && !selectedWall && selectedCorner && (
+        {!selectedOpening && !selectedWall && selectedInteriorWall && (
+          <InteriorWallEditor
+            wall={selectedInteriorWall}
+            scale={scaleFtPerGrid}
+            onChange={(patch, opts) => updateInteriorWallById(selectedInteriorWall.id, patch, opts)}
+            onDelete={() => deleteInteriorWall(selectedInteriorWall.id)}
+            onClose={() => setSelectedInteriorWallId(null)}
+          />
+        )}
+        {!selectedOpening && !selectedWall && !selectedInteriorWall && selectedCorner && (
           <div className="wall-editor card">
             <div className="row" style={{ marginBottom: '0.5rem' }}>
               <strong style={{ flex: 1 }}>Corner #{selectedCornerIdx}</strong>
@@ -961,6 +1623,15 @@ function WallEditor({ wall, scale, edgeLengthFt: lengthFt, wallIndex, wallOpenin
         {DRYWALL_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
 
+      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem' }}>
+        <input
+          type="checkbox"
+          checked={!!wall.on_concrete}
+          onChange={(e) => onChange({ on_concrete: e.target.checked }, { immediate: true })}
+        />
+        Wall sits on concrete
+      </label>
+
       <hr style={{ margin: '1rem 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
 
       <div className="row" style={{ marginBottom: '0.5rem' }}>
@@ -1010,6 +1681,53 @@ function WallEditor({ wall, scale, edgeLengthFt: lengthFt, wallIndex, wallOpenin
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function InteriorWallEditor({ wall, scale, onChange, onDelete, onClose }) {
+  const lengthFt = Math.hypot(Number(wall.x2) - Number(wall.x1), Number(wall.y2) - Number(wall.y1)) * scale;
+  return (
+    <div className="wall-editor card">
+      <div className="row" style={{ marginBottom: '0.5rem' }}>
+        <strong style={{ flex: 1 }}>Interior wall #{wall.id}</strong>
+        <button className="secondary" style={{ flex: '0 0 auto', padding: '0.25rem 0.5rem' }} onClick={onClose}>×</button>
+      </div>
+      <p className="muted" style={{ margin: 0 }}>Length: {lengthFt.toFixed(2)} ft</p>
+
+      <label>Wall type</label>
+      <select value={wall.wall_type} onChange={(e) => onChange({ wall_type: e.target.value }, { immediate: true })}>
+        <option value="interior_2x4">Interior 2x4</option>
+        <option value="interior_2x6">Interior 2x6</option>
+      </select>
+
+      <label>Height (ft) — blank = inherit</label>
+      <input
+        type="number" step="0.5"
+        value={wall.height ?? ''} placeholder="(default)"
+        onChange={(e) => onChange({ height: e.target.value === '' ? null : e.target.value })}
+      />
+
+      <label>Drywall override</label>
+      <select value={wall.drywall_override ?? ''}
+        onChange={(e) => onChange({ drywall_override: e.target.value || null }, { immediate: true })}>
+        <option value="">(default)</option>
+        {DRYWALL_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem' }}>
+        <input
+          type="checkbox"
+          checked={!!wall.on_concrete}
+          onChange={(e) => onChange({ on_concrete: e.target.checked }, { immediate: true })}
+        />
+        Wall sits on concrete
+      </label>
+
+      <p className="muted" style={{ marginTop: '0.75rem', marginBottom: 0, fontSize: '0.85rem' }}>
+        Drag either endpoint on the canvas to move it. Press Delete or Backspace to remove this wall.
+      </p>
+      <button className="danger" style={{ marginTop: '0.5rem', width: '100%' }} onClick={onDelete}>Delete this wall</button>
     </div>
   );
 }
@@ -1066,27 +1784,237 @@ function OpeningEditor({ opening, onChange, onDelete, onClose }) {
   );
 }
 
+// ---------- PDF toolbar ----------
+function PdfToolbar({ controls, tool, setTool }) {
+  const fileRef = useRef(null);
+  if (!controls) return null;
+  const { pdfFilename, pdfStatus, pdfNumPages, pdfPage, pdfOpacity,
+    setPdfOpacity, uploadPdf, removePdf, changePage } = controls;
+
+  function pickFile() { fileRef.current?.click(); }
+  function onFile(e) {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
+      alert('Please choose a PDF file.');
+      return;
+    }
+    uploadPdf(f);
+  }
+
+  return (
+    <div className="sketch-toolbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', marginBottom: '0.4rem' }}>
+      <input ref={fileRef} type="file" accept="application/pdf" onChange={onFile} style={{ display: 'none' }} />
+      {!pdfFilename ? (
+        <button className="secondary" style={{ flex: '0 0 auto' }} onClick={pickFile}>Upload PDF</button>
+      ) : (
+        <>
+          <span className="muted" style={{ flex: '0 0 auto' }}>
+            PDF: {pdfStatus === 'loading' ? 'loading…' : pdfStatus === 'missing' ? 'file not found' : 'loaded'}
+          </span>
+          {pdfNumPages > 1 && (
+            <span style={{ flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <button className="secondary" style={{ padding: '0.2rem 0.5rem' }} onClick={() => changePage(-1)} disabled={pdfPage <= 1}>‹</button>
+              <span className="muted" style={{ fontSize: '0.85rem' }}>page {pdfPage} of {pdfNumPages}</span>
+              <button className="secondary" style={{ padding: '0.2rem 0.5rem' }} onClick={() => changePage(+1)} disabled={pdfPage >= pdfNumPages}>›</button>
+            </span>
+          )}
+          <span style={{ flex: '0 0 auto', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            <span className="muted" style={{ fontSize: '0.85rem' }}>Opacity {Math.round(pdfOpacity * 100)}%</span>
+            <input type="range" min="0" max="60" step="1" value={Math.round(pdfOpacity * 100)}
+              onChange={(e) => setPdfOpacity(Number(e.target.value) / 100)} />
+          </span>
+          <button className="secondary" style={{ flex: '0 0 auto' }} onClick={pickFile}>Replace PDF</button>
+          <button className="danger" style={{ flex: '0 0 auto' }} onClick={removePdf}>Remove PDF</button>
+        </>
+      )}
+      <span style={{ flex: 1 }} />
+      <button
+        className={tool === 'calibrate' ? 'primary' : 'secondary'}
+        style={{ flex: '0 0 auto' }}
+        onClick={() => setTool(tool === 'calibrate' ? 'idle' : 'calibrate')}
+      >Calibrate scale</button>
+      <button
+        className={tool === 'measure' ? 'primary' : 'secondary'}
+        style={{ flex: '0 0 auto' }}
+        onClick={() => setTool(tool === 'measure' ? 'idle' : 'measure')}
+      >Measure</button>
+    </div>
+  );
+}
+
 // ---------- canvas drawing ----------
 function drawScene(ctx, size, vp, S) {
-  const { corners, walls, openings, mode, selectedCornerIdx, selectedWallIdx, selectedOpeningId, hoverWorld, scale, dragLabel } = S;
+  const {
+    corners, walls, openings, mode, selectedCornerIdx, selectedWallIdx, selectedOpeningId,
+    hoverWorld, scale, dragLabel,
+    interiorWalls = [], selectedInteriorWallId = null,
+    drawingPhase = 'exterior',
+    pendingInteriorEndpoint = null,
+    wallDragPreview = null,
+    pdfPageCanvas = null, pdfOpacity = 0.4, pdfStatus = 'none',
+    tool = 'idle', toolPoints = [], measurements = [],
+  } = S;
   ctx.fillStyle = GRID_BG;
   ctx.fillRect(0, 0, size.w, size.h);
+
+  // PDF underlay sits beneath the grid so the grid + walls remain visible.
+  if (pdfPageCanvas) {
+    ctx.save();
+    ctx.globalAlpha = pdfOpacity;
+    ctx.drawImage(
+      pdfPageCanvas,
+      vp.panX, vp.panY,
+      pdfPageCanvas.width * vp.zoom,
+      pdfPageCanvas.height * vp.zoom,
+    );
+    ctx.restore();
+  } else if (pdfStatus === 'missing') {
+    ctx.save();
+    ctx.fillStyle = 'rgba(217,119,6,0.08)';
+    ctx.fillRect(20, 20, 360, 60);
+    ctx.strokeStyle = '#D97706';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(20, 20, 360, 60);
+    ctx.fillStyle = '#1F2937';
+    ctx.font = '600 13px "Segoe UI", -apple-system, sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('PDF not found — please re-upload', 32, 38);
+    ctx.fillStyle = '#6B7280';
+    ctx.font = '12px "Segoe UI", -apple-system, sans-serif';
+    ctx.fillText('The server may have lost the file (ephemeral disk).', 32, 58);
+    ctx.restore();
+  }
+
   drawGrid(ctx, size, vp);
+
+  // Polygon fill — only when closed (editing mode or interior phase)
+  const polygonClosed = corners.length >= 3 && (mode === 'editing' || drawingPhase === 'interior');
+  if (polygonClosed) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(254,243,226,0.3)'; // accent-soft #FEF3E2 at 30%
+    ctx.beginPath();
+    for (let i = 0; i < corners.length; i++) {
+      const s = worldToScreen(corners[i].x, corners[i].y, vp);
+      if (i === 0) ctx.moveTo(s.x, s.y);
+      else ctx.lineTo(s.x, s.y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
 
   // Edges
   if (corners.length >= 2) {
     for (let i = 0; i < corners.length; i++) {
-      // In placing mode, don't draw the closing edge (corners[N-1] → corners[0]) yet
-      if (mode === 'placing' && i === corners.length - 1) continue;
+      // In exterior placing mode, don't draw the closing edge (corners[N-1] → corners[0]) yet
+      if (mode === 'placing' && drawingPhase === 'exterior' && i === corners.length - 1) continue;
       const a = corners[i];
       const b = corners[(i + 1) % corners.length];
       const wall = walls.find((w) => Number(w.wall_index) === i);
+      // Skip the dragged wall — its preview is drawn separately
+      if (wallDragPreview && wallDragPreview.idx === i) continue;
       drawEdge(ctx, a, b, vp, scale, i, wall, i === selectedWallIdx);
     }
   }
 
-  // Live preview from last corner to cursor (placing mode)
-  if (mode === 'placing' && corners.length > 0 && hoverWorld) {
+  // Wall drag preview: dashed wall in new position + dashed adjusted adjacent walls.
+  if (wallDragPreview) {
+    const N = corners.length;
+    const idx = wallDragPreview.idx;
+    const newCorners = wallDragPreview.newCorners;
+    const drawDashed = (a, b, color, width) => {
+      const sa = worldToScreen(a.x, a.y, vp);
+      const sb = worldToScreen(b.x, b.y, vp);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.setLineDash([8, 4]);
+      ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+      ctx.restore();
+    };
+    // Adjusted adjacent walls (using old fixed corner + new moved corner)
+    drawDashed(corners[(idx - 1 + N) % N], newCorners[idx], ACCENT_RUST, 2);
+    drawDashed(newCorners[(idx + 1) % N], corners[(idx + 2) % N], ACCENT_RUST, 2);
+    // The dragged wall preview
+    drawDashed(newCorners[idx], newCorners[(idx + 1) % N], ACCENT_RUST, 3);
+  }
+
+  // Interior walls — dashed medium gray
+  for (const iw of interiorWalls) {
+    const a = { x: Number(iw.x1), y: Number(iw.y1) };
+    const b = { x: Number(iw.x2), y: Number(iw.y2) };
+    const sa = worldToScreen(a.x, a.y, vp);
+    const sb = worldToScreen(b.x, b.y, vp);
+    const selected = iw.id === selectedInteriorWallId;
+    ctx.save();
+    if (selected) {
+      ctx.shadowColor = 'rgba(217,119,6,0.45)';
+      ctx.shadowBlur = 10;
+      ctx.strokeStyle = ACCENT_RUST;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+    } else {
+      ctx.strokeStyle = INTERIOR_WALL_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([8, 4]);
+      ctx.lineCap = 'butt';
+    }
+    ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+    ctx.restore();
+    // Length + type label at midpoint (white pill)
+    const lengthFt = Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2) * scale;
+    if (lengthFt > 0) {
+      const mx = (sa.x + sb.x) / 2; const my = (sa.y + sb.y) / 2;
+      const text = `${lengthFt.toFixed(2)} ft · ${WALL_TYPE_SHORT[iw.wall_type] || iw.wall_type}`;
+      ctx.font = '500 12px "Segoe UI", -apple-system, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const padding = 4;
+      const metrics = ctx.measureText(text);
+      const pillX = mx - metrics.width / 2 - padding;
+      const pillY = my - 9 - padding;
+      const pillW = metrics.width + padding * 2;
+      const pillH = 18 + padding * 2;
+      ctx.fillStyle = 'white';
+      roundRect(ctx, pillX, pillY, pillW, pillH, 4);
+      ctx.fill();
+      ctx.strokeStyle = '#E5E7EB';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = LABEL_TEXT;
+      ctx.fillText(text, mx, my);
+    }
+    // Endpoint dots
+    for (const p of [sa, sb]) {
+      ctx.fillStyle = selected ? ACCENT_RUST : CORNER_GRAY;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Pending interior endpoint (placing mode, interior phase) + preview to cursor
+  if (mode === 'placing' && drawingPhase === 'interior' && pendingInteriorEndpoint) {
+    const p = worldToScreen(pendingInteriorEndpoint.x, pendingInteriorEndpoint.y, vp);
+    ctx.fillStyle = ACCENT_RUST;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.fill();
+    if (hoverWorld) {
+      const h = worldToScreen(hoverWorld.x, hoverWorld.y, vp);
+      ctx.save();
+      ctx.strokeStyle = ACCENT_RUST;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(h.x, h.y); ctx.stroke();
+      ctx.restore();
+      const lenFt = Math.hypot(hoverWorld.x - pendingInteriorEndpoint.x, hoverWorld.y - pendingInteriorEndpoint.y) * scale;
+      ctx.font = '12px "Segoe UI", -apple-system, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = ACCENT_RUST;
+      ctx.fillText(`${lenFt.toFixed(2)} ft`, (p.x + h.x) / 2, (p.y + h.y) / 2 - 12);
+    }
+  }
+
+  // Live preview from last corner to cursor (exterior placing mode only)
+  if (mode === 'placing' && drawingPhase === 'exterior' && corners.length > 0 && hoverWorld) {
     const last = corners[corners.length - 1];
     const a = worldToScreen(last.x, last.y, vp);
     const b = worldToScreen(hoverWorld.x, hoverWorld.y, vp);
@@ -1115,8 +2043,11 @@ function drawScene(ctx, size, vp, S) {
       ctx.fillStyle = ACCENT_RUST;
       ctx.beginPath(); ctx.arc(s.x, s.y, 6, 0, Math.PI * 2); ctx.fill();
     } else {
-      ctx.fillStyle = i === 0 && mode === 'placing' ? ACCENT_RUST : CORNER_GRAY;
-      ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, Math.PI * 2); ctx.fill();
+      // Highlight the first corner only while drawing the exterior polygon (it's the
+      // close-the-loop target). Other corners are gray.
+      const isClosingTarget = i === 0 && mode === 'placing' && drawingPhase === 'exterior' && corners.length >= 3;
+      ctx.fillStyle = isClosingTarget ? ACCENT_RUST : CORNER_GRAY;
+      ctx.beginPath(); ctx.arc(s.x, s.y, isClosingTarget ? 6 : 4, 0, Math.PI * 2); ctx.fill();
     }
   }
 
@@ -1141,6 +2072,50 @@ function drawScene(ctx, size, vp, S) {
     ctx.fillRect(dragLabel.x - m.width / 2 - 6, dragLabel.y - 10, m.width + 12, 20);
     ctx.fillStyle = 'white';
     ctx.fillText(dragLabel.text, dragLabel.x, dragLabel.y);
+  }
+
+  // Tool overlays: persisted measurements + in-progress tool picks.
+  function drawWorldLine(a, b, color, label) {
+    const sa = worldToScreen(a.x, a.y, vp);
+    const sb = worldToScreen(b.x, b.y, vp);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
+    ctx.restore();
+    for (const p of [sa, sb]) {
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill();
+    }
+    if (label) {
+      const mx = (sa.x + sb.x) / 2;
+      const my = (sa.y + sb.y) / 2 - 14;
+      ctx.font = 'bold 12px "Segoe UI", -apple-system, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const m = ctx.measureText(label);
+      ctx.fillStyle = color;
+      ctx.fillRect(mx - m.width / 2 - 6, my - 10, m.width + 12, 20);
+      ctx.fillStyle = 'white';
+      ctx.fillText(label, mx, my);
+    }
+  }
+
+  for (const m of measurements) {
+    const lenFt = Math.hypot(m.b.x - m.a.x, m.b.y - m.a.y) * scale;
+    drawWorldLine(m.a, m.b, '#3B82F6', `${lenFt.toFixed(2)} ft`);
+  }
+
+  if (tool === 'calibrate' || tool === 'measure') {
+    const color = tool === 'calibrate' ? '#D97706' : '#3B82F6';
+    if (toolPoints.length === 1 && hoverWorld) {
+      const lenFt = Math.hypot(hoverWorld.x - toolPoints[0].x, hoverWorld.y - toolPoints[0].y) * scale;
+      drawWorldLine(toolPoints[0], hoverWorld, color, `${lenFt.toFixed(2)} ft`);
+    }
+    if (toolPoints.length === 2) {
+      const lenFt = Math.hypot(toolPoints[1].x - toolPoints[0].x, toolPoints[1].y - toolPoints[0].y) * scale;
+      drawWorldLine(toolPoints[0], toolPoints[1], color, `${lenFt.toFixed(2)} ft`);
+    }
   }
 }
 
@@ -1178,6 +2153,7 @@ const DOOR_COLOR = '#10B981';
 const GRID_BG = '#FFFBF0';
 const GRID_LINE = '#E5E7EB';
 const LABEL_TEXT = '#1F2937';
+const INTERIOR_WALL_COLOR = '#6B7280';
 
 function drawEdge(ctx, a, b, vp, scale, idx, wall, selected) {
   const sa = worldToScreen(a.x, a.y, vp);

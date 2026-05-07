@@ -7,6 +7,8 @@ import Assemblies from './components/Assemblies.jsx';
 import AssemblyEditor from './components/AssemblyEditor.jsx';
 import Materials from './components/Materials.jsx';
 import Settings from './components/Settings.jsx';
+import Customers from './components/Customers.jsx';
+import CustomerDetail from './components/CustomerDetail.jsx';
 
 function useAuth() {
   const [token, setToken] = React.useState(localStorage.getItem('token'));
@@ -52,6 +54,9 @@ function Shell({ user, onLogout, children }) {
             <NavLink to="/projects" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
               Projects
             </NavLink>
+            <NavLink to="/customers" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
+              Customers
+            </NavLink>
             <NavLink to="/assemblies" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
               Assemblies
             </NavLink>
@@ -87,6 +92,8 @@ export default function App() {
         <Route path="/" element={<Navigate to="/projects" replace />} />
         <Route path="/projects" element={<Projects />} />
         <Route path="/projects/:id" element={<ProjectDetail />} />
+        <Route path="/customers" element={<Customers />} />
+        <Route path="/customers/:id" element={<CustomerDetail />} />
         <Route path="/assemblies" element={<Assemblies />} />
         <Route path="/assemblies/new" element={<AssemblyEditor />} />
         <Route path="/assemblies/:id" element={<AssemblyEditor />} />

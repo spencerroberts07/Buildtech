@@ -78,11 +78,18 @@ Default user is created by the migration:
 
 3. **Material List** — The project page shows a rolled-up material list across all measurements, with a CSV export button. Take that CSV to the POS.
 
+## Known limitations
+
+- **PDF uploads are stored on the server's local disk (`backend/uploads/`).**
+  On Render's free tier (and any host with ephemeral storage), the disk is wiped
+  on each redeploy. Existing PDF rows in the DB will then point at a missing
+  file; the canvas shows a "PDF not found — please re-upload" placeholder. A
+  future phase should move uploads to S3 (or similar) for persistence.
+
 ## Phase 2 ideas (not built yet)
 
-- PDF upload and on-screen measurement
 - SKU mapping (link assembly materials to specific POS SKUs)
 - Pricing and quote generation
 - Multi-user permissions
 - Change orders / project revisions
-- Customer database
+- Persistent PDF storage (S3)

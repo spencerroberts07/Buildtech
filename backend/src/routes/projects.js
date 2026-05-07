@@ -1,18 +1,44 @@
 import { Router } from 'express';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
 import { query } from '../db.js';
 import {
   computeWallMaterials,
   computeProjectMaterials,
   computeFloorPlanMaterials,
   computeRoofMaterials,
+  buildFloorPlanWalls,
   sumMaterials,
   resolveProjectSettings,
+  sectionFor,
   sectionRank,
   categoryRank,
   LEVELS,
 } from '../wallRules.js';
 import { pool } from '../db.js';
 import { ensureMaterial } from '../materialUpsert.js';
+
+// PDF uploads land here. Render's free-tier disk is ephemeral; redeploys wipe this dir.
+const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+const pdfUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+    filename: (req, file, cb) => {
+      const stamp = Date.now();
+      cb(null, `project-${req.params.id}-${stamp}.pdf`);
+    },
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype !== 'application/pdf') {
+      return cb(new Error('Only PDF files are allowed'));
+    }
+    cb(null, true);
+  },
+});
 
 const router = Router();
 
@@ -32,6 +58,9 @@ const PROJECT_SETTING_FIELDS = [
   'num_storeys',
   'floor2_wall_height',
   'rafter_spacing',
+  'pdf_scale',
+  'pdf_page',
+  'pdf_filename',
 ];
 
 const WALL_TYPES = ['exterior_2x6', 'interior_2x4', 'interior_2x6'];
@@ -43,15 +72,25 @@ const WALL_FIELDS = [
 ];
 
 router.get('/', async (req, res) => {
-  const { rows } = await query(
-    'SELECT id, name, customer, notes, created_at, updated_at FROM projects ORDER BY updated_at DESC'
-  );
+  const { rows } = await query(`
+    SELECT p.id, p.name, p.customer, p.customer_id, p.notes, p.num_storeys,
+           p.created_at, p.updated_at,
+           c.name AS customer_name
+    FROM projects p
+    LEFT JOIN customers c ON c.id = p.customer_id
+    ORDER BY p.updated_at DESC
+  `);
   res.json(rows);
 });
 
 router.get('/:id', async (req, res) => {
   const { id } = req.params;
-  const p = await query('SELECT * FROM projects WHERE id=$1', [id]);
+  const p = await query(`
+    SELECT p.*, c.name AS customer_name
+    FROM projects p
+    LEFT JOIN customers c ON c.id = p.customer_id
+    WHERE p.id = $1
+  `, [id]);
   if (!p.rows[0]) return res.status(404).json({ error: 'not found' });
   const m = await query(`
     SELECT m.*, a.name AS assembly_name, a.unit AS assembly_unit
@@ -64,16 +103,16 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { name, customer, notes, num_storeys, floor2_wall_height, default_wall_height } = req.body;
+  const { name, customer, customer_id, notes, num_storeys, floor2_wall_height, default_wall_height } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const storeys = Number(num_storeys ?? 1);
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const proj = await client.query(
-      `INSERT INTO projects (name, customer, notes, num_storeys, floor2_wall_height, default_wall_height)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-      [name, customer || null, notes || null, storeys,
+      `INSERT INTO projects (name, customer, customer_id, notes, num_storeys, floor2_wall_height, default_wall_height)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [name, customer || null, customer_id || null, notes || null, storeys,
        floor2_wall_height ?? 9, default_wall_height ?? null]
     );
     const projectId = proj.rows[0].id;
@@ -98,10 +137,26 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, customer, notes } = req.body;
+  const b = req.body || {};
+  const fields = ['name', 'customer', 'customer_id', 'notes'];
+  const updates = {};
+  for (const f of fields) {
+    if (f in b) updates[f] = b[f] === '' ? null : b[f];
+  }
+  const keys = Object.keys(updates);
+  if (keys.length === 0) {
+    const { rows } = await query('SELECT * FROM projects WHERE id = $1', [id]);
+    if (!rows[0]) return res.status(404).json({ error: 'not found' });
+    return res.json(rows[0]);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(id);
   const { rows } = await query(
-    'UPDATE projects SET name=$1, customer=$2, notes=$3, updated_at=NOW() WHERE id=$4 RETURNING *',
-    [name, customer || null, notes || null, id]
+    `UPDATE projects SET ${setParts}, updated_at = NOW()
+     WHERE id = $${values.length}
+     RETURNING *`,
+    values
   );
   if (!rows[0]) return res.status(404).json({ error: 'not found' });
   res.json(rows[0]);
@@ -109,7 +164,73 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
+  // Best-effort PDF cleanup before the row goes.
+  try {
+    const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
+    const fname = r.rows[0]?.pdf_filename;
+    if (fname) {
+      try { fs.unlinkSync(path.join(UPLOADS_DIR, fname)); } catch {}
+    }
+  } catch {}
   await query('DELETE FROM projects WHERE id=$1', [id]);
+  res.status(204).end();
+});
+
+// ---------------- PDF underlay ----------------
+router.post('/:id/upload-pdf', (req, res) => {
+  pdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) {
+      const code = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(code).json({ error: err.message });
+    }
+    if (!req.file) return res.status(400).json({ error: 'pdf file required' });
+    const { id } = req.params;
+    try {
+      const exists = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
+      if (!exists.rows[0]) {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        return res.status(404).json({ error: 'project not found' });
+      }
+      const prior = exists.rows[0].pdf_filename;
+      if (prior && prior !== req.file.filename) {
+        try { fs.unlinkSync(path.join(UPLOADS_DIR, prior)); } catch {}
+      }
+      const { rows } = await query(
+        `UPDATE projects SET pdf_filename = $1, pdf_page = 1, updated_at = NOW()
+         WHERE id = $2 RETURNING id, pdf_filename, pdf_scale, pdf_page`,
+        [req.file.filename, id]
+      );
+      res.status(201).json(rows[0]);
+    } catch (e) {
+      try { fs.unlinkSync(req.file.path); } catch {}
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
+router.get('/:id/pdf', async (req, res) => {
+  const { id } = req.params;
+  const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
+  const fname = r.rows[0]?.pdf_filename;
+  if (!fname) return res.status(404).json({ error: 'no pdf uploaded' });
+  const full = path.join(UPLOADS_DIR, fname);
+  if (!fs.existsSync(full)) return res.status(404).json({ error: 'pdf_missing' });
+  res.setHeader('Content-Type', 'application/pdf');
+  fs.createReadStream(full).pipe(res);
+});
+
+router.delete('/:id/pdf', async (req, res) => {
+  const { id } = req.params;
+  const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
+  const fname = r.rows[0]?.pdf_filename;
+  if (fname) {
+    try { fs.unlinkSync(path.join(UPLOADS_DIR, fname)); } catch {}
+  }
+  await query(
+    `UPDATE projects SET pdf_filename = NULL, pdf_scale = NULL, pdf_page = 1, updated_at = NOW()
+     WHERE id = $1`,
+    [id]
+  );
   res.status(204).end();
 });
 
@@ -375,7 +496,10 @@ router.delete('/:id/openings/:oid', async (req, res) => {
 });
 
 // ---------------- Floor plans (polygon-based) ----------------
-const FLOOR_PLAN_WALL_FIELDS = ['wall_type', 'height', 'sheathing_override', 'drywall_override'];
+const FLOOR_PLAN_WALL_FIELDS = ['wall_type', 'height', 'sheathing_override', 'drywall_override', 'on_concrete'];
+const INTERIOR_WALL_TYPES = new Set(['interior_2x4', 'interior_2x6']);
+const INTERIOR_WALL_FIELDS = ['x1', 'y1', 'x2', 'y2', 'wall_type', 'height', 'on_concrete', 'sheathing_override', 'drywall_override'];
+const FLOOR_PLAN_PUT_EXTRA_FIELDS = ['drawing_phase'];
 
 async function loadFloorPlanFull(projectId, fpId) {
   const fp = await query(
@@ -394,7 +518,16 @@ async function loadFloorPlanFull(projectId, fpId) {
      ORDER BY o.id`,
     [fpId]
   );
-  return { ...fp.rows[0], walls: walls.rows, openings: openings.rows };
+  const interiorWalls = await query(
+    'SELECT * FROM floor_plan_interior_walls WHERE floor_plan_id = $1 ORDER BY id',
+    [fpId]
+  );
+  return {
+    ...fp.rows[0],
+    walls: walls.rows,
+    openings: openings.rows,
+    interior_walls: interiorWalls.rows,
+  };
 }
 
 router.get('/:id/floor-plans', async (req, res) => {
@@ -423,14 +556,21 @@ router.get('/:id/floor-plans/:fpid', async (req, res) => {
   res.json(data);
 });
 
-// PUT — replaces the corners array. Reconciles floor_plan_walls rows: keeps existing rows
+// PUT — replaces the corners array (if provided) and/or updates drawing_phase.
+// When corners is provided, reconciles floor_plan_walls rows: keeps existing rows
 // for indices that still exist, adds new default rows for new indices, deletes rows whose
 // index is now out of range. Openings on deleted walls cascade.
 router.put('/:id/floor-plans/:fpid', async (req, res) => {
   const { id, fpid } = req.params;
   const body = req.body || {};
   const corners = Array.isArray(body.corners) ? body.corners : null;
-  if (!corners) return res.status(400).json({ error: 'corners array required' });
+  const drawingPhase = body.drawing_phase;
+  if (corners == null && drawingPhase == null) {
+    return res.status(400).json({ error: 'corners array or drawing_phase required' });
+  }
+  if (drawingPhase != null && drawingPhase !== 'exterior' && drawingPhase !== 'interior') {
+    return res.status(400).json({ error: "drawing_phase must be 'exterior' or 'interior'" });
+  }
 
   const client = await pool.connect();
   try {
@@ -442,6 +582,18 @@ router.put('/:id/floor-plans/:fpid', async (req, res) => {
     if (!fp.rows[0]) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'not found' });
+    }
+    if (drawingPhase != null) {
+      await client.query(
+        `UPDATE floor_plans SET drawing_phase = $1, updated_at = NOW() WHERE id = $2`,
+        [drawingPhase, fpid]
+      );
+    }
+    if (corners == null) {
+      await client.query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+      await client.query('COMMIT');
+      const data = await loadFloorPlanFull(id, fpid);
+      return res.json(data);
     }
     await client.query(
       `UPDATE floor_plans SET corners = $1::jsonb, updated_at = NOW() WHERE id = $2`,
@@ -572,6 +724,108 @@ router.delete('/:id/floor-plans/:fpid/walls/:widx', async (req, res) => {
   }
 });
 
+// ---------------- Interior walls (independent line segments) ----------------
+async function ensureFloorPlanBelongsToProject(fpid, projectId) {
+  const { rows } = await query(
+    'SELECT id FROM floor_plans WHERE id = $1 AND project_id = $2',
+    [fpid, projectId]
+  );
+  return rows.length > 0;
+}
+
+router.get('/:id/floor-plans/:fpid/interior-walls', async (req, res) => {
+  const { id, fpid } = req.params;
+  if (!(await ensureFloorPlanBelongsToProject(fpid, id))) {
+    return res.status(404).json({ error: 'floor plan not found' });
+  }
+  const { rows } = await query(
+    'SELECT * FROM floor_plan_interior_walls WHERE floor_plan_id = $1 ORDER BY id',
+    [fpid]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/floor-plans/:fpid/interior-walls', async (req, res) => {
+  const { id, fpid } = req.params;
+  const b = req.body || {};
+  if (b.x1 == null || b.y1 == null || b.x2 == null || b.y2 == null) {
+    return res.status(400).json({ error: 'x1, y1, x2, y2 required' });
+  }
+  const wallType = b.wall_type || 'interior_2x4';
+  if (!INTERIOR_WALL_TYPES.has(wallType)) {
+    return res.status(400).json({ error: `wall_type must be one of: ${[...INTERIOR_WALL_TYPES].join(', ')}` });
+  }
+  if (!(await ensureFloorPlanBelongsToProject(fpid, id))) {
+    return res.status(404).json({ error: 'floor plan not found' });
+  }
+  const { rows } = await query(
+    `INSERT INTO floor_plan_interior_walls
+       (floor_plan_id, x1, y1, x2, y2, wall_type, height, on_concrete, sheathing_override, drywall_override)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+    [
+      fpid, b.x1, b.y1, b.x2, b.y2,
+      wallType, b.height ?? null, !!b.on_concrete,
+      b.sheathing_override ?? null, b.drywall_override ?? null,
+    ]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.put('/:id/floor-plans/:fpid/interior-walls/:iwid', async (req, res) => {
+  const { id, fpid, iwid } = req.params;
+  const b = req.body || {};
+  const updates = {};
+  for (const f of INTERIOR_WALL_FIELDS) {
+    if (f in b) {
+      if (f === 'wall_type' && !INTERIOR_WALL_TYPES.has(b[f])) {
+        return res.status(400).json({ error: 'invalid wall_type for interior wall' });
+      }
+      updates[f] = b[f] === '' ? null : b[f];
+    }
+  }
+  const keys = Object.keys(updates);
+  if (keys.length === 0) {
+    const { rows } = await query(
+      `SELECT iw.* FROM floor_plan_interior_walls iw
+       JOIN floor_plans fp ON fp.id = iw.floor_plan_id
+       WHERE iw.id = $1 AND iw.floor_plan_id = $2 AND fp.project_id = $3`,
+      [iwid, fpid, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'not found' });
+    return res.json(rows[0]);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(iwid, fpid, id);
+  const { rows } = await query(
+    `UPDATE floor_plan_interior_walls SET ${setParts}
+     WHERE id = $${values.length - 2} AND floor_plan_id = $${values.length - 1}
+       AND floor_plan_id IN (SELECT id FROM floor_plans WHERE project_id = $${values.length})
+     RETURNING *`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
+router.delete('/:id/floor-plans/:fpid/interior-walls/:iwid', async (req, res) => {
+  const { id, fpid, iwid } = req.params;
+  const { rowCount } = await query(
+    `DELETE FROM floor_plan_interior_walls iw
+     USING floor_plans fp
+     WHERE iw.floor_plan_id = fp.id
+       AND fp.project_id = $1
+       AND iw.floor_plan_id = $2
+       AND iw.id = $3`,
+    [id, fpid, iwid]
+  );
+  if (rowCount === 0) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
 // Copy one level's geometry and walls to another level (e.g., Floor 1 → Floor 2).
 // Replaces target's corners + walls. Openings are NOT copied.
 router.post('/:id/floor-plans/copy-level', async (req, res) => {
@@ -700,6 +954,185 @@ router.delete('/:id/roof', async (req, res) => {
   res.status(204).end();
 });
 
+// ---------------- Packages (line items quoted separately) ----------------
+const PACKAGE_FIELDS = ['name', 'package_type', 'notes', 'quantity', 'unit'];
+
+router.get('/:id/packages', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    'SELECT * FROM packages WHERE project_id = $1 ORDER BY id', [id]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/packages', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  if (!b.name || !String(b.name).trim()) {
+    return res.status(400).json({ error: 'name required' });
+  }
+  const { rows } = await query(
+    `INSERT INTO packages (project_id, name, package_type, notes, quantity, unit)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [
+      id,
+      String(b.name).trim(),
+      b.package_type || 'custom',
+      b.notes || null,
+      b.quantity != null ? Number(b.quantity) : 1,
+      b.unit || 'PKG',
+    ]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.put('/:id/packages/:pid', async (req, res) => {
+  const { id, pid } = req.params;
+  const b = req.body || {};
+  const updates = {};
+  for (const f of PACKAGE_FIELDS) {
+    if (f in b) updates[f] = b[f] === '' ? null : b[f];
+  }
+  const keys = Object.keys(updates);
+  if (keys.length === 0) {
+    const { rows } = await query(
+      'SELECT * FROM packages WHERE id = $1 AND project_id = $2', [pid, id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'not found' });
+    return res.json(rows[0]);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(pid, id);
+  const { rows } = await query(
+    `UPDATE packages SET ${setParts}
+     WHERE id = $${values.length - 1} AND project_id = $${values.length}
+     RETURNING *`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
+router.delete('/:id/packages/:pid', async (req, res) => {
+  const { id, pid } = req.params;
+  await query('DELETE FROM packages WHERE id = $1 AND project_id = $2', [pid, id]);
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
+// ---------------- Floor (singleton per project) ----------------
+const FLOOR_FIELDS = ['floor_area_sf', 'subfloor_type', 'level', 'notes'];
+
+router.get('/:id/floor', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    'SELECT * FROM floors WHERE project_id = $1 ORDER BY id LIMIT 1', [id]
+  );
+  res.json(rows[0] || null);
+});
+
+router.post('/:id/floor', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  if (b.floor_area_sf == null) {
+    return res.status(400).json({ error: 'floor_area_sf required' });
+  }
+  const { rows } = await query(
+    `INSERT INTO floors (project_id, level, floor_area_sf, subfloor_type, notes)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    [id, b.level || 'floor1', Number(b.floor_area_sf), b.subfloor_type || '58tgcsp', b.notes || null]
+  );
+  // Auto-create a "Floor Package" line item if one doesn't already exist for this project.
+  const existing = await query(
+    `SELECT id FROM packages WHERE project_id = $1 AND package_type = 'floor' LIMIT 1`,
+    [id]
+  );
+  if (existing.rowCount === 0) {
+    await query(
+      `INSERT INTO packages (project_id, name, package_type, quantity, unit)
+       VALUES ($1, 'Floor Package', 'floor', 1, 'PKG')`,
+      [id]
+    );
+  }
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.put('/:id/floor', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const updates = {};
+  for (const f of FLOOR_FIELDS) {
+    if (f in b) updates[f] = b[f] === '' ? null : b[f];
+  }
+  const keys = Object.keys(updates);
+  if (keys.length === 0) {
+    const { rows } = await query('SELECT * FROM floors WHERE project_id = $1 ORDER BY id LIMIT 1', [id]);
+    return res.json(rows[0] || null);
+  }
+  const setParts = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
+  const values = keys.map((k) => updates[k]);
+  values.push(id);
+  const { rows } = await query(
+    `UPDATE floors SET ${setParts}
+     WHERE project_id = $${values.length}
+     RETURNING *`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'no floor for project' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
+router.delete('/:id/floor', async (req, res) => {
+  const { id } = req.params;
+  await query('DELETE FROM floors WHERE project_id = $1', [id]);
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
+// ---------------- Material overrides (per-project SKU substitutions) ----------------
+router.get('/:id/overrides', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    'SELECT * FROM material_overrides WHERE project_id = $1 ORDER BY id', [id]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/overrides', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const original = (b.original_description || '').trim();
+  const override = (b.override_description || '').trim();
+  if (!original || !override) {
+    return res.status(400).json({ error: 'original_description and override_description required' });
+  }
+  const { rows } = await query(
+    `INSERT INTO material_overrides (project_id, original_description, override_description)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (project_id, original_description)
+     DO UPDATE SET override_description = EXCLUDED.override_description, created_at = NOW()
+     RETURNING *`,
+    [id, original, override]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.delete('/:id/overrides/:oid', async (req, res) => {
+  const { id, oid } = req.params;
+  await query(
+    'DELETE FROM material_overrides WHERE id = $1 AND project_id = $2',
+    [oid, id]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
 // Material list — combined rollup of typed measurements + sketched walls
 router.get('/:id/material-list', async (req, res) => {
   const { id } = req.params;
@@ -751,7 +1184,43 @@ router.get('/:id/material-list', async (req, res) => {
          WHERE fpw.floor_plan_id = $1`,
         [fp.id]
       )).rows;
-      wallItems.push(...computeFloorPlanMaterials(fp.corners || [], fpWalls, lvlSettings, fpOpenings, fp.level));
+      const fpInteriorRows = (await query(
+        'SELECT * FROM floor_plan_interior_walls WHERE floor_plan_id = $1 ORDER BY id',
+        [fp.id]
+      )).rows;
+
+      // Build polygon walls (exterior) + interior segment walls.
+      const polyWalls = buildFloorPlanWalls(fp.corners || [], fpWalls);
+      const interiorWalls = fpInteriorRows.map((r) => ({
+        id: `iw-${r.id}`,
+        x1: Number(r.x1), y1: Number(r.y1), x2: Number(r.x2), y2: Number(r.y2),
+        wall_type: r.wall_type,
+        height: r.height != null ? Number(r.height) : null,
+        on_concrete: !!r.on_concrete,
+        sheathing_override: r.sheathing_override,
+        drywall_override: r.drywall_override,
+        extra_corner_studs: 0,
+      }));
+      const allWalls = [...polyWalls, ...interiorWalls];
+      if (allWalls.length === 0) continue;
+
+      // Openings only attach to polygon walls (interior walls don't carry openings).
+      const openingsByWallId = new Map();
+      for (const o of fpOpenings) {
+        const key = o.floor_plan_wall_id;
+        if (key == null) continue;
+        if (!openingsByWallId.has(key)) openingsByWallId.set(key, []);
+        openingsByWallId.get(key).push(o);
+      }
+      const enrichedOpenings = fpOpenings.map((o) => {
+        const w = polyWalls.find((x) => x.id === o.floor_plan_wall_id);
+        return { ...o, wall_id: o.floor_plan_wall_id, wall_type: w?.wall_type };
+      });
+
+      for (const w of allWalls) {
+        wallItems.push(...computeWallMaterials(w, lvlSettings, openingsByWallId.get(w.id) || [], fp.level));
+      }
+      wallItems.push(...computeProjectMaterials(allWalls, lvlSettings, enrichedOpenings, fp.level));
     }
   } else {
     // Legacy: use the walls table directly (floor 1 prefix)
@@ -777,6 +1246,31 @@ router.get('/:id/material-list', async (req, res) => {
     'SELECT * FROM roofs WHERE project_id = $1 ORDER BY id LIMIT 1', [id]
   )).rows[0];
   if (roofRow) wallItems.push(...computeRoofMaterials(roofRow));
+
+  // Floor items (subfloor + adhesive). Singleton per project.
+  const floorRow = (await query(
+    'SELECT * FROM floors WHERE project_id = $1 ORDER BY id LIMIT 1', [id]
+  )).rows[0];
+  if (floorRow) {
+    const areaSf = Number(floorRow.floor_area_sf) || 0;
+    if (areaSf > 0) {
+      const lvl = floorRow.level || 'floor1';
+      const floorSection = sectionFor('FLOOR', lvl);
+      const subfloorName = floorRow.subfloor_type === '34tgcsp'
+        ? '4 X 8 - 3/4 T&G STD.SPRUCE PLY'
+        : '4 X 8 - 5/8 T&G STD.SPRUCE PLY';
+      wallItems.push({
+        section: floorSection, category: 'Subfloor',
+        name: subfloorName, unit: 'EA',
+        quantity: Math.ceil(areaSf / 32) * 1.10,
+      });
+      wallItems.push({
+        section: floorSection, category: 'Subfloor Adhesive',
+        name: 'ADHSV,CNSTR PL PREM PNT825ML', unit: 'EA',
+        quantity: Math.ceil(areaSf / 500),
+      });
+    }
+  }
 
   const wallRolled = sumMaterials(wallItems);
 
@@ -826,6 +1320,69 @@ router.get('/:id/material-list', async (req, res) => {
       if (ca !== cb) return ca - cb;
       return a.material_name.localeCompare(b.material_name);
     });
+
+  // Apply per-project material overrides — purely a display swap. Keep the original
+  // description on each row so the UI can show "modified" + reset to original.
+  const overrideRows = (await query(
+    'SELECT original_description, override_description FROM material_overrides WHERE project_id = $1', [id]
+  )).rows;
+  const overrideMap = new Map(
+    overrideRows.map((o) => [o.original_description.trim().toLowerCase(), o.override_description])
+  );
+  for (const r of out) {
+    const key = (r.material_name || '').trim().toLowerCase();
+    const sub = overrideMap.get(key);
+    if (sub) {
+      r.original_description = r.material_name;
+      r.material_name = sub;
+      r.modified = true;
+    } else {
+      r.modified = false;
+    }
+  }
+
+  // Attach SKU catalog metadata. Match by lowercased trimmed description (post-override).
+  const skuRows = (await query(
+    'SELECT item_number, catalog_number, description, definition FROM sku_catalog'
+  )).rows;
+  const skuByDesc = new Map();
+  for (const s of skuRows) {
+    if (!s.description) continue;
+    skuByDesc.set(s.description.trim().toLowerCase(), s);
+  }
+  for (const r of out) {
+    const sku = skuByDesc.get((r.material_name || '').trim().toLowerCase());
+    r.catalog_number = sku?.catalog_number ?? null;
+    r.item_number = sku?.item_number ?? null;
+    // Definition drives the substitution-group dropdown on the frontend. We use the
+    // ORIGINAL description's definition so the dropdown stays consistent across overrides.
+    const origKey = (r.original_description || r.material_name || '').trim().toLowerCase();
+    r.definition = skuByDesc.get(origKey)?.definition ?? null;
+  }
+
+  // Append packages as their own rows under section "Packages".
+  const packageRows = (await query(
+    'SELECT * FROM packages WHERE project_id = $1 ORDER BY id', [id]
+  )).rows;
+  const packagesSection = sectionFor('PACKAGES');
+  for (const p of packageRows) {
+    out.push({
+      material_id: `pkg-${p.id}`,
+      package_id: p.id,
+      material_name: p.name,
+      material_unit: p.unit || 'PKG',
+      section: packagesSection,
+      category: p.notes || null,
+      total_quantity: Number(p.quantity),
+      catalog_number: null,
+      item_number: null,
+      definition: null,
+      modified: false,
+      is_package: true,
+      package_type: p.package_type,
+    });
+  }
+
   res.json(out);
 });
 

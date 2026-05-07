@@ -15,6 +15,9 @@ export default function ProjectDetail() {
   const [openings, setOpenings] = useState([]);
   const [walls, setWalls] = useState([]);
   const [floorPlanWalls, setFloorPlanWalls] = useState([]);
+  const [packages, setPackages] = useState([]);
+  const [floor, setFloor] = useState(null);
+  const [skuCatalog, setSkuCatalog] = useState([]);
   const [tab, setTab] = useState('measurements');
   const [error, setError] = useState('');
   // Per-section collapsed state (true = collapsed, false/undefined = expanded)
@@ -31,7 +34,7 @@ export default function ProjectDetail() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [p, a, ml, ps, gs, ws, ops, fps] = await Promise.all([
+      const [p, a, ml, ps, gs, ws, ops, fps, pkgs, fl, skus] = await Promise.all([
         api.getProject(id),
         api.listAssemblies(),
         api.materialList(id),
@@ -40,6 +43,9 @@ export default function ProjectDetail() {
         api.listWalls(id),
         api.listOpenings(id),
         api.listFloorPlans(id),
+        api.listPackages(id),
+        api.getFloor(id),
+        api.listSkuCatalog(),
       ]);
       setProject(p);
       setAssemblies(a);
@@ -48,6 +54,9 @@ export default function ProjectDetail() {
       setGlobalSettings(gs);
       setWalls(ws);
       setOpenings(ops);
+      setPackages(pkgs);
+      setFloor(fl);
+      setSkuCatalog(skus);
       // For now there's just one floor plan per project — fetch its walls for the openings table label
       if (fps && fps[0]) {
         const full = await api.getFloorPlan(id, fps[0].id);
@@ -59,8 +68,18 @@ export default function ProjectDetail() {
     } catch (e) { setError(e.message); }
   }, [id]);
 
+  const refetchPackages = useCallback(async () => {
+    try { setPackages(await api.listPackages(id)); }
+    catch (e) { setError(e.message); }
+  }, [id]);
+
   const refetchMaterialList = useCallback(async () => {
     try { setMaterialList(await api.materialList(id)); }
+    catch (e) { setError(e.message); }
+  }, [id]);
+
+  const refetchProjectSettings = useCallback(async () => {
+    try { setProjectSettings(await api.getProjectSettings(id)); }
     catch (e) { setError(e.message); }
   }, [id]);
 
@@ -123,26 +142,100 @@ export default function ProjectDetail() {
     await loadAll();
   }
 
-  function exportCsv() {
-    const header = ['Group', 'Section', 'Material', 'Unit', 'Total quantity (incl. waste)'];
+  function exportFullCsv() {
+    const header = ['Group', 'Section', 'Catalog#', 'Item#', 'Material', 'Unit', 'Total Qty'];
     const rows = materialList.map(r => [
       r.section || '—',
       r.category || '—',
+      r.catalog_number ?? '—',
+      r.item_number ?? '—',
       r.material_name,
       r.material_unit,
       String(Number(r.total_quantity)),
     ]);
     const csv = [header, ...rows].map(r => r.map(escapeCsv).join(',')).join('\n');
+    downloadCsv(csv, `${project.name.replace(/[^a-z0-9-_]+/gi,'_')}_material_list.csv`);
+  }
+
+  function exportPosCsv() {
+    // Group by catalog_number; rows without a catalog group by description.
+    const groups = new Map();
+    for (const r of materialList) {
+      const key = r.catalog_number
+        ? `cat|${r.catalog_number}`
+        : `desc|${(r.material_name || '').trim().toLowerCase()}`;
+      const existing = groups.get(key);
+      if (existing) {
+        existing.total_quantity += Number(r.total_quantity);
+      } else {
+        groups.set(key, {
+          catalog_number: r.catalog_number ?? null,
+          item_number: r.item_number ?? null,
+          description: r.material_name,
+          unit: r.material_unit,
+          total_quantity: Number(r.total_quantity),
+        });
+      }
+    }
+    const rows = Array.from(groups.values())
+      .sort((a, b) => (a.description || '').localeCompare(b.description || ''))
+      .map(r => [
+        r.catalog_number ?? '—',
+        r.item_number ?? '—',
+        r.description,
+        String(r.total_quantity),
+        r.unit,
+      ]);
+    const header = ['Catalog#', 'Item#', 'Description', 'Total Qty', 'Unit'];
+    const csv = [header, ...rows].map(r => r.map(escapeCsv).join(',')).join('\n');
+    downloadCsv(csv, `${project.name.replace(/[^a-z0-9-_]+/gi,'_')}_pos_list.csv`);
+  }
+
+  function downloadCsv(csv, filename) {
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${project.name.replace(/[^a-z0-9-_]+/gi,'_')}_material_list.csv`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
   }
 
   function printList() { window.print(); }
+
+  // Substitution callbacks for the material list dropdown.
+  const applyOverride = useCallback(async (originalDescription, overrideDescription) => {
+    try {
+      await api.upsertOverride(id, {
+        original_description: originalDescription,
+        override_description: overrideDescription,
+      });
+      await refetchMaterialList();
+    } catch (e) { setError(e.message); }
+  }, [id, refetchMaterialList]);
+
+  const resetOverride = useCallback(async (originalDescription) => {
+    try {
+      const overrides = await api.listOverrides(id);
+      const found = overrides.find(
+        (o) => o.original_description.trim().toLowerCase() === originalDescription.trim().toLowerCase()
+      );
+      if (found) await api.deleteOverride(id, found.id);
+      await refetchMaterialList();
+    } catch (e) { setError(e.message); }
+  }, [id, refetchMaterialList]);
+
+  // Build substitutes map: definition -> array of SKU rows in that group.
+  const skusByDefinition = React.useMemo(() => {
+    const m = new Map();
+    for (const s of skuCatalog) {
+      const d = s.definition;
+      if (!d) continue;
+      if (!m.has(d)) m.set(d, []);
+      m.get(d).push(s);
+    }
+    return m;
+  }, [skuCatalog]);
 
   if (!project) return <p className="muted">{error || 'Loading...'}</p>;
 
@@ -150,7 +243,14 @@ export default function ProjectDetail() {
     <div>
       <p><Link to="/projects">← All projects</Link></p>
       <h1>{project.name}</h1>
-      {project.customer && <p className="muted">Customer: {project.customer}</p>}
+      {(project.customer_id || project.customer) && (
+        <p className="muted">
+          Customer:{' '}
+          {project.customer_id ? (
+            <Link to={`/customers/${project.customer_id}`}>{project.customer_name || project.customer}</Link>
+          ) : project.customer}
+        </p>
+      )}
 
       <div className="tabs">
         <button
@@ -228,6 +328,7 @@ export default function ProjectDetail() {
           onProjectSettingsChange={handleProjectSettingsChange}
           onMaterialsChanged={refetchMaterialList}
           onOpeningsChanged={refetchOpenings}
+          refetchProjectSettings={refetchProjectSettings}
         />
       )}
 
@@ -241,27 +342,57 @@ export default function ProjectDetail() {
 
       <OpeningsTable openings={openings} walls={walls} floorPlanWalls={floorPlanWalls} />
 
+      <h2>Floor</h2>
+      <FloorPanel
+        projectId={id}
+        floor={floor}
+        setFloor={setFloor}
+        onMaterialsChanged={refetchMaterialList}
+        onPackagesChanged={refetchPackages}
+      />
+
       <h2>Material list</h2>
       <p className="muted" style={{ marginTop: 0 }}>
         Combined rollup of typed measurements and sketched walls.
       </p>
-      <div className="toolbar">
-        <button className="primary" onClick={exportCsv} disabled={!materialList.length}>Export CSV</button>
-        <button className="secondary" onClick={printList} disabled={!materialList.length}>Print</button>
-        <span className="muted">Quantities include all per-material waste factors.</span>
-      </div>
       {materialList.length === 0 ? (
         <p className="muted">No materials yet. Add measurements or draw walls in the Sketch tab.</p>
       ) : (
         <table>
           <thead>
-            <tr><th>Section</th><th>Material</th><th>Quantity</th><th>Unit</th></tr>
+            <tr>
+              <th>Section</th>
+              <th>Category</th>
+              <th>Catalog#</th>
+              <th>Item#</th>
+              <th>Material</th>
+              <th>Qty</th>
+              <th>Unit</th>
+              <th style={{ width: '2.5rem' }}></th>
+            </tr>
           </thead>
           <tbody>
-            {renderGroupedMaterialRows(materialList, collapsedSections, toggleSection)}
+            {renderGroupedMaterialRows(materialList, collapsedSections, toggleSection, {
+              skusByDefinition, applyOverride, resetOverride,
+            })}
           </tbody>
         </table>
       )}
+
+      <h2>Packages</h2>
+      <PackagesSection
+        projectId={id}
+        packages={packages}
+        onChanged={async () => { await refetchPackages(); await refetchMaterialList(); }}
+        onError={setError}
+      />
+
+      <div className="toolbar" style={{ marginTop: '1rem' }}>
+        <button className="primary" onClick={exportFullCsv} disabled={!materialList.length}>Export Full List</button>
+        <button className="primary" onClick={exportPosCsv} disabled={!materialList.length}>Export POS List</button>
+        <button className="secondary" onClick={printList} disabled={!materialList.length}>Print</button>
+        <span className="muted">Quantities include all per-material waste factors.</span>
+      </div>
       {error && <p className="error">{error}</p>}
     </div>
   );
@@ -275,10 +406,9 @@ function escapeCsv(v) {
 
 // Render the material list as collapsible group bands.
 // Server already returns rows sorted by section then category, so we just
-// inject a clickable group header before each new section. Within a section
-// the per-row "Section" column shows the material's category (Bottom Plate,
-// Studs, Sheathing, etc.).
-function renderGroupedMaterialRows(rows, collapsedSections, toggleSection) {
+// inject a clickable group header before each new section.
+function renderGroupedMaterialRows(rows, collapsedSections, toggleSection, opts = {}) {
+  const { skusByDefinition, applyOverride, resetOverride } = opts;
   // Group rows by section (preserves order)
   const groups = [];
   let cur = null;
@@ -302,7 +432,7 @@ function renderGroupedMaterialRows(rows, collapsedSections, toggleSection) {
         onClick={() => toggleSection(label)}
         style={{ cursor: 'pointer' }}
       >
-        <td colSpan={4}>
+        <td colSpan={8}>
           <span style={{ display: 'inline-block', width: '1.2em' }}>
             {isCollapsed ? '▶' : '▼'}
           </span>
@@ -316,17 +446,370 @@ function renderGroupedMaterialRows(rows, collapsedSections, toggleSection) {
     if (!isCollapsed) {
       g.rows.forEach((r, i) => {
         out.push(
-          <tr key={`${r.material_id}|${g.section ?? ''}|${r.category ?? ''}|${i}`} className="material-row">
-            <td className="material-row-section-cell">
-              {r.category || <span className="muted">—</span>}
-            </td>
-            <td>{r.material_name}</td>
-            <td>{Number(r.total_quantity)}</td>
-            <td>{r.material_unit}</td>
-          </tr>
+          <MaterialRow
+            key={`${r.material_id}|${g.section ?? ''}|${r.category ?? ''}|${i}`}
+            row={r}
+            sectionLabel={g.section}
+            skusByDefinition={skusByDefinition}
+            applyOverride={applyOverride}
+            resetOverride={resetOverride}
+          />
         );
       });
     }
   });
   return out;
+}
+
+function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, resetOverride }) {
+  const [open, setOpen] = useState(false);
+  // Substitutes: SKUs in the same definition group, excluding the current displayed SKU.
+  const substitutes = (() => {
+    if (!skusByDefinition || !row.definition) return [];
+    const list = skusByDefinition.get(row.definition) || [];
+    return list.filter((s) => s.description !== row.material_name);
+  })();
+  const hasGroup = substitutes.length > 0 || row.modified;
+  const isPackage = !!row.is_package;
+
+  return (
+    <tr className="material-row">
+      <td className="material-row-section-cell">
+        {sectionLabel || <span className="muted">—</span>}
+      </td>
+      <td>{row.category || <span className="muted">—</span>}</td>
+      <td>{row.catalog_number || <span className="muted">—</span>}</td>
+      <td>{row.item_number || <span className="muted">—</span>}</td>
+      <td>
+        {row.material_name}
+        {row.modified && (
+          <span
+            title={`Substituted from: ${row.original_description}`}
+            style={{
+              display: 'inline-block', marginLeft: 6,
+              width: 8, height: 8, borderRadius: '50%',
+              background: '#D97706', verticalAlign: 'middle',
+            }}
+          />
+        )}
+      </td>
+      <td>{Number(row.total_quantity)}</td>
+      <td>{row.material_unit}</td>
+      <td style={{ position: 'relative', textAlign: 'center' }}>
+        {!isPackage && hasGroup && (
+          <>
+            <button
+              type="button"
+              onClick={() => setOpen((v) => !v)}
+              title="Substitute material"
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                padding: '0.1rem 0.35rem', fontSize: '0.85rem', color: '#6B7280',
+              }}
+            >▼</button>
+            {open && (
+              <div
+                style={{
+                  position: 'absolute', right: 0, top: '100%',
+                  background: 'white', border: '1px solid #E5E7EB',
+                  borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
+                  zIndex: 50, minWidth: 280, maxHeight: 320, overflowY: 'auto',
+                  textAlign: 'left',
+                }}
+                onMouseLeave={() => setOpen(false)}
+              >
+                {row.modified && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOpen(false);
+                      resetOverride(row.original_description);
+                    }}
+                    style={{
+                      display: 'block', width: '100%', textAlign: 'left',
+                      padding: '0.5rem 0.75rem', background: 'transparent',
+                      border: 'none', borderBottom: '1px solid #E5E7EB',
+                      cursor: 'pointer', fontWeight: 600, color: '#B91C1C',
+                    }}
+                  >Reset to original ({row.original_description})</button>
+                )}
+                {substitutes.length === 0 ? (
+                  <div style={{ padding: '0.5rem 0.75rem', color: '#6B7280' }}>No alternates available.</div>
+                ) : (
+                  substitutes.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => {
+                        setOpen(false);
+                        const original = row.original_description || row.material_name;
+                        applyOverride(original, s.description);
+                      }}
+                      style={{
+                        display: 'block', width: '100%', textAlign: 'left',
+                        padding: '0.45rem 0.75rem', background: 'transparent',
+                        border: 'none', cursor: 'pointer', fontSize: '0.85rem',
+                        borderBottom: '1px solid #F3F4F6',
+                      }}
+                    >
+                      <div style={{ fontWeight: 500 }}>{s.description}</div>
+                      <div style={{ color: '#6B7280', fontSize: '0.75rem' }}>
+                        {s.catalog_number || '—'} · {s.item_number || '—'}
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+// ---------- Floor panel ----------
+const SUBFLOOR_OPTIONS = [
+  { value: '58tgcsp', label: '5/8" T&G CSP Plywood' },
+  { value: '34tgcsp', label: '3/4" T&G CSP Plywood' },
+];
+
+function FloorPanel({ projectId, floor, setFloor, onMaterialsChanged, onPackagesChanged }) {
+  const [draftArea, setDraftArea] = useState('');
+  const [error, setError] = useState('');
+  const saveTimer = useRef(null);
+
+  async function createFloor() {
+    if (!draftArea) return;
+    try {
+      const created = await api.createFloor(projectId, {
+        floor_area_sf: Number(draftArea),
+        subfloor_type: '58tgcsp',
+      });
+      setFloor(created);
+      setDraftArea('');
+      onMaterialsChanged?.();
+      onPackagesChanged?.();
+    } catch (e) { setError(e.message); }
+  }
+
+  function patchFloor(patch) {
+    setFloor((cur) => ({ ...cur, ...patch }));
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        const updated = await api.updateFloor(projectId, patch);
+        setFloor(updated);
+        onMaterialsChanged?.();
+      } catch (e) { setError(e.message); }
+    }, 400);
+  }
+
+  async function deleteFloor() {
+    if (!confirm('Delete the floor? This removes subfloor materials from the takeoff.')) return;
+    try {
+      await api.deleteFloor(projectId);
+      setFloor(null);
+      onMaterialsChanged?.();
+    } catch (e) { setError(e.message); }
+  }
+
+  if (!floor) {
+    return (
+      <div className="card">
+        <p className="muted" style={{ marginTop: 0 }}>
+          No floor yet. Enter the floor area below to add subfloor + adhesive to the takeoff.
+        </p>
+        <div className="row">
+          <div>
+            <label>Floor area (sf)</label>
+            <input type="number" value={draftArea} onChange={(e) => setDraftArea(e.target.value)} placeholder="720" />
+          </div>
+          <div style={{ flex: '0 0 auto' }}>
+            <button className="primary" onClick={createFloor}>Create floor</button>
+          </div>
+        </div>
+        {error && <p className="error">{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <div className="row" style={{ marginBottom: '0.5rem' }}>
+        <strong style={{ flex: 1 }}>
+          Floor: {Number(floor.floor_area_sf)} sf · {SUBFLOOR_OPTIONS.find((o) => o.value === floor.subfloor_type)?.label || floor.subfloor_type}
+        </strong>
+        <button className="danger" style={{ flex: '0 0 auto', padding: '0.3rem 0.7rem' }} onClick={deleteFloor}>Delete floor</button>
+      </div>
+      <div className="row">
+        <div>
+          <label>Floor area (sf)</label>
+          <input
+            type="number"
+            value={floor.floor_area_sf ?? ''}
+            onChange={(e) => patchFloor({ floor_area_sf: e.target.value === '' ? null : Number(e.target.value) })}
+          />
+        </div>
+        <div>
+          <label>Subfloor type</label>
+          <select
+            value={floor.subfloor_type}
+            onChange={(e) => patchFloor({ subfloor_type: e.target.value })}
+          >
+            {SUBFLOOR_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+      </div>
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+// ---------- Packages section ----------
+const PACKAGE_TYPE_OPTIONS = [
+  { value: 'truss',          label: 'Truss Package' },
+  { value: 'floor',          label: 'Floor Package' },
+  { value: 'window_door',    label: 'Window & Door Package' },
+  { value: 'interior_door',  label: 'Interior Door Package' },
+  { value: 'railing',        label: 'Railing Package' },
+  { value: 'custom',         label: 'Custom' },
+];
+
+function PackagesSection({ projectId, packages, onChanged, onError }) {
+  const [adding, setAdding] = useState(false);
+  const [draftType, setDraftType] = useState('truss');
+  const [draftName, setDraftName] = useState('Truss Package');
+  const [draftNotes, setDraftNotes] = useState('');
+  const [draftQty, setDraftQty] = useState('1');
+  const [draftUnit, setDraftUnit] = useState('PKG');
+
+  function changeType(t) {
+    setDraftType(t);
+    if (t === 'custom') setDraftName('');
+    else setDraftName(PACKAGE_TYPE_OPTIONS.find((o) => o.value === t)?.label || '');
+  }
+
+  async function submitAdd() {
+    if (!draftName.trim()) return;
+    try {
+      await api.createPackage(projectId, {
+        name: draftName.trim(),
+        package_type: draftType,
+        notes: draftNotes.trim() || null,
+        quantity: Number(draftQty) || 1,
+        unit: draftUnit.trim() || 'PKG',
+      });
+      setAdding(false);
+      changeType('truss');
+      setDraftNotes('');
+      setDraftQty('1');
+      setDraftUnit('PKG');
+      onChanged?.();
+    } catch (e) { onError?.(e.message); }
+  }
+
+  async function deletePkg(pid) {
+    if (!confirm('Delete this package?')) return;
+    try {
+      await api.deletePackage(projectId, pid);
+      onChanged?.();
+    } catch (e) { onError?.(e.message); }
+  }
+
+  async function patchPkg(p, patch) {
+    try {
+      await api.updatePackage(projectId, p.id, patch);
+      onChanged?.();
+    } catch (e) { onError?.(e.message); }
+  }
+
+  return (
+    <>
+      {packages.length === 0 ? (
+        <p className="muted">No packages yet.</p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>Package Name</th>
+              <th>Notes</th>
+              <th>Qty</th>
+              <th>Unit</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {packages.map((p) => (
+              <tr key={p.id}>
+                <td>
+                  <input
+                    defaultValue={p.name}
+                    onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.name) patchPkg(p, { name: v }); }}
+                  />
+                </td>
+                <td>
+                  <input
+                    defaultValue={p.notes || ''}
+                    onBlur={(e) => patchPkg(p, { notes: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    type="number"
+                    style={{ width: '5rem' }}
+                    defaultValue={Number(p.quantity)}
+                    onBlur={(e) => { const v = Number(e.target.value); if (!isNaN(v) && v !== Number(p.quantity)) patchPkg(p, { quantity: v }); }}
+                  />
+                </td>
+                <td>
+                  <input
+                    style={{ width: '5rem' }}
+                    defaultValue={p.unit}
+                    onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.unit) patchPkg(p, { unit: v }); }}
+                  />
+                </td>
+                <td><button className="danger" onClick={() => deletePkg(p.id)}>Delete</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {!adding ? (
+        <button className="primary" style={{ marginTop: '0.5rem' }} onClick={() => setAdding(true)}>+ Add Package</button>
+      ) : (
+        <div className="card" style={{ marginTop: '0.5rem' }}>
+          <div className="row">
+            <div>
+              <label>Type</label>
+              <select value={draftType} onChange={(e) => changeType(e.target.value)}>
+                {PACKAGE_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: 2 }}>
+              <label>Name</label>
+              <input value={draftName} onChange={(e) => setDraftName(e.target.value)} placeholder="Package name" />
+            </div>
+            <div style={{ flex: 2 }}>
+              <label>Notes</label>
+              <input value={draftNotes} onChange={(e) => setDraftNotes(e.target.value)} placeholder="Optional notes" />
+            </div>
+            <div>
+              <label>Qty</label>
+              <input type="number" style={{ width: '5rem' }} value={draftQty} onChange={(e) => setDraftQty(e.target.value)} />
+            </div>
+            <div>
+              <label>Unit</label>
+              <input style={{ width: '5rem' }} value={draftUnit} onChange={(e) => setDraftUnit(e.target.value)} />
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: '0.5rem' }}>
+            <button className="primary" onClick={submitAdd}>Add</button>
+            <button className="secondary" onClick={() => setAdding(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </>
+  );
 }

@@ -86,6 +86,19 @@ export const api = {
       method: 'POST', body: JSON.stringify({ from_level, to_level }),
     }),
 
+  listInteriorWalls: (projectId, fpid) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}/interior-walls`),
+  createInteriorWall: (projectId, fpid, data) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}/interior-walls`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  updateInteriorWall: (projectId, fpid, iwid, data) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}/interior-walls/${iwid}`, {
+      method: 'PUT', body: JSON.stringify(data),
+    }),
+  deleteInteriorWall: (projectId, fpid, iwid) =>
+    request(`/projects/${projectId}/floor-plans/${fpid}/interior-walls/${iwid}`, { method: 'DELETE' }),
+
   getRoof: (projectId) => request(`/projects/${projectId}/roof`),
   createRoof: (projectId, data) =>
     request(`/projects/${projectId}/roof`, { method: 'POST', body: JSON.stringify(data) }),
@@ -93,6 +106,70 @@ export const api = {
     request(`/projects/${projectId}/roof`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteRoof: (projectId) =>
     request(`/projects/${projectId}/roof`, { method: 'DELETE' }),
+
+  listSkuCatalog: () => request('/sku-catalog'),
+
+  listCustomers: () => request('/customers'),
+  getCustomer: (id) => request(`/customers/${id}`),
+  listCustomerProjects: (id) => request(`/customers/${id}/projects`),
+  createCustomer: (data) => request('/customers', { method: 'POST', body: JSON.stringify(data) }),
+  updateCustomer: (id, data) => request(`/customers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteCustomer: (id) => request(`/customers/${id}`, { method: 'DELETE' }),
+
+  uploadPdf: async (projectId, file) => {
+    const fd = new FormData();
+    fd.append('pdf', file);
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/projects/${projectId}/upload-pdf`, {
+      method: 'POST', headers, body: fd,
+    });
+    if (!res.ok) {
+      let msg = 'Upload failed';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.json();
+  },
+  fetchPdfBlob: async (projectId) => {
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/projects/${projectId}/pdf`, { headers });
+    if (res.status === 404) {
+      let body = {};
+      try { body = await res.json(); } catch {}
+      const err = new Error(body.error || 'pdf not found');
+      err.code = body.error;
+      throw err;
+    }
+    if (!res.ok) throw new Error('Failed to load PDF');
+    return res.blob();
+  },
+  deletePdf: (projectId) => request(`/projects/${projectId}/pdf`, { method: 'DELETE' }),
+
+  listPackages: (projectId) => request(`/projects/${projectId}/packages`),
+  createPackage: (projectId, data) =>
+    request(`/projects/${projectId}/packages`, { method: 'POST', body: JSON.stringify(data) }),
+  updatePackage: (projectId, pid, data) =>
+    request(`/projects/${projectId}/packages/${pid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deletePackage: (projectId, pid) =>
+    request(`/projects/${projectId}/packages/${pid}`, { method: 'DELETE' }),
+
+  getFloor: (projectId) => request(`/projects/${projectId}/floor`),
+  createFloor: (projectId, data) =>
+    request(`/projects/${projectId}/floor`, { method: 'POST', body: JSON.stringify(data) }),
+  updateFloor: (projectId, data) =>
+    request(`/projects/${projectId}/floor`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteFloor: (projectId) =>
+    request(`/projects/${projectId}/floor`, { method: 'DELETE' }),
+
+  listOverrides: (projectId) => request(`/projects/${projectId}/overrides`),
+  upsertOverride: (projectId, data) =>
+    request(`/projects/${projectId}/overrides`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteOverride: (projectId, oid) =>
+    request(`/projects/${projectId}/overrides/${oid}`, { method: 'DELETE' }),
 
   listOpenings: (projectId) => request(`/projects/${projectId}/openings`),
   createOpening: (projectId, data) =>

@@ -1,8 +1,13 @@
 import React, { useEffect, useState } from 'react';
+import { api } from '../api.js';
 
 export default function NewProjectModal({ open, onClose, onCreate }) {
   const [name, setName] = useState('');
-  const [customer, setCustomer] = useState('');
+  const [customers, setCustomers] = useState([]);
+  // customerMode: 'none' | 'existing' | 'new'
+  const [customerMode, setCustomerMode] = useState('none');
+  const [customerId, setCustomerId] = useState('');
+  const [newCustomer, setNewCustomer] = useState({ name: '', email: '', phone: '' });
   const [storeys, setStoreys] = useState(1);
   const [floor1Height, setFloor1Height] = useState(9);
   const [floor2Height, setFloor2Height] = useState(9);
@@ -10,12 +15,17 @@ export default function NewProjectModal({ open, onClose, onCreate }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
-  // Reset on open
+  // Reset on open + load customers
   useEffect(() => {
     if (open) {
-      setName(''); setCustomer(''); setStoreys(1);
+      setName('');
+      setCustomerMode('none');
+      setCustomerId('');
+      setNewCustomer({ name: '', email: '', phone: '' });
+      setStoreys(1);
       setFloor1Height(9); setFloor2Height(9);
       setNotes(''); setError(''); setSubmitting(false);
+      api.listCustomers().then(setCustomers).catch(() => {});
     }
   }, [open]);
 
@@ -34,9 +44,29 @@ export default function NewProjectModal({ open, onClose, onCreate }) {
     if (!name.trim()) { setError('Project name is required.'); return; }
     setSubmitting(true);
     try {
+      let resolvedCustomerId = null;
+      let resolvedCustomerText = null;
+      if (customerMode === 'existing' && customerId) {
+        resolvedCustomerId = Number(customerId);
+        resolvedCustomerText = customers.find((c) => c.id === Number(customerId))?.name || null;
+      } else if (customerMode === 'new') {
+        if (!newCustomer.name.trim()) {
+          setError('Customer name is required when creating a new customer.');
+          setSubmitting(false);
+          return;
+        }
+        const created = await api.createCustomer({
+          name: newCustomer.name.trim(),
+          email: newCustomer.email.trim() || null,
+          phone: newCustomer.phone.trim() || null,
+        });
+        resolvedCustomerId = created.id;
+        resolvedCustomerText = created.name;
+      }
       await onCreate({
         name: name.trim(),
-        customer: customer.trim() || null,
+        customer: resolvedCustomerText,
+        customer_id: resolvedCustomerId,
         notes: notes.trim() || null,
         num_storeys: Number(storeys),
         default_wall_height: Number(floor1Height),
@@ -57,7 +87,37 @@ export default function NewProjectModal({ open, onClose, onCreate }) {
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="123 Main St — Smith residence" autoFocus />
 
           <label>Customer (optional)</label>
-          <input value={customer} onChange={(e) => setCustomer(e.target.value)} placeholder="John Smith" />
+          <select value={customerMode} onChange={(e) => setCustomerMode(e.target.value)}>
+            <option value="none">— No customer —</option>
+            <option value="existing">Select existing customer</option>
+            <option value="new">+ New customer</option>
+          </select>
+          {customerMode === 'existing' && (
+            <select value={customerId} onChange={(e) => setCustomerId(e.target.value)} style={{ marginTop: '0.5rem' }}>
+              <option value="">— pick one —</option>
+              {customers.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          )}
+          {customerMode === 'new' && (
+            <div className="card" style={{ marginTop: '0.5rem', padding: '0.75rem' }}>
+              <div className="row">
+                <div style={{ flex: 2 }}>
+                  <label>Customer name *</label>
+                  <input value={newCustomer.name} onChange={(e) => setNewCustomer({ ...newCustomer, name: e.target.value })} />
+                </div>
+                <div style={{ flex: 2 }}>
+                  <label>Email</label>
+                  <input value={newCustomer.email} onChange={(e) => setNewCustomer({ ...newCustomer, email: e.target.value })} />
+                </div>
+                <div>
+                  <label>Phone</label>
+                  <input value={newCustomer.phone} onChange={(e) => setNewCustomer({ ...newCustomer, phone: e.target.value })} />
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="row">
             <div>

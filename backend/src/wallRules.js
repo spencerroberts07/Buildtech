@@ -26,15 +26,18 @@ const BASE_SECTIONS = {
   WINDOWS: 'Windows',
   DOORS: 'Doors',
   FINISHINGS: 'Finishings',
+  FLOOR: 'Floor',
 };
 const SOLO_SECTIONS = {
   EXTERIOR_INSULATION: 'Exterior Insulation',
   ROOF: 'Roof',
+  PACKAGES: 'Packages',
 };
 
 export function sectionFor(baseKey, level = LEVELS.FLOOR1) {
   if (baseKey === 'EXTERIOR_INSULATION') return SOLO_SECTIONS.EXTERIOR_INSULATION;
   if (baseKey === 'ROOF') return SOLO_SECTIONS.ROOF;
+  if (baseKey === 'PACKAGES') return SOLO_SECTIONS.PACKAGES;
   const base = BASE_SECTIONS[baseKey];
   if (!base) throw new Error(`Unknown base section: ${baseKey}`);
   const lvl = LEVEL_LABELS[level] || LEVEL_LABELS.floor1;
@@ -64,10 +67,12 @@ function buildSectionOrder() {
       sectionFor('WINDOWS', level),
       sectionFor('DOORS', level),
       sectionFor('FINISHINGS', level),
+      sectionFor('FLOOR', level),
     );
   }
   out.push(SOLO_SECTIONS.ROOF);
   out.push(SOLO_SECTIONS.EXTERIOR_INSULATION);
+  out.push(SOLO_SECTIONS.PACKAGES);
   return out;
 }
 export const SECTION_ORDER = buildSectionOrder();
@@ -89,12 +94,15 @@ export const CATEGORIES = {
   SILL_GASKET: 'Sill Gasket',
   WALL_BRACING: 'Wall Bracing',
   INSULATION: 'Insulation',
+  VAPOUR_BARRIER: 'Vapour Barrier',
   EXTERIOR_INSULATION: 'Exterior Insulation',
   PLATE_POLY: 'Plate Poly',
   HEADER: 'Header',
   JACK_STUDS: 'Jack Studs',
   SHIMS: 'Shims',
   DRYWALL: 'Drywall',
+  SUBFLOOR: 'Subfloor',
+  SUBFLOOR_ADHESIVE: 'Subfloor Adhesive',
 };
 export const CATEGORY_ORDER = [
   CATEGORIES.BOTTOM_PLATE,
@@ -110,8 +118,11 @@ export const CATEGORY_ORDER = [
   CATEGORIES.SILL_GASKET,
   CATEGORIES.WALL_BRACING,
   CATEGORIES.INSULATION,
+  CATEGORIES.VAPOUR_BARRIER,
   CATEGORIES.PLATE_POLY,
   CATEGORIES.DRYWALL,
+  CATEGORIES.SUBFLOOR,
+  CATEGORIES.SUBFLOOR_ADHESIVE,
   'Hardware',
   'Blocking',
 ];
@@ -162,11 +173,15 @@ const HOUSEWRAP_NAME = "9'X100' TYPAR HOUSEWRAP";
 const WRAP_TAPE_NAME = 'TAPE,SHEATHING PLY RED 60MMX55M';
 const DRYWALL_NAME = '4 X 12 - 1/2 DRYWALL';
 const OSB_NAME = '4 X 8 - 7/16 ORIENTED STRAND BOARD';
-const SILL_GASKET_NAME = 'GASKET,SILL 3/16 WHITE 5.5X82';
+const SILL_GASKET_55_NAME = 'GASKET,SILL 3/16 WHITE 5.5X82';
+const SILL_GASKET_35_NAME = 'GASKET,SILL 3/16 WHITE 3.5X82';
 const BRACING_NAME = '2 X 4 X 16 PREMIUM SPRUCE';
 const PLATE_POLY_NAME = '12 X 300FT CLEAR POLY';
 const HEADER_LUMBER_NAME = '2 X 10 X 16 PREMIUM SPRUCE';
 const SHIMS_NAME = 'SHIMS 10/10 BAG OF 60';
+const VAPOUR_BARRIER_NAME = "VAPOUR BARRIER 6M X1500 8'6\"";
+const VAPOUR_BARRIER_ROLL_SF = 1500;
+const VAPOUR_BARRIER_WASTE = 0.05;
 
 function sheetAreaFromName(name) {
   const m = /^(\d+)\s*X\s*(\d+)/i.exec(name);
@@ -334,6 +349,11 @@ export function computeProjectMaterials(walls, settings, openings = [], level = 
   let totalExteriorLf = 0;
   let totalExteriorArea = 0;
   let hasInterior = false;
+  // Sill gasket buckets — by SKU + section. Exterior 2x6 always sits on concrete.
+  // Interior walls produce gasket only when on_concrete=true.
+  let extLf55 = 0;     // exterior_2x6 → 5.5x82 in Exterior Walls
+  let intLf35 = 0;     // interior_2x4 + on_concrete → 3.5x82 in Interior Walls
+  let intLf55 = 0;     // interior_2x6 + on_concrete → 5.5x82 in Interior Walls
   const wallById = new Map(walls.map((w) => [w.id, w]));
 
   for (const w of walls) {
@@ -342,8 +362,13 @@ export function computeProjectMaterials(walls, settings, openings = [], level = 
     if (EXTERIOR_TYPES.has(w.wall_type)) {
       totalExteriorLf += lengthFt;
       totalExteriorArea += lengthFt * wallHeightFt(w, settings);
+      extLf55 += lengthFt;
     } else if (INTERIOR_TYPES.has(w.wall_type)) {
       hasInterior = true;
+      if (w.on_concrete) {
+        if (w.wall_type === 'interior_2x4') intLf35 += lengthFt;
+        else if (w.wall_type === 'interior_2x6') intLf55 += lengthFt;
+      }
     }
   }
 
@@ -367,10 +392,23 @@ export function computeProjectMaterials(walls, settings, openings = [], level = 
       name: HOUSEWRAP_NAME, unit: 'RL', quantity: wrapRolls });
     items.push({ section: extSection, category: CATEGORIES.BUILDING_WRAP_TAPE,
       name: WRAP_TAPE_NAME, unit: 'RL', quantity: Math.ceil(wrapRolls / 2) });
-    items.push({ section: extSection, category: CATEGORIES.SILL_GASKET,
-      name: SILL_GASKET_NAME, unit: 'RL', quantity: Math.ceil(totalExteriorLf / SILL_GASKET_ROLL_LF) });
     items.push({ section: extSection, category: CATEGORIES.WALL_BRACING,
       name: BRACING_NAME, unit: 'EA', quantity: Math.ceil(totalExteriorLf / BRACING_LF_PER_BRACE) });
+  }
+
+  // Sill gasket — bucketed by SKU + section so material list keeps section breakdown
+  // while POS export later collapses identical SKUs across sections.
+  if (extLf55 > 0) {
+    items.push({ section: extSection, category: CATEGORIES.SILL_GASKET,
+      name: SILL_GASKET_55_NAME, unit: 'RL', quantity: Math.ceil(extLf55 / SILL_GASKET_ROLL_LF) });
+  }
+  if (intLf35 > 0) {
+    items.push({ section: intSection, category: CATEGORIES.SILL_GASKET,
+      name: SILL_GASKET_35_NAME, unit: 'RL', quantity: Math.ceil(intLf35 / SILL_GASKET_ROLL_LF) });
+  }
+  if (intLf55 > 0) {
+    items.push({ section: intSection, category: CATEGORIES.SILL_GASKET,
+      name: SILL_GASKET_55_NAME, unit: 'RL', quantity: Math.ceil(intLf55 / SILL_GASKET_ROLL_LF) });
   }
 
   if (netInsulationArea > 0) {
@@ -382,6 +420,13 @@ export function computeProjectMaterials(walls, settings, openings = [], level = 
       name: spec.name,
       unit: 'EA',
       quantity: Math.ceil(netInsulationArea / spec.coverage_sf),
+    });
+    // Vapour barrier (wall poly over insulation) — same net area used for batt insulation.
+    items.push({
+      section: insSection, category: CATEGORIES.VAPOUR_BARRIER,
+      name: VAPOUR_BARRIER_NAME,
+      unit: 'RL',
+      quantity: Math.ceil((netInsulationArea * (1 + VAPOUR_BARRIER_WASTE)) / VAPOUR_BARRIER_ROLL_SF),
     });
   }
 
@@ -456,6 +501,7 @@ export function buildFloorPlanWalls(corners, floorPlanWalls) {
       sheathing_override: fpWall.sheathing_override ?? null,
       drywall_override: fpWall.drywall_override ?? null,
       extra_corner_studs: 0,
+      on_concrete: !!fpWall.on_concrete,
     });
   }
   return out;

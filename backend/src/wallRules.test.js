@@ -132,6 +132,15 @@ test('Batt insulation lands in "First Floor — Insulation"', () => {
   const items = sumMaterials(computeProjectMaterials([wall], baseSettings));
   assert.ok(findRow(items, SECTIONS.INSULATION, 'R22-15 FIBREGLASS INSUL. 49.0 SQ FT'));
 });
+test('Vapour barrier lands in "First Floor — Insulation"', () => {
+  const wall = { id: 1, x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
+  const items = sumMaterials(computeProjectMaterials([wall], baseSettings));
+  const row = findRow(items, SECTIONS.INSULATION, 'VAPOUR BARRIER 6M X1500 8\'6"');
+  assert.ok(row, 'vapour barrier row missing');
+  assert.equal(row.unit, 'RL');
+  // 24 × 9 = 216 sf × 1.05 = 226.8 / 1500 = 0.151 → ceil 1
+  assert.equal(row.quantity, 1);
+});
 test('Silverboard lands in "Exterior Insulation"', () => {
   const items = sumMaterials(computeWallMaterials({
     x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0,
@@ -191,6 +200,35 @@ test('Shims always land in "First Floor — Windows" regardless of openings', ()
   assert.ok(findRow(winOnly, SECTIONS.WINDOWS, 'SHIMS 10/10 BAG OF 60'));
   assert.ok(findRow(doorOnly, SECTIONS.WINDOWS, 'SHIMS 10/10 BAG OF 60'));
   assert.ok(findRow(both, SECTIONS.WINDOWS, 'SHIMS 10/10 BAG OF 60'));
+});
+
+console.log('\n=== Sill gasket per-wall-type bucketing ===');
+test('Interior 2x4 wall NOT on concrete: no sill gasket row', () => {
+  const wall = { id: 1, x1:0,y1:0,x2:'12',y2:0, wall_type:'interior_2x4', height:null, extra_corner_studs:0, on_concrete: false };
+  const items = sumMaterials(computeProjectMaterials([wall], baseSettings));
+  assert.equal(items.find((r) => r.category === 'Sill Gasket'), undefined);
+});
+test('Interior 2x4 wall on concrete: 3.5x82 gasket in Interior Walls', () => {
+  const wall = { id: 1, x1:0,y1:0,x2:'12',y2:0, wall_type:'interior_2x4', height:null, extra_corner_studs:0, on_concrete: true };
+  const items = sumMaterials(computeProjectMaterials([wall], baseSettings));
+  const row = findRow(items, SECTIONS.INTERIOR_WALLS, 'GASKET,SILL 3/16 WHITE 3.5X82');
+  assert.ok(row, '3.5x82 gasket missing');
+  assert.equal(row.quantity, 1);
+});
+test('Interior 2x6 wall on concrete: 5.5x82 gasket in Interior Walls', () => {
+  const wall = { id: 1, x1:0,y1:0,x2:'12',y2:0, wall_type:'interior_2x6', height:null, extra_corner_studs:0, on_concrete: true };
+  const items = sumMaterials(computeProjectMaterials([wall], baseSettings));
+  const row = findRow(items, SECTIONS.INTERIOR_WALLS, 'GASKET,SILL 3/16 WHITE 5.5X82');
+  assert.ok(row, '5.5x82 gasket on interior_2x6 missing');
+});
+test('Exterior gasket and interior 2x6 gasket are separate rows (same SKU, different sections)', () => {
+  const ext = { id: 1, x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
+  const int = { id: 2, x1:0,y1:0,x2:'12',y2:0, wall_type:'interior_2x6', height:null, extra_corner_studs:0, on_concrete: true };
+  const items = sumMaterials(computeProjectMaterials([ext, int], baseSettings));
+  const extRow = items.find((r) => r.section === SECTIONS.EXTERIOR_WALLS && r.name === 'GASKET,SILL 3/16 WHITE 5.5X82');
+  const intRow = items.find((r) => r.section === SECTIONS.INTERIOR_WALLS && r.name === 'GASKET,SILL 3/16 WHITE 5.5X82');
+  assert.ok(extRow, 'exterior 5.5x82 gasket row missing');
+  assert.ok(intRow, 'interior 5.5x82 gasket row missing');
 });
 
 console.log('\n=== Silverboard ===');

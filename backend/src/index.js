@@ -8,6 +8,8 @@ import materialsRouter from './routes/materials.js';
 import assembliesRouter from './routes/assemblies.js';
 import projectsRouter from './routes/projects.js';
 import settingsRouter from './routes/settings.js';
+import skuCatalogRouter from './routes/skuCatalog.js';
+import customersRouter from './routes/customers.js';
 
 dotenv.config();
 
@@ -49,6 +51,8 @@ app.use('/materials', authRequired, materialsRouter);
 app.use('/assemblies', authRequired, assembliesRouter);
 app.use('/projects', authRequired, projectsRouter);
 app.use('/settings', authRequired, settingsRouter);
+app.use('/sku-catalog', authRequired, skuCatalogRouter);
+app.use('/customers', authRequired, customersRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);
