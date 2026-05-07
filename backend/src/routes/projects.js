@@ -633,8 +633,9 @@ router.put('/:id/floor-plans/:fpid', async (req, res) => {
         }
       }
     }
-    // Auto-calc enclosed floor area (shoelace) → cache on the matching floors row.
-    // We use scale_ft_per_grid (project-level scale) to convert grid² → ft².
+    // Auto-calc enclosed floor area (shoelace) → cache on this floor_plans row AND
+    // on the matching floors row. We use scale_ft_per_grid (project-level scale) to
+    // convert grid² → ft².
     if (corners.length >= 3) {
       const proj = await client.query('SELECT scale_ft_per_grid FROM projects WHERE id = $1', [id]);
       const sft = Number(proj.rows[0]?.scale_ft_per_grid) || 1;
@@ -646,7 +647,12 @@ router.put('/:id/floor-plans/:fpid', async (req, res) => {
       }
       const areaSf = Math.abs(acc) / 2 * (sft * sft);
       const lvl = fp.rows[0].level || 'floor1';
-      // Upsert into floors: prefer the row matching this floor plan's level.
+      // Cache on this floor_plans row.
+      await client.query(
+        'UPDATE floor_plans SET auto_floor_area_sf = $1 WHERE id = $2',
+        [areaSf, fpid]
+      );
+      // Mirror onto the matching floors row if one exists.
       const f = await client.query(
         'SELECT id FROM floors WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1',
         [id, lvl]
@@ -660,6 +666,12 @@ router.put('/:id/floor-plans/:fpid', async (req, res) => {
         // Don't auto-create the row — only update if the user has already created a floor.
         // (Avoids cluttering projects that don't want floor materials.)
       }
+    } else {
+      // Polygon dropped below 3 corners — clear the cached area.
+      await client.query(
+        'UPDATE floor_plans SET auto_floor_area_sf = NULL WHERE id = $1',
+        [fpid]
+      );
     }
     await client.query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
     await client.query('COMMIT');

@@ -272,6 +272,7 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE floor_plan_interior_walls ADD COLUMN IF NOT EXISTS interior_wall_type_label TEXT`,
   // Auto-calculated floor area from polygon (cached) + ceiling drywall sheet selector.
   `ALTER TABLE floors ADD COLUMN IF NOT EXISTS auto_floor_area_sf NUMERIC`,
+  `ALTER TABLE floor_plans ADD COLUMN IF NOT EXISTS auto_floor_area_sf NUMERIC`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS ceiling_drywall_type TEXT NOT NULL DEFAULT '41212dw'`,
   // User role for admin-only gates.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`,
