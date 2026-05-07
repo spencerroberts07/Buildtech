@@ -121,6 +121,81 @@ export default function Settings() {
         <p className="muted">Saved at {savedAt.toLocaleTimeString()}.</p>
       )}
       {error && <p className="error">{error}</p>}
+
+      <h2>Change Password</h2>
+      <ChangePasswordCard />
+    </div>
+  );
+}
+
+function ChangePasswordCard() {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      setError('All fields are required');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      setSuccess('Password updated successfully');
+      setCurrentPassword(''); setNewPassword(''); setConfirmPassword('');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <form onSubmit={submit}>
+        <label>Current Password</label>
+        <input
+          type="password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          autoComplete="current-password"
+        />
+        <label>New Password</label>
+        <input
+          type="password"
+          value={newPassword}
+          onChange={(e) => setNewPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+        <label>Confirm New Password</label>
+        <input
+          type="password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          autoComplete="new-password"
+        />
+        {error && <p className="error">{error}</p>}
+        {success && <p className="muted" style={{ color: '#16A34A' }}>{success}</p>}
+        <div style={{ marginTop: '1rem' }}>
+          <button className="primary" type="submit" disabled={busy}>
+            {busy ? 'Updating...' : 'Update Password'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
