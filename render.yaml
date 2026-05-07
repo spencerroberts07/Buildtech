@@ -23,6 +23,16 @@ services:
         value: production
       - key: FRONTEND_ORIGIN
         sync: false   # set this manually after the static site is deployed
+      - key: R2_ENDPOINT
+        sync: false   # https://<account>.r2.cloudflarestorage.com
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false   # https://pub-<id>.r2.dev or your custom domain
 
   - type: web
     name: takeoff-frontend

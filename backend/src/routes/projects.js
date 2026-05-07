@@ -1,7 +1,6 @@
 import { Router } from 'express';
-import path from 'path';
-import fs from 'fs';
 import multer from 'multer';
+import { PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { query } from '../db.js';
 import {
   computeWallMaterials,
@@ -18,19 +17,13 @@ import {
 } from '../wallRules.js';
 import { pool } from '../db.js';
 import { ensureMaterial } from '../materialUpsert.js';
+import { r2, BUCKET, PUBLIC_URL } from '../r2.js';
 
-// PDF uploads land here. Render's free-tier disk is ephemeral; redeploys wipe this dir.
-const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+const r2Configured = () => !!process.env.R2_ENDPOINT;
+const pdfKey = (projectId) => `projects/${projectId}/plan.pdf`;
 
 const pdfUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-    filename: (req, file, cb) => {
-      const stamp = Date.now();
-      cb(null, `project-${req.params.id}-${stamp}.pdf`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
   fileFilter: (req, file, cb) => {
     if (file.mimetype !== 'application/pdf') {
@@ -166,18 +159,20 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
   // Best-effort PDF cleanup before the row goes.
-  try {
-    const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
-    const fname = r.rows[0]?.pdf_filename;
-    if (fname) {
-      try { fs.unlinkSync(path.join(UPLOADS_DIR, fname)); } catch {}
-    }
-  } catch {}
+  if (r2Configured()) {
+    try {
+      const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
+      const key = r.rows[0]?.pdf_filename;
+      if (key) {
+        try { await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key })); } catch {}
+      }
+    } catch {}
+  }
   await query('DELETE FROM projects WHERE id=$1', [id]);
   res.status(204).end();
 });
 
-// ---------------- PDF underlay ----------------
+// ---------------- PDF underlay (Cloudflare R2) ----------------
 router.post('/:id/upload-pdf', (req, res) => {
   pdfUpload.single('pdf')(req, res, async (err) => {
     if (err) {
@@ -185,25 +180,29 @@ router.post('/:id/upload-pdf', (req, res) => {
       return res.status(code).json({ error: err.message });
     }
     if (!req.file) return res.status(400).json({ error: 'pdf file required' });
+    if (!r2Configured()) {
+      console.warn('R2_ENDPOINT not set — PDF storage not configured');
+      return res.status(503).json({ error: 'PDF storage not configured' });
+    }
     const { id } = req.params;
     try {
-      const exists = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
-      if (!exists.rows[0]) {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        return res.status(404).json({ error: 'project not found' });
-      }
-      const prior = exists.rows[0].pdf_filename;
-      if (prior && prior !== req.file.filename) {
-        try { fs.unlinkSync(path.join(UPLOADS_DIR, prior)); } catch {}
-      }
+      const exists = await query('SELECT id FROM projects WHERE id = $1', [id]);
+      if (!exists.rows[0]) return res.status(404).json({ error: 'project not found' });
+      const key = pdfKey(id);
+      await r2.send(new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+        Body: req.file.buffer,
+        ContentType: 'application/pdf',
+      }));
       const { rows } = await query(
         `UPDATE projects SET pdf_filename = $1, pdf_page = 1, updated_at = NOW()
-         WHERE id = $2 RETURNING id, pdf_filename, pdf_scale, pdf_page`,
-        [req.file.filename, id]
+         WHERE id = $2 RETURNING id, pdf_filename, pdf_scale, pdf_page, updated_at`,
+        [key, id]
       );
       res.status(201).json(rows[0]);
     } catch (e) {
-      try { fs.unlinkSync(req.file.path); } catch {}
+      console.error('R2 upload failed:', e);
       res.status(500).json({ error: e.message });
     }
   });
@@ -211,21 +210,32 @@ router.post('/:id/upload-pdf', (req, res) => {
 
 router.get('/:id/pdf', async (req, res) => {
   const { id } = req.params;
-  const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
-  const fname = r.rows[0]?.pdf_filename;
-  if (!fname) return res.status(404).json({ error: 'no pdf uploaded' });
-  const full = path.join(UPLOADS_DIR, fname);
-  if (!fs.existsSync(full)) return res.status(404).json({ error: 'pdf_missing' });
-  res.setHeader('Content-Type', 'application/pdf');
-  fs.createReadStream(full).pipe(res);
+  const r = await query('SELECT pdf_filename, updated_at FROM projects WHERE id = $1', [id]);
+  const key = r.rows[0]?.pdf_filename;
+  if (!key) return res.status(404).json({ error: 'no pdf uploaded' });
+  if (!r2Configured()) return res.status(503).json({ error: 'PDF storage not configured' });
+  try {
+    await r2.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+  } catch (e) {
+    if (e?.$metadata?.httpStatusCode === 404 || e?.name === 'NotFound') {
+      return res.status(404).json({ error: 'pdf_missing' });
+    }
+    console.error('R2 head failed:', e);
+    return res.status(500).json({ error: 'pdf storage error' });
+  }
+  // Cache-bust on the static R2 key by appending the project's updated_at.
+  const v = encodeURIComponent(new Date(r.rows[0].updated_at).getTime());
+  res.redirect(302, `${PUBLIC_URL}/${key}?v=${v}`);
 });
 
 router.delete('/:id/pdf', async (req, res) => {
   const { id } = req.params;
   const r = await query('SELECT pdf_filename FROM projects WHERE id = $1', [id]);
-  const fname = r.rows[0]?.pdf_filename;
-  if (fname) {
-    try { fs.unlinkSync(path.join(UPLOADS_DIR, fname)); } catch {}
+  const key = r.rows[0]?.pdf_filename;
+  if (key && r2Configured()) {
+    try { await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key })); } catch (e) {
+      console.error('R2 delete failed:', e);
+    }
   }
   await query(
     `UPDATE projects SET pdf_filename = NULL, pdf_scale = NULL, pdf_page = 1, updated_at = NOW()
