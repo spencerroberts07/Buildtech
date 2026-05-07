@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api.js';
+import { BuildTekLogo } from '../App.jsx';
 
 export default function Login({ onLogin }) {
   const [username, setUsername] = useState('admin');
@@ -21,19 +22,27 @@ export default function Login({ onLogin }) {
   }
 
   return (
-    <div className="login-wrap">
-      <h2 style={{marginTop:0}}>Sign in</h2>
-      <form onSubmit={submit}>
-        <label>Username</label>
-        <input value={username} onChange={e=>setUsername(e.target.value)} autoFocus />
-        <label>Password</label>
-        <input type="password" value={password} onChange={e=>setPassword(e.target.value)} />
-        {error && <p className="error">{error}</p>}
-        <div style={{marginTop:'1rem'}}>
-          <button className="primary" type="submit" disabled={busy}>{busy ? 'Signing in...' : 'Sign in'}</button>
+    <div className="login-page">
+      <div className="login-page-inner">
+        <div className="login-brand">
+          <BuildTekLogo size={44} />
+          <span className="brand-text">BuildTek</span>
         </div>
-        <p className="muted" style={{marginTop:'1rem'}}>Default: admin / changeme — change after first login.</p>
-      </form>
+        <div className="login-wrap">
+          <h2 style={{marginTop:0}}>Sign in</h2>
+          <form onSubmit={submit}>
+            <label>Username</label>
+            <input value={username} onChange={e=>setUsername(e.target.value)} autoFocus />
+            <label>Password</label>
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} />
+            {error && <p className="error">{error}</p>}
+            <div style={{marginTop:'1rem'}}>
+              <button className="primary" type="submit" disabled={busy}>{busy ? 'Signing in...' : 'Sign in'}</button>
+            </div>
+            <p className="muted" style={{marginTop:'1rem'}}>Default: admin / changeme — change after first login.</p>
+          </form>
+        </div>
+      </div>
     </div>
   );
 }

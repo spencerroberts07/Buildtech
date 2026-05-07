@@ -244,7 +244,7 @@ function LevelTabs({ tabs, active, onChange }) {
   return (
     <div style={{
       display: 'flex', gap: '0.25rem', marginBottom: '0.5rem',
-      borderBottom: '1px solid #e5e7eb', paddingBottom: '0.4rem',
+      borderBottom: '1px solid #E0E0E0', paddingBottom: '0.4rem',
     }}>
       {tabs.map((t) => (
         <button
@@ -1511,7 +1511,7 @@ function PolygonSketch({
             <div style={{
               position: 'absolute', top: 8, left: 8,
               padding: '0.3rem 0.6rem',
-              background: 'rgba(31,41,55,0.85)', color: 'white',
+              background: 'rgba(10,10,10,0.85)', color: 'white',
               fontSize: '12px', fontWeight: 600, borderRadius: 4,
               pointerEvents: 'none',
             }}>
@@ -1522,7 +1522,7 @@ function PolygonSketch({
             <div style={{
               position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
               padding: '0.5rem 1rem',
-              background: 'rgba(31,41,55,0.92)', color: 'white',
+              background: 'rgba(10,10,10,0.92)', color: 'white',
               fontSize: '13px', borderRadius: 6,
               pointerEvents: 'none',
               boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
@@ -1531,7 +1531,7 @@ function PolygonSketch({
           {calibDialog.open && (
             <div style={{
               position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-              background: 'white', border: '1px solid #E5E7EB', borderRadius: 8,
+              background: 'white', border: '1px solid #E0E0E0', borderRadius: 8,
               padding: '1rem', minWidth: 320, boxShadow: '0 8px 24px rgba(0,0,0,0.15)',
             }}>
               <strong style={{ display: 'block', marginBottom: '0.5rem' }}>Set scale</strong>
@@ -1843,7 +1843,7 @@ function WallEditor({ wall, scale, edgeLengthFt: lengthFt, wallIndex, wallOpenin
         Wall sits on concrete
       </label>
 
-      <hr style={{ margin: '1rem 0', border: 'none', borderTop: '1px solid #e5e7eb' }} />
+      <hr style={{ margin: '1rem 0', border: 'none', borderTop: '1px solid #E0E0E0' }} />
 
       <div className="row" style={{ marginBottom: '0.5rem' }}>
         <strong style={{ flex: 1 }}>Openings ({wallOpenings.length})</strong>
@@ -1866,7 +1866,7 @@ function WallEditor({ wall, scale, edgeLengthFt: lengthFt, wallIndex, wallOpenin
         </ul>
       )}
       {showAdd && (
-        <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#f9fafb', borderRadius: 4 }}>
+        <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#FAFAFA', borderRadius: 4 }}>
           <label>Type</label>
           <select value={addType} onChange={(e) => changeType(e.target.value)}>
             <option value="window">Window</option>
@@ -2059,15 +2059,15 @@ function ModeToolbar({
               flex: '0 0 auto',
               display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
               padding: '0.4rem 0.7rem',
-              background: active ? '#D97706' : 'white',
-              color: active ? 'white' : (t.enabled ? '#1F2937' : '#9CA3AF'),
-              border: active ? '1px solid #D97706' : '1px solid #D1D5DB',
+              background: active ? '#CC0000' : 'white',
+              color: active ? 'white' : (t.enabled ? '#1A1A1A' : '#9CA3AF'),
+              border: active ? '1px solid #CC0000' : '1px solid #E0E0E0',
               cursor: t.enabled ? 'pointer' : 'not-allowed',
               opacity: t.enabled ? 1 : 0.6,
             }}
           >
             <span aria-hidden="true" style={{ display: 'inline-flex' }}>
-              <Icon path={t.icon} stroke={active ? 'white' : (t.enabled ? '#1F2937' : '#9CA3AF')} />
+              <Icon path={t.icon} stroke={active ? 'white' : (t.enabled ? '#1A1A1A' : '#9CA3AF')} />
             </span>
             <span style={{ fontSize: '0.85rem' }}>{t.label}</span>
           </button>
@@ -2084,14 +2084,14 @@ function ModeToolbar({
           flex: '0 0 auto',
           display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
           padding: '0.4rem 0.7rem',
-          background: 'white', color: canUndo ? '#1F2937' : '#9CA3AF',
-          border: '1px solid #D1D5DB',
+          background: 'white', color: canUndo ? '#1A1A1A' : '#9CA3AF',
+          border: '1px solid #E0E0E0',
           cursor: canUndo ? 'pointer' : 'not-allowed',
           opacity: canUndo ? 1 : 0.6,
         }}
       >
         <span aria-hidden="true" style={{ display: 'inline-flex' }}>
-          <Icon path={ICONS.undo} stroke={canUndo ? '#1F2937' : '#9CA3AF'} />
+          <Icon path={ICONS.undo} stroke={canUndo ? '#1A1A1A' : '#9CA3AF'} />
         </span>
         <span style={{ fontSize: '0.85rem' }}>Undo</span>
       </button>
@@ -2104,13 +2104,13 @@ function ModeToolbar({
           flex: '0 0 auto',
           display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
           padding: '0.4rem 0.7rem',
-          background: fullscreen ? '#D97706' : 'white',
-          color: fullscreen ? 'white' : '#1F2937',
-          border: fullscreen ? '1px solid #D97706' : '1px solid #D1D5DB',
+          background: fullscreen ? '#CC0000' : 'white',
+          color: fullscreen ? 'white' : '#1A1A1A',
+          border: fullscreen ? '1px solid #CC0000' : '1px solid #E0E0E0',
         }}
       >
         <span aria-hidden="true" style={{ display: 'inline-flex' }}>
-          <Icon path={ICONS.expand} stroke={fullscreen ? 'white' : '#1F2937'} />
+          <Icon path={ICONS.expand} stroke={fullscreen ? 'white' : '#1A1A1A'} />
         </span>
         <span style={{ fontSize: '0.85rem' }}>{fullscreen ? 'Exit' : 'Fullscreen'}</span>
       </button>
@@ -2119,7 +2119,7 @@ function ModeToolbar({
 }
 
 // Tiny inline-SVG icons drawn from a single path string.
-function Icon({ path, stroke = '#1F2937', size = 16 }) {
+function Icon({ path, stroke = '#1A1A1A', size = 16 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
       stroke={stroke} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
@@ -2225,12 +2225,12 @@ function drawScene(ctx, size, vp, S) {
     ctx.restore();
   } else if (pdfStatus === 'missing') {
     ctx.save();
-    ctx.fillStyle = 'rgba(217,119,6,0.08)';
+    ctx.fillStyle = 'rgba(204,0,0,0.08)';
     ctx.fillRect(20, 20, 360, 60);
-    ctx.strokeStyle = '#D97706';
+    ctx.strokeStyle = '#CC0000';
     ctx.lineWidth = 1;
     ctx.strokeRect(20, 20, 360, 60);
-    ctx.fillStyle = '#1F2937';
+    ctx.fillStyle = '#1A1A1A';
     ctx.font = '600 13px "Segoe UI", -apple-system, sans-serif';
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     ctx.fillText('PDF not found — please re-upload', 32, 38);
@@ -2246,7 +2246,7 @@ function drawScene(ctx, size, vp, S) {
   const polygonClosed = corners.length >= 3 && (mode === 'editing' || drawingPhase === 'interior');
   if (polygonClosed) {
     ctx.save();
-    ctx.fillStyle = 'rgba(254,243,226,0.3)'; // accent-soft #FEF3E2 at 30%
+    ctx.fillStyle = 'rgba(204,0,0,0.05)'; // primary at 5% — subtle red wash on closed polygon
     ctx.beginPath();
     for (let i = 0; i < corners.length; i++) {
       const s = worldToScreen(corners[i].x, corners[i].y, vp);
@@ -2313,7 +2313,7 @@ function drawScene(ctx, size, vp, S) {
     const style = WALL_STYLES[iw.wall_type] || WALL_STYLES.interior_2x4;
     ctx.save();
     if (selected) {
-      ctx.shadowColor = 'rgba(217,119,6,0.45)';
+      ctx.shadowColor = 'rgba(204,0,0,0.45)';
       ctx.shadowBlur = 10;
       ctx.strokeStyle = ACCENT_RUST;
       ctx.lineWidth = 3;
@@ -2385,7 +2385,7 @@ function drawScene(ctx, size, vp, S) {
     const s = worldToScreen(corners[i].x, corners[i].y, vp);
     const selected = i === selectedCornerIdx;
     if (selected) {
-      ctx.fillStyle = 'rgba(217,119,6,0.18)';
+      ctx.fillStyle = 'rgba(204,0,0,0.18)';
       ctx.beginPath(); ctx.arc(s.x, s.y, 11, 0, Math.PI * 2); ctx.fill();
     }
     if (selected) {
@@ -2452,11 +2452,11 @@ function drawScene(ctx, size, vp, S) {
 
   for (const m of measurements) {
     const lenFt = Math.hypot(m.b.x - m.a.x, m.b.y - m.a.y) * scale;
-    drawWorldLine(m.a, m.b, '#3B82F6', `${lenFt.toFixed(2)} ft`);
+    drawWorldLine(m.a, m.b, '#2563EB', `${lenFt.toFixed(2)} ft`);
   }
 
   if (tool === 'calibrate' || tool === 'measure') {
-    const color = tool === 'calibrate' ? '#D97706' : '#3B82F6';
+    const color = tool === 'calibrate' ? '#CC0000' : '#2563EB';
     if (toolPoints.length === 1 && hoverWorld) {
       const lenFt = Math.hypot(hoverWorld.x - toolPoints[0].x, hoverWorld.y - toolPoints[0].y) * scale;
       drawWorldLine(toolPoints[0], hoverWorld, color, `${lenFt.toFixed(2)} ft`);
@@ -2480,11 +2480,11 @@ function drawGrid(ctx, size, vp) {
   ctx.stroke();
   const origin = worldToScreen(0, 0, vp);
   if (origin.x >= 0 && origin.x <= size.w) {
-    ctx.strokeStyle = '#D1D5DB'; ctx.beginPath();
+    ctx.strokeStyle = '#9CA3AF'; ctx.beginPath();
     ctx.moveTo(origin.x + 0.5, 0); ctx.lineTo(origin.x + 0.5, size.h); ctx.stroke();
   }
   if (origin.y >= 0 && origin.y <= size.h) {
-    ctx.strokeStyle = '#D1D5DB'; ctx.beginPath();
+    ctx.strokeStyle = '#9CA3AF'; ctx.beginPath();
     ctx.moveTo(0, origin.y + 0.5); ctx.lineTo(size.w, origin.y + 0.5); ctx.stroke();
   }
 }
@@ -2492,17 +2492,17 @@ function drawGrid(ctx, size, vp) {
 // Wall stroke styles. Thickness + slight color shift now distinguish wall type
 // since the on-canvas type label has been removed.
 const WALL_STYLES = {
-  exterior_2x6: { width: 3,   color: '#1F2937' },
+  exterior_2x6: { width: 3,   color: '#0A0A0A' },
   interior_2x6: { width: 2.5, color: '#374151' },
   interior_2x4: { width: 1.5, color: '#6B7280' },
 };
-const ACCENT_RUST = '#D97706';
+const ACCENT_RUST = '#CC0000';
 const CORNER_GRAY = '#6B7280';
-const WINDOW_COLOR = '#3B82F6';
-const DOOR_COLOR = '#10B981';
-const GRID_BG = '#FFFBF0';
-const GRID_LINE = '#E5E7EB';
-const LABEL_TEXT = '#1F2937';
+const WINDOW_COLOR = '#2563EB';
+const DOOR_COLOR = '#16A34A';
+const GRID_BG = '#FAFAFA';
+const GRID_LINE = '#E8E8E8';
+const LABEL_TEXT = '#1A1A1A';
 const INTERIOR_WALL_COLOR = '#6B7280';
 
 function drawDimensionPill(ctx, cx, cy, text) {
@@ -2517,7 +2517,7 @@ function drawDimensionPill(ctx, cx, cy, text) {
   ctx.fillStyle = 'white';
   roundRect(ctx, pillX, pillY, pillW, pillH, 4);
   ctx.fill();
-  ctx.strokeStyle = '#E5E7EB';
+  ctx.strokeStyle = '#E0E0E0';
   ctx.lineWidth = 1;
   ctx.stroke();
   ctx.fillStyle = LABEL_TEXT;
@@ -2546,7 +2546,7 @@ function drawEdge(ctx, a, b, vp, scale, idx, wall, selected, centroidScreen) {
 
   if (selected) {
     ctx.save();
-    ctx.shadowColor = 'rgba(217,119,6,0.45)';
+    ctx.shadowColor = 'rgba(204,0,0,0.45)';
     ctx.shadowBlur = 10;
     ctx.strokeStyle = ACCENT_RUST;
     ctx.lineWidth = 3;
@@ -2613,7 +2613,7 @@ function drawOpening(ctx, opening, walls, corners, vp, selected) {
   ];
   if (selected) {
     ctx.save();
-    ctx.shadowColor = 'rgba(217,119,6,0.5)';
+    ctx.shadowColor = 'rgba(204,0,0,0.5)';
     ctx.shadowBlur = 8;
     ctx.strokeStyle = ACCENT_RUST; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(corners4[0][0], corners4[0][1]);

@@ -128,7 +128,7 @@ export default function Defaults() {
           {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
         <button className="secondary" type="button" style={{ padding: '0.3rem 0.6rem' }} onClick={() => saveKey(key, settings[key])}>Save</button>
-        {savedKey === key && <span className="muted" style={{ color: '#10B981' }}>Saved ✓</span>}
+        {savedKey === key && <span className="muted" style={{ color: '#16A34A' }}>Saved ✓</span>}
       </div>
     );
   }
@@ -146,7 +146,7 @@ export default function Defaults() {
         />
         <span className="muted">%</span>
         <button className="secondary" type="button" style={{ padding: '0.3rem 0.6rem' }} onClick={() => saveKey(key, settings[key])}>Save</button>
-        {savedKey === key && <span className="muted" style={{ color: '#10B981' }}>Saved ✓</span>}
+        {savedKey === key && <span className="muted" style={{ color: '#16A34A' }}>Saved ✓</span>}
       </div>
     );
   }
@@ -167,7 +167,7 @@ export default function Defaults() {
           ))}
         </select>
         <button className="secondary" type="button" style={{ padding: '0.3rem 0.6rem' }} onClick={() => saveKey(key, settings[key])}>Save</button>
-        {savedKey === key && <span className="muted" style={{ color: '#10B981' }}>Saved ✓</span>}
+        {savedKey === key && <span className="muted" style={{ color: '#16A34A' }}>Saved ✓</span>}
       </div>
     );
   }
@@ -178,7 +178,7 @@ export default function Defaults() {
       <h1>Defaults</h1>
       {error && <p className="error">{error}</p>}
 
-      <h2>Wall defaults</h2>
+      <div className="form-section-band">Wall defaults</div>
       <div className="card">
         <Row label="Default exterior stud type">{selectField('default_exterior_stud_type', EXTERIOR_STUD_OPTIONS)}</Row>
         <Row label="Default interior stud type">{selectField('default_interior_stud_type', INTERIOR_STUD_OPTIONS)}</Row>
@@ -188,7 +188,7 @@ export default function Defaults() {
         <Row label="Default corner style">{selectField('default_corner_style', CORNER_OPTIONS)}</Row>
       </div>
 
-      <h2>Sheathing &amp; wrap defaults</h2>
+      <div className="form-section-band">Sheathing &amp; wrap defaults</div>
       <div className="card">
         <Row label="Default wall sheathing">{selectField('default_wall_sheathing', SHEATHING_OPTIONS)}</Row>
         <Row label="Default roof sheathing">{selectField('default_roof_sheathing', ROOF_SHEATHING_OPTIONS)}</Row>
@@ -196,13 +196,13 @@ export default function Defaults() {
         <Row label="Default Silverboard">{selectField('default_silverboard', SILVERBOARD_OPTIONS)}</Row>
       </div>
 
-      <h2>Insulation &amp; drywall</h2>
+      <div className="form-section-band">Insulation &amp; drywall</div>
       <div className="card">
         <Row label="Default wall insulation">{insulationField('default_wall_insulation')}</Row>
         <Row label="Default ceiling drywall">{selectField('default_ceiling_drywall', CEILING_DRYWALL_OPTIONS)}</Row>
       </div>
 
-      <h2>Waste factors</h2>
+      <div className="form-section-band">Waste factors</div>
       <div className="card">
         <Row label="Dimensional lumber">{pctField('waste_lumber')}</Row>
         <Row label="Sheet goods (OSB, plywood, drywall)">{pctField('waste_sheet')}</Row>

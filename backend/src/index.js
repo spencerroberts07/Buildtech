@@ -16,8 +16,14 @@ dotenv.config();
 
 const app = express();
 
-const corsOrigin = process.env.FRONTEND_ORIGIN || '*';
-app.use(cors({ origin: corsOrigin }));
+const allowedOrigins = (process.env.FRONTEND_ORIGIN || '*').split(',').map(o => o.trim());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error('Not allowed by CORS'));
+  }
+}));
 app.use(express.json({ limit: '2mb' }));
 
 app.get('/health', (req, res) => res.json({ ok: true }));

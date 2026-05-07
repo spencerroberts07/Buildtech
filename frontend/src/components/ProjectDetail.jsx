@@ -464,7 +464,7 @@ function renderGroupedMaterialRows(rows, collapsedSections, toggleSection, opts 
         style={{ cursor: 'pointer' }}
       >
         <td colSpan={8}>
-          <span style={{ display: 'inline-block', width: '1.2em' }}>
+          <span className="section-chevron" style={{ display: 'inline-block', width: '1.2em' }}>
             {isCollapsed ? '▶' : '▼'}
           </span>
           {label}
@@ -525,7 +525,7 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
             style={{
               display: 'inline-block', marginLeft: 6,
               width: 8, height: 8, borderRadius: '50%',
-              background: '#D97706', verticalAlign: 'middle',
+              background: '#CC0000', verticalAlign: 'middle',
             }}
           />
         )}
@@ -558,7 +558,7 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
                   <div
                     style={{
                       position: 'absolute', right: 0, top: '100%',
-                      background: 'white', border: '1px solid #E5E7EB',
+                      background: 'white', border: '1px solid #E0E0E0',
                       borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
                       zIndex: 50, minWidth: 280, maxHeight: 320, overflowY: 'auto',
                       textAlign: 'left',
@@ -575,8 +575,8 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
                         style={{
                           display: 'block', width: '100%', textAlign: 'left',
                           padding: '0.5rem 0.75rem', background: 'transparent',
-                          border: 'none', borderBottom: '1px solid #E5E7EB',
-                          cursor: 'pointer', fontWeight: 600, color: '#B91C1C',
+                          border: 'none', borderBottom: '1px solid #E0E0E0',
+                          cursor: 'pointer', fontWeight: 600, color: '#CC0000',
                         }}
                       >Reset to original ({row.original_description})</button>
                     )}
@@ -596,7 +596,7 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
                             display: 'block', width: '100%', textAlign: 'left',
                             padding: '0.45rem 0.75rem', background: 'transparent',
                             border: 'none', cursor: 'pointer', fontSize: '0.85rem',
-                            borderBottom: '1px solid #F3F4F6',
+                            borderBottom: '1px solid #F0F0F0',
                           }}
                         >
                           <div style={{ fontWeight: 500 }}>{s.description}</div>
@@ -718,7 +718,7 @@ function FloorPanel({ projectId, floor, setFloor, onMaterialsChanged, onPackages
             value={autoSf > 0 ? autoSf.toFixed(1) : ''}
             placeholder="(no polygon yet)"
             readOnly
-            style={{ background: '#F3F4F6' }}
+            style={{ background: '#F5F5F5' }}
           />
         </div>
         <div>
