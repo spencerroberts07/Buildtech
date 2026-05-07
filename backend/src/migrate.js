@@ -506,6 +506,21 @@ async function ensureUser() {
   }
 }
 
+async function ensureExtraUsers() {
+  const extras = [
+    { username: 'OB', password: 'changeme' },
+    { username: 'SR', password: 'changeme' },
+  ];
+  for (const { username, password } of extras) {
+    const existing = await pool.query('SELECT id FROM users WHERE username=$1', [username]);
+    if (existing.rowCount === 0) {
+      const hash = await bcrypt.hash(password, 10);
+      await pool.query('INSERT INTO users (username, password_hash) VALUES ($1, $2)', [username, hash]);
+      console.log(`Seeded user: ${username} / ${password}`);
+    }
+  }
+}
+
 async function seedExamples() {
   const { rowCount } = await pool.query('SELECT 1 FROM materials LIMIT 1');
   if (rowCount > 0) return;
@@ -591,6 +606,7 @@ async function run() {
     await ensureSettings();
     console.log('Settings row ensured.');
     await ensureUser();
+    await ensureExtraUsers();
     await seedExamples();
     await seedSkuCatalog();
     console.log('SKU catalog seeded.');
