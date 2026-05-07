@@ -29,6 +29,20 @@ export const api = {
     request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   changePassword: (currentPassword, newPassword) =>
     request('/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+  verifyPassword: (password) =>
+    request('/auth/verify-password', { method: 'POST', body: JSON.stringify({ password }) }),
+
+  getSystemSettings: () => request('/system-settings'),
+  updateSystemSetting: (key, value) =>
+    request(`/system-settings/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
+
+  listMaterialDeletions: (projectId) => request(`/projects/${projectId}/deletions`),
+  createMaterialDeletion: (projectId, data) =>
+    request(`/projects/${projectId}/deletions`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteMaterialDeletion: (projectId, did) =>
+    request(`/projects/${projectId}/deletions/${did}`, { method: 'DELETE' }),
+
+  materialListWithDeleted: (projectId) => request(`/projects/${projectId}/material-list?include_deleted=1`),
 
   listMaterials: () => request('/materials'),
   createMaterial: (data) => request('/materials', { method: 'POST', body: JSON.stringify(data) }),

@@ -284,6 +284,14 @@ function PolygonSketch({
   const [hoverCursor, setHoverCursor] = useState(null); // 'move' | null
   const [toast, setToast] = useState(null);
   const [mode, setMode] = useState('placing'); // 'placing' | 'editing'
+  // Modal toolbar tool: 'select' | 'pan' | 'draw_exterior' | 'draw_interior'
+  // 'select' is the default for closed polygons; 'draw_exterior' for fresh sketches.
+  const [sketchMode, setSketchMode] = useState('draw_exterior');
+  const [fullscreen, setFullscreen] = useState(false);
+  // In-memory undo stack (max 20). Each entry is a function that reverts the action
+  // (server-side via API + local state). Cleared on level switch (component remount).
+  const undoStack = useRef([]);
+  const [undoCount, setUndoCount] = useState(0); // for UI re-render
   const [selectedCornerIdx, setSelectedCornerIdx] = useState(null);
   const [selectedWallIdx, setSelectedWallIdx] = useState(null);
   const [selectedOpeningId, setSelectedOpeningId] = useState(null);
@@ -322,6 +330,20 @@ function PolygonSketch({
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   }
 
+  // ---- Undo stack ----
+  function pushUndo(label, undoFn) {
+    undoStack.current.push({ label, fn: undoFn });
+    if (undoStack.current.length > 20) undoStack.current.shift();
+    setUndoCount(undoStack.current.length);
+  }
+  async function popUndo() {
+    const entry = undoStack.current.pop();
+    setUndoCount(undoStack.current.length);
+    if (!entry) return;
+    try { await entry.fn(); }
+    catch (e) { setError(`Undo failed (${entry.label}): ${e.message}`); }
+  }
+
   const scaleFtPerGrid = num(projectSettings?.scale_ft_per_grid) || 1;
   const wallByIndex = new Map(walls.map((w) => [Number(w.wall_index), w]));
 
@@ -344,7 +366,10 @@ function PolygonSketch({
         const phase = full.drawing_phase === 'interior' ? 'interior' : 'exterior';
         setDrawingPhase(phase);
         // Editing mode if polygon is closed; otherwise placing.
-        setMode(cs.length >= 3 ? 'editing' : 'placing');
+        const isClosed = cs.length >= 3;
+        setMode(isClosed ? 'editing' : 'placing');
+        // Modal toolbar: select for closed polygons, draw_exterior for fresh sketches.
+        setSketchMode(isClosed ? 'select' : 'draw_exterior');
       } catch (e) { setError(e.message); }
     })();
     return () => { cancelled = true; };
@@ -531,57 +556,64 @@ function PolygonSketch({
   }
 
   // Perpendicular drag math for exterior wall segment idx:
-  // returns the maximum |t| (along the perpendicular unit vector n) such that both
-  // adjacent edges keep length >= minLenWorld. Solves |v + t*n|^2 >= L^2 for each.
+  // returns the allowed range [tNeg, tPos] (along perpendicular unit vector n)
+  // such that both adjacent edges keep length >= minLenWorld.
+  //
+  // For each adjacent edge, the squared length |v ± t·n|^2 is a parabola in t.
+  // The forbidden interval is between its two roots t1 < t2 (where length = minLen).
+  // Outside (t1, t2) the edge is long enough. t=0 sits in one of the allowed regions
+  // (left of t1 or right of t2), so the only nearby clamp is on the side of t=0
+  // facing the forbidden interval — the OPPOSITE direction is unbounded (unlimited
+  // outward movement). The previous code clamped both directions, which broke
+  // outward dragging.
   function maxPerpendicularDelta(idx, n, minLenWorld) {
-    if (corners.length < 3) return Infinity;
+    if (corners.length < 3) return { tPos: Infinity, tNeg: -Infinity };
     const N = corners.length;
     const a = corners[idx];
     const b = corners[(idx + 1) % N];
     const c0 = corners[(idx - 1 + N) % N]; // before a
     const c3 = corners[(idx + 2) % N];     // after b
-    const limit = (vx, vy, signOk) => {
-      // Solve (vx + t*nx)^2 + (vy + t*ny)^2 = L^2 → t^2 + 2(v·n)t + (|v|^2 - L^2) = 0
-      const vDotN = vx * n.x + vy * n.y;
-      const vSq = vx * vx + vy * vy;
+
+    // Core: given vDotN (signed projection of edge vector onto n) and |v|^2,
+    // return { tLow, tHigh } — the allowed bounds of t around 0. Inf if unbounded
+    // on that side.
+    const bounds = (vDotN, vSq) => {
       const c = vSq - minLenWorld * minLenWorld;
+      // If already at or below minLen, no movement allowed at all (defensive).
+      if (vSq < minLenWorld * minLenWorld) return { tLow: 0, tHigh: 0 };
       const disc = vDotN * vDotN - c;
-      if (disc < 0) return 0; // already below min — can't move further on this side
+      if (disc < 0) {
+        // Parabola never crosses minLen — adjacent edge stays ≥ minLen for all t.
+        return { tLow: -Infinity, tHigh: Infinity };
+      }
       const sq = Math.sqrt(disc);
-      // Roots: t = -vDotN ± sq. Adjacent edge stays >= minLen for t in (-inf, t1] U [t2, inf)
-      // where t1 = -vDotN - sq, t2 = -vDotN + sq. We want the allowed window around t=0.
       const t1 = -vDotN - sq;
       const t2 = -vDotN + sq;
-      // Currently (t=0) length is |v|. If |v| >= minLen, t=0 is in an allowed region.
-      // The forbidden interval is (t1, t2). Allowed: t <= t1 or t >= t2.
-      if (vSq >= minLenWorld * minLenWorld) {
-        // t=0 is in allowed region. The two boundaries to clamp at are t1 and t2.
-        // Whichever is on the same side as desired sign limits motion.
-        return signOk > 0 ? Math.max(0, t2) : Math.min(0, t1);
+      // t=0 is in the allowed region. Determine which side of (t1, t2).
+      if (0 <= t1) {
+        // 0 is to the LEFT of the forbidden interval. Going positive clamps at t1.
+        // Going negative is unbounded.
+        return { tLow: -Infinity, tHigh: t1 };
       }
-      return 0;
+      if (0 >= t2) {
+        // 0 is to the RIGHT of the forbidden interval. Going negative clamps at t2.
+        return { tLow: t2, tHigh: Infinity };
+      }
+      // 0 inside forbidden interval — shouldn't happen given the vSq check, but
+      // be safe: no movement.
+      return { tLow: 0, tHigh: 0 };
     };
-    // Edge before: a moves to a + t*n. Length = |a' - c0| = |(a - c0) + t*n|
+
+    // Edge BEFORE: a moves to a + t*n. Length² = |(a - c0) + t*n|².
     const va = { x: a.x - c0.x, y: a.y - c0.y };
-    // Edge after: b moves to b + t*n. Length = |c3 - b'| = |(c3 - b) - t*n| → equivalent to |v' - t*n| with v' = c3 - b
+    const beforeBounds = bounds(va.x * n.x + va.y * n.y, va.x * va.x + va.y * va.y);
+    // Edge AFTER: b moves to b + t*n. Length² = |(c3 - b) - t*n|², which is the
+    // same form with v' = c3 - b and v'·n replaced by -(v'·n).
     const vb = { x: c3.x - b.x, y: c3.y - b.y };
-    // For edge after: |v' - t*n|^2 = same form with vDotN replaced by -(v'·n)
-    const limitAfter = (vx, vy, signOk) => {
-      const vDotN = -(vx * n.x + vy * n.y);
-      const vSq = vx * vx + vy * vy;
-      const c = vSq - minLenWorld * minLenWorld;
-      const disc = vDotN * vDotN - c;
-      if (disc < 0) return 0;
-      const sq = Math.sqrt(disc);
-      const t1 = -vDotN - sq;
-      const t2 = -vDotN + sq;
-      if (vSq >= minLenWorld * minLenWorld) {
-        return signOk > 0 ? Math.max(0, t2) : Math.min(0, t1);
-      }
-      return 0;
-    };
-    const tPos = Math.min(limit(va.x, va.y, +1), limitAfter(vb.x, vb.y, +1));
-    const tNeg = Math.max(limit(va.x, va.y, -1), limitAfter(vb.x, vb.y, -1));
+    const afterBounds = bounds(-(vb.x * n.x + vb.y * n.y), vb.x * vb.x + vb.y * vb.y);
+
+    const tPos = Math.min(beforeBounds.tHigh, afterBounds.tHigh);
+    const tNeg = Math.max(beforeBounds.tLow, afterBounds.tLow);
     return { tPos, tNeg };
   }
 
@@ -589,8 +621,9 @@ function PolygonSketch({
   function onMouseDown(e) {
     canvasRef.current.focus();
     const { sx, sy, world } = getMouseWorld(e);
-    // Pan triggers: middle-click, space+drag, or Ctrl+drag.
-    if (e.button === 1 || (e.button === 0 && (spaceDown.current || e.ctrlKey))) {
+    // Pan triggers: middle-click, space+drag, Ctrl+drag, or PAN tool (any left-drag).
+    const panTool = sketchMode === 'pan';
+    if (e.button === 1 || (e.button === 0 && (spaceDown.current || e.ctrlKey || panTool))) {
       e.preventDefault();
       panState.current = { active: true, startX: sx, startY: sy, basePan: { x: viewport.panX, y: viewport.panY } };
       return;
@@ -618,30 +651,41 @@ function PolygonSketch({
       }
       return;
     }
-    if (mode === 'editing') {
+
+    // SELECT mode: hit-test for drag/select. DRAW modes skip drag init and let mouseUp handle the click.
+    if (sketchMode === 'select' && mode === 'editing') {
       // Check opening drag first
       const hitO = hitTestOpening(sx, sy);
       if (hitO) {
         e.preventDefault();
-        dragState.current = { active: true, type: 'opening', openingId: hitO.id, moved: false };
+        const orig = openings.find((x) => x.id === hitO.id);
+        dragState.current = {
+          active: true, type: 'opening', openingId: hitO.id, moved: false,
+          origOpening: orig ? { ...orig } : null,
+        };
         return;
       }
       // Check corner drag
       const hitC = hitTestCorner(sx, sy);
       if (hitC != null) {
         e.preventDefault();
-        dragState.current = { active: true, type: 'corner', idx: hitC, moved: false };
+        dragState.current = {
+          active: true, type: 'corner', idx: hitC, moved: false,
+          origCorners: corners.map((c) => ({ x: c.x, y: c.y })),
+        };
         return;
       }
       // Check interior wall (endpoint drag if on endpoint, else click-to-select on body)
       const hitI = hitTestInteriorWall(sx, sy, world);
       if (hitI) {
         e.preventDefault();
+        const orig = interiorWalls.find((x) => x.id === hitI.id);
         if (hitI.end) {
           dragState.current = {
             active: true, type: 'interior_endpoint',
             interiorId: hitI.id, end: hitI.end, moved: false,
             startX: sx, startY: sy,
+            origIw: orig ? { ...orig } : null,
           };
         } else {
           // body of interior wall — defer to mouseUp click-select (no drag)
@@ -670,6 +714,7 @@ function PolygonSketch({
             startWorld: { x: world.x, y: world.y },
             n: { x: nx, y: ny },
             origCorners: corners.map((c) => ({ x: c.x, y: c.y })),
+            origInteriorWalls: interiorWalls.map((iw) => ({ ...iw })),
           };
         }
         return;
@@ -802,6 +847,12 @@ function PolygonSketch({
               .then(() => onMaterialsChanged?.())
               .catch((err) => setError(err.message));
           }, 300);
+          const orig = ds.origCorners;
+          pushUndo('move corner', async () => {
+            setCorners(orig);
+            await api.updateFloorPlan(projectId, floorPlanId, { corners: orig });
+            onMaterialsChanged?.();
+          });
         } else {
           setSelectedCornerIdx(ds.idx);
           setSelectedWallIdx(null);
@@ -818,6 +869,14 @@ function PolygonSketch({
               .then(() => { onMaterialsChanged?.(); onOpeningsChanged?.(); })
               .catch((err) => setError(err.message));
           }, 300);
+          const orig = ds.origOpening;
+          if (orig) {
+            pushUndo('move opening', async () => {
+              setOpenings((cur) => cur.map((x) => x.id === orig.id ? { ...x, position_along_wall: orig.position_along_wall } : x));
+              await api.updateOpening(projectId, orig.id, { position_along_wall: orig.position_along_wall });
+              onMaterialsChanged?.(); onOpeningsChanged?.();
+            });
+          }
         } else {
           setSelectedOpeningId(ds.openingId);
           setSelectedCornerIdx(null);
@@ -827,14 +886,65 @@ function PolygonSketch({
       } else if (ds.type === 'wall') {
         if (ds.moved && wallDragPreview) {
           const newCorners = wallDragPreview.newCorners;
+          // Snap any interior wall endpoint that was on the dragged exterior edge to the
+          // corresponding new position. Endpoints close to the original corner snap there;
+          // endpoints on the segment translate by the same perpendicular delta.
+          const idx = ds.idx;
+          const N = ds.origCorners.length;
+          const aOld = ds.origCorners[idx];
+          const bOld = ds.origCorners[(idx + 1) % N];
+          const aNew = newCorners[idx];
+          const bNew = newCorners[(idx + 1) % N];
+          const SNAP = 4 / (BASE_GRID_PX * viewport.zoom); // ~4 px in world units
+          const tDelta = wallDragPreview.t;
+          const nVec = ds.n;
+          const updatedInteriors = ds.origInteriorWalls.map((iw) => {
+            const moveEndpoint = (x, y) => {
+              const dToA = Math.hypot(x - aOld.x, y - aOld.y);
+              const dToB = Math.hypot(x - bOld.x, y - bOld.y);
+              if (dToA <= SNAP) return { x: aNew.x, y: aNew.y, moved: true };
+              if (dToB <= SNAP) return { x: bNew.x, y: bNew.y, moved: true };
+              const dToSeg = distPointToSegment(x, y, aOld.x, aOld.y, bOld.x, bOld.y);
+              if (dToSeg <= SNAP) return { x: x + tDelta * nVec.x, y: y + tDelta * nVec.y, moved: true };
+              return { x, y, moved: false };
+            };
+            const a = moveEndpoint(Number(iw.x1), Number(iw.y1));
+            const b = moveEndpoint(Number(iw.x2), Number(iw.y2));
+            if (!a.moved && !b.moved) return iw;
+            return { ...iw, x1: a.x, y1: a.y, x2: b.x, y2: b.y, _moved: true };
+          });
           setCorners(newCorners);
+          setInteriorWalls(updatedInteriors);
           setWallDragPreview(null);
           clearTimeout(cornerSaveTimer.current);
-          cornerSaveTimer.current = setTimeout(() => {
-            api.updateFloorPlan(projectId, floorPlanId, { corners: newCorners })
-              .then(() => onMaterialsChanged?.())
-              .catch((err) => setError(err.message));
+          const movedIws = updatedInteriors.filter((iw) => iw._moved);
+          cornerSaveTimer.current = setTimeout(async () => {
+            try {
+              await api.updateFloorPlan(projectId, floorPlanId, { corners: newCorners });
+              for (const iw of movedIws) {
+                await api.updateInteriorWall(projectId, floorPlanId, iw.id, {
+                  x1: iw.x1, y1: iw.y1, x2: iw.x2, y2: iw.y2,
+                });
+              }
+              onMaterialsChanged?.();
+            } catch (err) { setError(err.message); }
           }, 300);
+          const origCorners = ds.origCorners;
+          const origIws = ds.origInteriorWalls;
+          pushUndo('move wall', async () => {
+            setCorners(origCorners);
+            setInteriorWalls(origIws);
+            await api.updateFloorPlan(projectId, floorPlanId, { corners: origCorners });
+            for (const iw of movedIws) {
+              const orig = origIws.find((x) => x.id === iw.id);
+              if (orig) {
+                await api.updateInteriorWall(projectId, floorPlanId, orig.id, {
+                  x1: orig.x1, y1: orig.y1, x2: orig.x2, y2: orig.y2,
+                });
+              }
+            }
+            onMaterialsChanged?.();
+          });
         } else {
           // Treat as click — select the edge
           setWallDragPreview(null);
@@ -856,6 +966,16 @@ function PolygonSketch({
                 .then(() => onMaterialsChanged?.())
                 .catch((err) => setError(err.message));
             }, 300);
+            const orig = ds.origIw;
+            if (orig) {
+              pushUndo('move interior endpoint', async () => {
+                setInteriorWalls((cur) => cur.map((x) => x.id === orig.id ? { ...x, x1: orig.x1, y1: orig.y1, x2: orig.x2, y2: orig.y2 } : x));
+                await api.updateInteriorWall(projectId, floorPlanId, orig.id, {
+                  x1: orig.x1, y1: orig.y1, x2: orig.x2, y2: orig.y2,
+                });
+                onMaterialsChanged?.();
+              });
+            }
           }
         } else {
           // Click on endpoint = select wall
@@ -879,22 +999,25 @@ function PolygonSketch({
 
     const { sx, sy, world } = getMouseWorld(e);
 
-    if (mode === 'placing') {
-      if (drawingPhase === 'interior') {
-        // Two-click interior wall placement.
-        const snapTarget = findInteriorSnapTarget(world);
-        const placed = snapTarget || snapWorld(world);
-        if (!pendingInteriorEndpoint) {
-          setPendingInteriorEndpoint(placed);
-        } else {
-          // Don't create zero-length walls
-          if (placed.x === pendingInteriorEndpoint.x && placed.y === pendingInteriorEndpoint.y) return;
-          createInteriorWall(pendingInteriorEndpoint, placed);
-          setPendingInteriorEndpoint(null);
-        }
-        return;
+    // DRAW INTERIOR — two-click segment. Only available when polygon closed.
+    if (sketchMode === 'draw_interior') {
+      if (corners.length < 3) return; // need a closed polygon
+      const snapTarget = findInteriorSnapTarget(world);
+      const placed = snapTarget || snapWorld(world);
+      if (!pendingInteriorEndpoint) {
+        setPendingInteriorEndpoint(placed);
+      } else {
+        if (placed.x === pendingInteriorEndpoint.x && placed.y === pendingInteriorEndpoint.y) return;
+        createInteriorWall(pendingInteriorEndpoint, placed);
+        setPendingInteriorEndpoint(null);
       }
-      // Exterior placing: click on first corner closes the polygon.
+      return;
+    }
+
+    // DRAW EXTERIOR — click-click corner placement. Disabled once polygon closed.
+    if (sketchMode === 'draw_exterior') {
+      if (corners.length >= 3 && drawingPhase === 'interior') return; // polygon already closed
+      // Click on first corner closes the polygon.
       if (corners.length >= 3) {
         const firstHit = hitTestCorner(sx, sy);
         if (firstHit === 0) {
@@ -905,11 +1028,23 @@ function PolygonSketch({
       const snapped = snapWorld(world);
       const last = corners[corners.length - 1];
       if (last && last.x === snapped.x && last.y === snapped.y) return;
+      const prevCorners = corners.slice();
       setCorners((cur) => [...cur, snapped]);
+      // Push undo: remove the corner we just added (revert to prevCorners and persist).
+      pushUndo('add corner', async () => {
+        setCorners(prevCorners);
+        if (prevCorners.length >= 3) {
+          await api.updateFloorPlan(projectId, floorPlanId, { corners: prevCorners });
+          onMaterialsChanged?.();
+        }
+      });
       return;
     }
 
-    // Editing mode: hit-test opening → corner → interior wall → edge
+    // PAN tool — clicks do nothing (drag was handled in mouseDown).
+    if (sketchMode === 'pan') return;
+
+    // SELECT mode (mode === 'editing'): hit-test opening → corner → interior wall → edge
     const hitO = hitTestOpening(sx, sy);
     if (hitO) {
       setSelectedOpeningId(hitO.id);
@@ -986,10 +1121,8 @@ function PolygonSketch({
     if (cIdx != null) {
       // Right-click corner → delete it (collapses two adjacent edges into one)
       if (corners.length <= 3) { setError('Cannot delete: polygon needs at least 3 corners.'); return; }
-      // The edge whose trailing corner is cIdx has wall_index = cIdx - 1 (mod). Deleting that
-      // edge in the backend removes corners[cIdx]. But the backend's DELETE endpoint takes a wall
-      // index and removes corners[(widx+1) % len]. So widx = cIdx - 1 (or len-1 if cIdx == 0).
       const widx = (cIdx - 1 + corners.length) % corners.length;
+      const origCorners = corners.slice();
       try {
         const updated = await api.deleteFloorPlanWall(projectId, floorPlanId, widx);
         setCorners(Array.isArray(updated.corners) ? updated.corners : []);
@@ -1000,6 +1133,13 @@ function PolygonSketch({
         setSelectedOpeningId(null);
         onMaterialsChanged?.();
         onOpeningsChanged?.();
+        pushUndo('delete corner', async () => {
+          const restored = await api.updateFloorPlan(projectId, floorPlanId, { corners: origCorners });
+          setCorners(restored.corners || origCorners);
+          setWalls(restored.walls || []);
+          setOpenings(restored.openings || []);
+          onMaterialsChanged?.(); onOpeningsChanged?.();
+        });
       } catch (err) { setError(err.message); }
     }
   }
@@ -1013,10 +1153,18 @@ function PolygonSketch({
     }
     async function onKeyDown(e) {
       if (e.code === 'Space') { spaceDown.current = true; return; }
+      // Ctrl+Z (or Cmd+Z) → undo. Doesn't fire while typing.
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ' && !e.shiftKey) {
+        if (isTypingTarget(e.target)) return;
+        e.preventDefault();
+        popUndo();
+        return;
+      }
       if (isTypingTarget(e.target)) return;
       if (e.code === 'Enter' && mode === 'placing' && drawingPhase === 'exterior' && corners.length >= 3) {
         await closePolygonAndSwitchToInterior();
       } else if (e.code === 'Escape') {
+        if (fullscreen) { setFullscreen(false); return; }
         if (tool !== 'idle') {
           setTool('idle');
           setToolPoints([]);
@@ -1051,7 +1199,7 @@ function PolygonSketch({
       window.removeEventListener('keyup', onKeyUp);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, corners, selectedOpeningId, selectedInteriorWallId, floorPlanId, projectId, drawingPhase, pendingInteriorEndpoint, tool]);
+  }, [mode, corners, selectedOpeningId, selectedInteriorWallId, floorPlanId, projectId, drawingPhase, pendingInteriorEndpoint, tool, fullscreen]);
 
   // ---- mutations ----
   async function closePolygonAndSwitchToInterior() {
@@ -1066,6 +1214,7 @@ function PolygonSketch({
       setInteriorWalls(updated.interior_walls || []);
       setDrawingPhase('interior');
       setMode('placing'); // stay in placing so user can immediately draw interior walls
+      setSketchMode('draw_interior');
       setPendingInteriorEndpoint(null);
       showToast('Exterior walls complete — now drawing interior walls.');
       onMaterialsChanged?.();
@@ -1089,6 +1238,12 @@ function PolygonSketch({
       });
       setInteriorWalls((cur) => [...cur, created]);
       onMaterialsChanged?.();
+      pushUndo('add interior wall', async () => {
+        await api.deleteInteriorWall(projectId, floorPlanId, created.id);
+        setInteriorWalls((cur) => cur.filter((iw) => iw.id !== created.id));
+        if (selectedInteriorWallId === created.id) setSelectedInteriorWallId(null);
+        onMaterialsChanged?.();
+      });
     } catch (err) { setError(err.message); }
   }
 
@@ -1128,10 +1283,26 @@ function PolygonSketch({
 
   async function deleteInteriorWall(iwid) {
     try {
+      const orig = interiorWalls.find((iw) => iw.id === iwid);
       await api.deleteInteriorWall(projectId, floorPlanId, iwid);
       setInteriorWalls((cur) => cur.filter((iw) => iw.id !== iwid));
       if (selectedInteriorWallId === iwid) setSelectedInteriorWallId(null);
       onMaterialsChanged?.();
+      if (orig) {
+        pushUndo('delete interior wall', async () => {
+          const recreated = await api.createInteriorWall(projectId, floorPlanId, {
+            x1: orig.x1, y1: orig.y1, x2: orig.x2, y2: orig.y2,
+            wall_type: orig.wall_type,
+            height: orig.height,
+            on_concrete: orig.on_concrete,
+            sheathing_override: orig.sheathing_override,
+            drywall_override: orig.drywall_override,
+            interior_wall_type_label: orig.interior_wall_type_label,
+          });
+          setInteriorWalls((cur) => [...cur, recreated]);
+          onMaterialsChanged?.();
+        });
+      }
     } catch (err) { setError(err.message); }
   }
 
@@ -1180,18 +1351,40 @@ function PolygonSketch({
       setOpenings((cur) => [...cur, created]);
       onMaterialsChanged?.();
       onOpeningsChanged?.();
+      pushUndo('add opening', async () => {
+        await api.deleteOpening(projectId, created.id);
+        setOpenings((cur) => cur.filter((o) => o.id !== created.id));
+        if (selectedOpeningId === created.id) setSelectedOpeningId(null);
+        onMaterialsChanged?.(); onOpeningsChanged?.();
+      });
       return created;
     } catch (e) { setError(e.message); }
   }
   async function deleteSelectedOpening() {
     if (selectedOpeningId == null) return;
     const oid = selectedOpeningId;
+    const orig = openings.find((o) => o.id === oid);
     setSelectedOpeningId(null);
     setOpenings((cur) => cur.filter((o) => o.id !== oid));
     try {
       await api.deleteOpening(projectId, oid);
       onMaterialsChanged?.();
       onOpeningsChanged?.();
+      if (orig) {
+        pushUndo('delete opening', async () => {
+          const recreated = await api.createOpening(projectId, {
+            floor_plan_wall_id: orig.floor_plan_wall_id,
+            wall_id: orig.wall_id ?? undefined,
+            type: orig.type,
+            rough_opening_width: orig.rough_opening_width,
+            rough_opening_height: orig.rough_opening_height,
+            label: orig.label,
+            position_along_wall: orig.position_along_wall,
+          });
+          setOpenings((cur) => [...cur, recreated]);
+          onMaterialsChanged?.(); onOpeningsChanged?.();
+        });
+      }
     } catch (e) { setError(e.message); }
   }
   const openingPatchTimers = useRef({});
@@ -1220,14 +1413,46 @@ function PolygonSketch({
   const selectedInteriorWall = interiorWalls.find((iw) => iw.id === selectedInteriorWallId) || null;
   const cursorStyle = spaceDown.current
     ? 'grab'
-    : (tool === 'calibrate' || tool === 'measure'
-        ? 'crosshair'
-        : (mode === 'placing'
-            ? 'crosshair'
-            : (hoverCursor === 'move' ? 'move' : 'default')));
+    : sketchMode === 'pan'
+      ? (panState.current.active ? 'grabbing' : 'grab')
+      : (tool === 'calibrate' || tool === 'measure'
+          ? 'crosshair'
+          : (sketchMode === 'draw_exterior' || sketchMode === 'draw_interior'
+              ? 'crosshair'
+              : (hoverCursor === 'move' ? 'move' : 'default')));
+
+  function chooseMode(next) {
+    // Clear any in-flight pending state when switching tools.
+    setSelectedCornerIdx(null);
+    setSelectedWallIdx(null);
+    setSelectedOpeningId(null);
+    setSelectedInteriorWallId(null);
+    setPendingInteriorEndpoint(null);
+    setSketchMode(next);
+    // Keep server-side `mode` in sync so existing render gates (closing edge in
+    // exterior placing, etc.) keep working.
+    if (next === 'draw_exterior') setMode('placing');
+    else if (next === 'draw_interior') setMode('placing');
+    else setMode(corners.length >= 3 ? 'editing' : 'placing');
+  }
+
+  const containerStyle = fullscreen
+    ? { position: 'fixed', inset: 0, zIndex: 1000, background: 'white', overflow: 'auto', padding: '0.5rem' }
+    : undefined;
 
   return (
-    <div>
+    <div style={containerStyle}>
+      <ModeToolbar
+        sketchMode={sketchMode}
+        chooseMode={chooseMode}
+        polygonClosed={polygonClosed}
+        canDrawExterior={!polygonClosed}
+        canDrawInterior={polygonClosed}
+        fullscreen={fullscreen}
+        toggleFullscreen={() => setFullscreen((v) => !v)}
+        canUndo={undoCount > 0}
+        onUndo={popUndo}
+      />
       <PdfToolbar
         controls={pdfControls}
         tool={tool}
@@ -1242,44 +1467,30 @@ function PolygonSketch({
           <span className="muted">
             <strong>Measure:</strong> click two points to draw a measurement line. Repeat for more. <strong>Esc</strong> exits.
           </span>
-        ) : mode === 'placing' ? (
-          drawingPhase === 'interior' ? (
-            <span className="muted">
-              <strong>{level}</strong> · drawing <strong>interior walls</strong> · click two points to place a wall · <strong>Esc</strong> cancels pending point
-            </span>
-          ) : (
-            <span className="muted">
-              <strong>{level}</strong> · drawing <strong>exterior walls</strong> · click to place corners ({corners.length} placed) · click first corner or press <strong>Enter</strong> to close (need 3+) · <strong>Esc</strong> undoes last
-            </span>
-          )
+        ) : sketchMode === 'draw_interior' ? (
+          <span className="muted">
+            <strong>{level}</strong> · drawing <strong>interior walls</strong> · click two points to place a wall · <strong>Esc</strong> cancels pending point
+          </span>
+        ) : sketchMode === 'draw_exterior' ? (
+          <span className="muted">
+            <strong>{level}</strong> · drawing <strong>exterior walls</strong> · click to place corners ({corners.length} placed) · click first corner or press <strong>Enter</strong> to close (need 3+) · <strong>Esc</strong> undoes last
+          </span>
+        ) : sketchMode === 'pan' ? (
+          <span className="muted">
+            <strong>Pan:</strong> click and drag the canvas to move the view. <strong>Ctrl+wheel</strong> still zooms.
+          </span>
         ) : (
           <span className="muted">
-            <strong>{level}</strong> · click corner/edge/wall to select · drag corner or wall · right-click corner to delete · <strong>Ctrl+drag</strong> pans · <strong>Ctrl+wheel</strong> zooms
+            <strong>{level}</strong> · click corner/edge/wall to select · drag corner or wall · right-click corner to delete · <strong>Ctrl+drag</strong> or PAN tool moves the view · <strong>Ctrl+wheel</strong> zooms
           </span>
         )}
         <span className="right muted">
           {corners.length} corner{corners.length === 1 ? '' : 's'} · {interiorWalls.length} interior · {openings.length} opening{openings.length === 1 ? '' : 's'} · {perimeterFt.toFixed(1)} lf · {areaSf.toFixed(0)} sf
         </span>
-        {polygonClosed && (
-          <div style={{ display: 'inline-flex', flex: '0 0 auto', borderRadius: 6, overflow: 'hidden', border: '1px solid #d1d5db' }}>
-            <button
-              type="button"
-              className={drawingPhase === 'exterior' ? 'tab active' : 'tab'}
-              style={{ padding: '0.35rem 0.8rem', borderRadius: 0 }}
-              onClick={() => { setDrawingPhasePersist('exterior'); setMode('editing'); }}
-            >Exterior</button>
-            <button
-              type="button"
-              className={drawingPhase === 'interior' ? 'tab active' : 'tab'}
-              style={{ padding: '0.35rem 0.8rem', borderRadius: 0 }}
-              onClick={() => { setDrawingPhasePersist('interior'); setMode('placing'); }}
-            >Interior</button>
-          </div>
-        )}
         {level !== 'floor1' && corners.length === 0 && (
           <button className="secondary" style={{ flex: '0 0 auto' }} onClick={copyFromFloor1}>Copy from Floor 1</button>
         )}
-        {mode === 'editing' && (
+        {polygonClosed && (
           <button className="danger" style={{ flex: '0 0 auto' }} onClick={clearFloorPlan}>Clear floor plan</button>
         )}
       </div>
@@ -1685,8 +1896,26 @@ function WallEditor({ wall, scale, edgeLengthFt: lengthFt, wallIndex, wallOpenin
   );
 }
 
+// Interior wall type dropdown — 4 options. The actual wall_type stays as
+// 'interior_2x4' or 'interior_2x6' (rules engine knows only those two), while
+// interior_wall_type_label carries the display variant ("plumbing wall", "load
+// bearing", "firewall"). For load-bearing 2x6 and firewall variants, the label
+// is informational; framing lumber selection follows the underlying 2x6 / 2x4 rule.
+const INTERIOR_WALL_TYPE_OPTIONS = [
+  { key: 'interior_2x4',           wall_type: 'interior_2x4', label: '2x4 Interior' },
+  { key: 'interior_2x6_plumbing',  wall_type: 'interior_2x6', label: '2x6 Interior (plumbing wall)' },
+  { key: 'interior_2x6_load',      wall_type: 'interior_2x6', label: '2x6 Interior Load Bearing' },
+  { key: 'interior_2x4_firewall',  wall_type: 'interior_2x4', label: '2x4 Interior Firewall' },
+];
+
+function interiorTypeKey(wall) {
+  if (wall.interior_wall_type_label) return wall.interior_wall_type_label;
+  return wall.wall_type === 'interior_2x6' ? 'interior_2x6_plumbing' : 'interior_2x4';
+}
+
 function InteriorWallEditor({ wall, scale, onChange, onDelete, onClose }) {
   const lengthFt = Math.hypot(Number(wall.x2) - Number(wall.x1), Number(wall.y2) - Number(wall.y1)) * scale;
+  const currentKey = interiorTypeKey(wall);
   return (
     <div className="wall-editor card">
       <div className="row" style={{ marginBottom: '0.5rem' }}>
@@ -1696,9 +1925,19 @@ function InteriorWallEditor({ wall, scale, onChange, onDelete, onClose }) {
       <p className="muted" style={{ margin: 0 }}>Length: {lengthFt.toFixed(2)} ft</p>
 
       <label>Wall type</label>
-      <select value={wall.wall_type} onChange={(e) => onChange({ wall_type: e.target.value }, { immediate: true })}>
-        <option value="interior_2x4">Interior 2x4</option>
-        <option value="interior_2x6">Interior 2x6</option>
+      <select
+        value={currentKey}
+        onChange={(e) => {
+          const key = e.target.value;
+          const opt = INTERIOR_WALL_TYPE_OPTIONS.find((o) => o.key === key);
+          if (!opt) return;
+          // Send both: backing wall_type (for rules engine) + display label.
+          onChange({ wall_type: opt.wall_type, interior_wall_type_label: opt.key }, { immediate: true });
+        }}
+      >
+        {INTERIOR_WALL_TYPE_OPTIONS.map((o) => (
+          <option key={o.key} value={o.key}>{o.label}</option>
+        ))}
       </select>
 
       <label>Height (ft) — blank = inherit</label>
@@ -1783,6 +2022,120 @@ function OpeningEditor({ opening, onChange, onDelete, onClose }) {
     </div>
   );
 }
+
+// ---------- Mode toolbar (modal tool buttons + fullscreen + undo) ----------
+function ModeToolbar({
+  sketchMode, chooseMode,
+  canDrawExterior, canDrawInterior,
+  fullscreen, toggleFullscreen,
+  canUndo, onUndo,
+}) {
+  const tools = [
+    { key: 'select',         label: 'Select',         icon: ICONS.cursor,        enabled: true,            tooltip: 'Select & drag (default)' },
+    { key: 'pan',            label: 'Pan',            icon: ICONS.hand,          enabled: true,            tooltip: 'Click and drag to pan the view' },
+    { key: 'draw_exterior',  label: 'Exterior',       icon: ICONS.pencil,        enabled: canDrawExterior, tooltip: canDrawExterior ? 'Draw exterior wall corners' : 'Polygon already closed' },
+    { key: 'draw_interior',  label: 'Interior',       icon: ICONS.pencilDashed,  enabled: canDrawInterior, tooltip: canDrawInterior ? 'Draw interior wall segments' : 'Close the exterior polygon first' },
+  ];
+  return (
+    <div
+      className="card"
+      style={{
+        display: 'flex', flexWrap: 'wrap', gap: '0.4rem',
+        alignItems: 'center', padding: '0.4rem',
+        marginBottom: '0.4rem',
+      }}
+    >
+      {tools.map((t) => {
+        const active = sketchMode === t.key;
+        return (
+          <button
+            key={t.key}
+            type="button"
+            title={t.tooltip}
+            disabled={!t.enabled}
+            onClick={() => t.enabled && chooseMode(t.key)}
+            className="secondary"
+            style={{
+              flex: '0 0 auto',
+              display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+              padding: '0.4rem 0.7rem',
+              background: active ? '#D97706' : 'white',
+              color: active ? 'white' : (t.enabled ? '#1F2937' : '#9CA3AF'),
+              border: active ? '1px solid #D97706' : '1px solid #D1D5DB',
+              cursor: t.enabled ? 'pointer' : 'not-allowed',
+              opacity: t.enabled ? 1 : 0.6,
+            }}
+          >
+            <span aria-hidden="true" style={{ display: 'inline-flex' }}>
+              <Icon path={t.icon} stroke={active ? 'white' : (t.enabled ? '#1F2937' : '#9CA3AF')} />
+            </span>
+            <span style={{ fontSize: '0.85rem' }}>{t.label}</span>
+          </button>
+        );
+      })}
+      <span style={{ flex: 1 }} />
+      <button
+        type="button"
+        title="Undo (Ctrl+Z)"
+        disabled={!canUndo}
+        onClick={onUndo}
+        className="secondary"
+        style={{
+          flex: '0 0 auto',
+          display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+          padding: '0.4rem 0.7rem',
+          background: 'white', color: canUndo ? '#1F2937' : '#9CA3AF',
+          border: '1px solid #D1D5DB',
+          cursor: canUndo ? 'pointer' : 'not-allowed',
+          opacity: canUndo ? 1 : 0.6,
+        }}
+      >
+        <span aria-hidden="true" style={{ display: 'inline-flex' }}>
+          <Icon path={ICONS.undo} stroke={canUndo ? '#1F2937' : '#9CA3AF'} />
+        </span>
+        <span style={{ fontSize: '0.85rem' }}>Undo</span>
+      </button>
+      <button
+        type="button"
+        title={fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+        onClick={toggleFullscreen}
+        className="secondary"
+        style={{
+          flex: '0 0 auto',
+          display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+          padding: '0.4rem 0.7rem',
+          background: fullscreen ? '#D97706' : 'white',
+          color: fullscreen ? 'white' : '#1F2937',
+          border: fullscreen ? '1px solid #D97706' : '1px solid #D1D5DB',
+        }}
+      >
+        <span aria-hidden="true" style={{ display: 'inline-flex' }}>
+          <Icon path={ICONS.expand} stroke={fullscreen ? 'white' : '#1F2937'} />
+        </span>
+        <span style={{ fontSize: '0.85rem' }}>{fullscreen ? 'Exit' : 'Fullscreen'}</span>
+      </button>
+    </div>
+  );
+}
+
+// Tiny inline-SVG icons drawn from a single path string.
+function Icon({ path, stroke = '#1F2937', size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke={stroke} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      style={{ display: 'block' }}>
+      <path d={path} />
+    </svg>
+  );
+}
+const ICONS = {
+  cursor:       'M4 3 L4 17 L9 13 L12 19 L14.5 17.5 L11.5 11.5 L17 11 Z',
+  hand:         'M7 11 V6 a1.5 1.5 0 0 1 3 0 V11 M10 11 V4 a1.5 1.5 0 0 1 3 0 V11 M13 11 V5 a1.5 1.5 0 0 1 3 0 V13 M16 13 V8 a1.5 1.5 0 0 1 3 0 V14 a6 6 0 0 1 -6 6 H11 a4 4 0 0 1 -3.5 -2 L4 12 a1.7 1.7 0 0 1 3 -1.5 L8 12',
+  pencil:       'M4 20 L4 16 L16 4 L20 8 L8 20 Z M14 6 L18 10',
+  pencilDashed: 'M4 20 L4 16 L16 4 L20 8 L8 20 Z M14 6 L18 10 M3 22 L5 22 M7 22 L9 22 M11 22 L13 22',
+  expand:       'M4 9 V4 H9 M20 9 V4 H15 M4 15 V20 H9 M20 15 V20 H15',
+  undo:         'M9 14 L4 9 L9 4 M4 9 H14 a6 6 0 0 1 0 12 H10',
+};
 
 // ---------- PDF toolbar ----------
 function PdfToolbar({ controls, tool, setTool }) {
@@ -1905,6 +2258,15 @@ function drawScene(ctx, size, vp, S) {
     ctx.restore();
   }
 
+  // Polygon centroid (in screen coords) — used to push exterior dimension labels outside.
+  let centroidScreen = null;
+  if (corners.length >= 3 && polygonClosed) {
+    let cx = 0, cy = 0;
+    for (const c of corners) { cx += c.x; cy += c.y; }
+    cx /= corners.length; cy /= corners.length;
+    centroidScreen = worldToScreen(cx, cy, vp);
+  }
+
   // Edges
   if (corners.length >= 2) {
     for (let i = 0; i < corners.length; i++) {
@@ -1915,7 +2277,7 @@ function drawScene(ctx, size, vp, S) {
       const wall = walls.find((w) => Number(w.wall_index) === i);
       // Skip the dragged wall — its preview is drawn separately
       if (wallDragPreview && wallDragPreview.idx === i) continue;
-      drawEdge(ctx, a, b, vp, scale, i, wall, i === selectedWallIdx);
+      drawEdge(ctx, a, b, vp, scale, i, wall, i === selectedWallIdx, centroidScreen);
     }
   }
 
@@ -1941,49 +2303,36 @@ function drawScene(ctx, size, vp, S) {
     drawDashed(newCorners[idx], newCorners[(idx + 1) % N], ACCENT_RUST, 3);
   }
 
-  // Interior walls — dashed medium gray
+  // Interior walls — solid lines (thickness encodes type), label above the wall.
   for (const iw of interiorWalls) {
     const a = { x: Number(iw.x1), y: Number(iw.y1) };
     const b = { x: Number(iw.x2), y: Number(iw.y2) };
     const sa = worldToScreen(a.x, a.y, vp);
     const sb = worldToScreen(b.x, b.y, vp);
     const selected = iw.id === selectedInteriorWallId;
+    const style = WALL_STYLES[iw.wall_type] || WALL_STYLES.interior_2x4;
     ctx.save();
     if (selected) {
       ctx.shadowColor = 'rgba(217,119,6,0.45)';
       ctx.shadowBlur = 10;
       ctx.strokeStyle = ACCENT_RUST;
       ctx.lineWidth = 3;
-      ctx.lineCap = 'round';
     } else {
-      ctx.strokeStyle = INTERIOR_WALL_COLOR;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([8, 4]);
-      ctx.lineCap = 'butt';
+      ctx.strokeStyle = style.color;
+      ctx.lineWidth = style.width;
     }
+    ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
     ctx.restore();
-    // Length + type label at midpoint (white pill)
+    // Length-only label, offset 12 px on the visually-upper side.
     const lengthFt = Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2) * scale;
     if (lengthFt > 0) {
       const mx = (sa.x + sb.x) / 2; const my = (sa.y + sb.y) / 2;
-      const text = `${lengthFt.toFixed(2)} ft · ${WALL_TYPE_SHORT[iw.wall_type] || iw.wall_type}`;
-      ctx.font = '500 12px "Segoe UI", -apple-system, sans-serif';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      const padding = 4;
-      const metrics = ctx.measureText(text);
-      const pillX = mx - metrics.width / 2 - padding;
-      const pillY = my - 9 - padding;
-      const pillW = metrics.width + padding * 2;
-      const pillH = 18 + padding * 2;
-      ctx.fillStyle = 'white';
-      roundRect(ctx, pillX, pillY, pillW, pillH, 4);
-      ctx.fill();
-      ctx.strokeStyle = '#E5E7EB';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.fillStyle = LABEL_TEXT;
-      ctx.fillText(text, mx, my);
+      const dx = sb.x - sa.x, dy = sb.y - sa.y;
+      const len = Math.hypot(dx, dy) || 1;
+      let nx = -dy / len, ny = dx / len;
+      if (ny > 0) { nx = -nx; ny = -ny; } // pick the side with negative screen-y (upward)
+      drawDimensionPill(ctx, mx + nx * 12, my + ny * 12, `${lengthFt.toFixed(2)} ft`);
     }
     // Endpoint dots
     for (const p of [sa, sb]) {
@@ -2140,11 +2489,12 @@ function drawGrid(ctx, size, vp) {
   }
 }
 
-// Option A: walls all use #1F2937; differentiation by stroke-width only
+// Wall stroke styles. Thickness + slight color shift now distinguish wall type
+// since the on-canvas type label has been removed.
 const WALL_STYLES = {
-  exterior_2x6: { width: 5, color: '#1F2937' },
-  interior_2x6: { width: 4, color: '#1F2937' },
-  interior_2x4: { width: 3, color: '#1F2937' },
+  exterior_2x6: { width: 3,   color: '#1F2937' },
+  interior_2x6: { width: 2.5, color: '#374151' },
+  interior_2x4: { width: 1.5, color: '#6B7280' },
 };
 const ACCENT_RUST = '#D97706';
 const CORNER_GRAY = '#6B7280';
@@ -2155,14 +2505,46 @@ const GRID_LINE = '#E5E7EB';
 const LABEL_TEXT = '#1F2937';
 const INTERIOR_WALL_COLOR = '#6B7280';
 
-function drawEdge(ctx, a, b, vp, scale, idx, wall, selected) {
+function drawDimensionPill(ctx, cx, cy, text) {
+  ctx.font = '500 12px "Segoe UI", -apple-system, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const padding = 4;
+  const metrics = ctx.measureText(text);
+  const pillX = cx - metrics.width / 2 - padding;
+  const pillY = cy - 9 - padding;
+  const pillW = metrics.width + padding * 2;
+  const pillH = 18 + padding * 2;
+  ctx.fillStyle = 'white';
+  roundRect(ctx, pillX, pillY, pillW, pillH, 4);
+  ctx.fill();
+  ctx.strokeStyle = '#E5E7EB';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.fillStyle = LABEL_TEXT;
+  ctx.fillText(text, cx, cy);
+}
+
+// Outward perpendicular (in screen coords) for an exterior edge — given the
+// polygon centroid in screen coords, points away from it.
+function outwardScreenNormal(saX, saY, sbX, sbY, centroidScreen) {
+  const dx = sbX - saX, dy = sbY - saY;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len;
+  let nx = -uy, ny = ux; // left of direction
+  const mx = (saX + sbX) / 2, my = (saY + sbY) / 2;
+  // Flip if "left" is toward the centroid (i.e., inward).
+  const towardCentroidDot = (centroidScreen.x - mx) * nx + (centroidScreen.y - my) * ny;
+  if (towardCentroidDot > 0) { nx = -nx; ny = -ny; }
+  return { nx, ny };
+}
+
+function drawEdge(ctx, a, b, vp, scale, idx, wall, selected, centroidScreen) {
   const sa = worldToScreen(a.x, a.y, vp);
   const sb = worldToScreen(b.x, b.y, vp);
   const wallType = wall?.wall_type || 'exterior_2x6';
   const style = WALL_STYLES[wallType] || WALL_STYLES.exterior_2x6;
 
   if (selected) {
-    // Soft outer glow halo
     ctx.save();
     ctx.shadowColor = 'rgba(217,119,6,0.45)';
     ctx.shadowBlur = 10;
@@ -2178,27 +2560,17 @@ function drawEdge(ctx, a, b, vp, scale, idx, wall, selected) {
     ctx.beginPath(); ctx.moveTo(sa.x, sa.y); ctx.lineTo(sb.x, sb.y); ctx.stroke();
   }
 
-  // Length + type label at midpoint (white pill, dark text)
+  // Length-only label, positioned OUTSIDE the polygon.
   const lengthFt = Math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2) * scale;
-  const mx = (sa.x + sb.x) / 2; const my = (sa.y + sb.y) / 2;
-  const text = `${lengthFt.toFixed(2)} ft · ${WALL_TYPE_SHORT[wallType] || wallType}`;
-  ctx.font = '500 12px "Segoe UI", -apple-system, sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const padding = 4;
-  const metrics = ctx.measureText(text);
-  // White pill with rust border accent
-  const pillX = mx - metrics.width / 2 - padding;
-  const pillY = my - 9 - padding;
-  const pillW = metrics.width + padding * 2;
-  const pillH = 18 + padding * 2;
-  ctx.fillStyle = 'white';
-  roundRect(ctx, pillX, pillY, pillW, pillH, 4);
-  ctx.fill();
-  ctx.strokeStyle = '#E5E7EB';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.fillStyle = LABEL_TEXT;
-  ctx.fillText(text, mx, my);
+  const mx = (sa.x + sb.x) / 2;
+  const my = (sa.y + sb.y) / 2;
+  let labelX = mx, labelY = my;
+  if (centroidScreen) {
+    const { nx, ny } = outwardScreenNormal(sa.x, sa.y, sb.x, sb.y, centroidScreen);
+    labelX = mx + nx * 20;
+    labelY = my + ny * 20;
+  }
+  drawDimensionPill(ctx, labelX, labelY, `${lengthFt.toFixed(2)} ft`);
 }
 
 function roundRect(ctx, x, y, w, h, r) {

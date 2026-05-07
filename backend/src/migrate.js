@@ -137,6 +137,23 @@ CREATE TABLE IF NOT EXISTS roofs (
 
 CREATE INDEX IF NOT EXISTS roofs_project_id_idx ON roofs(project_id);
 
+CREATE TABLE IF NOT EXISTS system_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS material_deletions (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  description TEXT NOT NULL,
+  section TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(project_id, description, section)
+);
+
+CREATE INDEX IF NOT EXISTS material_deletions_project_id_idx ON material_deletions(project_id);
+
 CREATE TABLE IF NOT EXISTS customers (
   id SERIAL PRIMARY KEY,
   name TEXT NOT NULL,
@@ -250,6 +267,14 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_filename TEXT`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_scale NUMERIC`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_page INTEGER NOT NULL DEFAULT 1`,
+  // Display-only label for interior walls (e.g. "2x6 Interior Load Bearing").
+  // The actual wall_type stays as 'interior_2x4'/'interior_2x6' so the rules engine is untouched.
+  `ALTER TABLE floor_plan_interior_walls ADD COLUMN IF NOT EXISTS interior_wall_type_label TEXT`,
+  // Auto-calculated floor area from polygon (cached) + ceiling drywall sheet selector.
+  `ALTER TABLE floors ADD COLUMN IF NOT EXISTS auto_floor_area_sf NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS ceiling_drywall_type TEXT NOT NULL DEFAULT '41212dw'`,
+  // User role for admin-only gates.
+  `ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`,
 ];
 
 const SKU_CATALOG_SEED = [
@@ -288,10 +313,10 @@ const SKU_CATALOG_SEED = [
   { item: '90641002', catalog: '2611203', desc: 'TAPE,SHEATHING PLY 60MMX55M 4PK',  definition: 'Sheathing Tape', coverage_value: 220, coverage_unit: 'meters' },
   { item: '90640907', catalog: '2611261', desc: 'TAPE,SHEATHING PLY BLUE 60MMX55M', definition: 'Sheathing Tape', coverage_value: 55,  coverage_unit: 'meters' },
 
-  // SILVERBOARD EXTERIOR INSULATION
-  { item: null, catalog: null, desc: 'SILVERBOARD GRAPHITE 4X8 1" R5',    definition: 'Exterior Rigid Insulation', coverage_value: 32, coverage_unit: 'sq ft' },
-  { item: null, catalog: null, desc: 'SILVERBOARD GRAPHITE 4X8 1.5" R7.5', definition: 'Exterior Rigid Insulation', coverage_value: 32, coverage_unit: 'sq ft' },
-  { item: null, catalog: null, desc: 'SILVERBOARD GRAPHITE 4X8 2" R10',   definition: 'Exterior Rigid Insulation', coverage_value: 32, coverage_unit: 'sq ft' },
+  // SILVERBOARD EXTERIOR INSULATION (catalog numbers fixed up post-seed)
+  { item: null, catalog: '1SB',   desc: 'SILVERBOARD GRAPHITE 4X8 1" R5',    definition: 'Exterior Rigid Insulation', coverage_value: 32, coverage_unit: 'sq ft' },
+  { item: null, catalog: '112SB', desc: 'SILVERBOARD GRAPHITE 4X8 1.5" R7.5', definition: 'Exterior Rigid Insulation', coverage_value: 32, coverage_unit: 'sq ft' },
+  { item: null, catalog: '2SB',   desc: 'SILVERBOARD GRAPHITE 4X8 2" R10',   definition: 'Exterior Rigid Insulation', coverage_value: 32, coverage_unit: 'sq ft' },
 
   // WALL INSULATION — PINK FIBREGLASS
   { item: '5120681', catalog: 'R2215', desc: 'R22-15 FIBREGLASS INSUL. 49.0 SQ FT',  definition: 'Wall Insulation Pink', coverage_value: 49,    coverage_unit: 'sq ft' },
@@ -364,6 +389,63 @@ const SKU_CATALOG_SEED = [
   { item: '5120600', catalog: '1CF',   desc: '1" CELFORT 2X8 24/BDL R5',     definition: 'Foundation Insulation', coverage_value: 16, coverage_unit: 'sq ft', section_notes: 'Under foundation slab' },
   { item: '5120610', catalog: '112CF', desc: '1 1/2" CELFORT 2X8 16/BDL R7.5', definition: 'Foundation Insulation', coverage_value: 16, coverage_unit: 'sq ft' },
   { item: '5120620', catalog: '2CF',   desc: '2" CELFORT 2X8 12/BDL R10',    definition: 'Foundation Insulation', coverage_value: 16, coverage_unit: 'sq ft' },
+
+  // DRYWALL (height-specific wall sheets + ceiling sheets + firecode)
+  { item: null, catalog: '4812DW',   desc: '4 X 8 - 1/2" DRYWALL',           definition: 'Drywall', coverage_value: 32, coverage_unit: 'sq ft', section_notes: 'Wall drywall for 8ft walls' },
+  { item: null, catalog: '49DRY',    desc: '4 X 9 - 1/2" DRYWALL',           definition: 'Drywall', coverage_value: 36, coverage_unit: 'sq ft', section_notes: 'Wall drywall for 9ft walls' },
+  { item: null, catalog: '41012DW',  desc: '4 X 10 - 1/2" DRYWALL',          definition: 'Drywall', coverage_value: 40, coverage_unit: 'sq ft', section_notes: 'Wall drywall for 10ft walls' },
+  { item: null, catalog: '41212DW',  desc: '4 X 12 - 1/2" DRYWALL',          definition: 'Drywall', coverage_value: 48, coverage_unit: 'sq ft', section_notes: 'Ceiling drywall default' },
+  { item: null, catalog: '4858FCDW', desc: '4 X 8 - 5/8" FIRECODE DRYWALL',  definition: 'Drywall Firecode', coverage_value: 32, coverage_unit: 'sq ft', section_notes: 'Firecode drywall' },
+
+  // TYPAR + FLASHING
+  { item: null, catalog: 'TYPAR',     desc: "9'X100' TYPAR HOUSEWRAP",        definition: 'Housewrap', coverage_value: 900, coverage_unit: 'sq ft', section_notes: 'Exterior wall wrap' },
+  { item: null, catalog: 'TYPAR36',   desc: '36"X100\' TYPAR HEADERWRAP',     definition: 'Housewrap', coverage_value: 100, coverage_unit: 'linear ft', section_notes: 'Floor joist perimeter wrap' },
+  { item: null, catalog: 'TYPAR9X75', desc: 'TYPAR FLASHING 9"X75\'',          definition: 'Flashing Typar', coverage_value: 75, coverage_unit: 'linear ft', section_notes: 'Around openings' },
+  { item: null, catalog: 'TYPAR4X75', desc: 'TYPAR FLASHING 4"X75\'',          definition: 'Flashing Typar', coverage_value: 75, coverage_unit: 'linear ft' },
+  { item: null, catalog: 'TYPAR6X75', desc: 'TYPAR FLASHING 6"X75\'',          definition: 'Flashing Typar', coverage_value: 75, coverage_unit: 'linear ft' },
+  { item: null, catalog: 'TYPAR12X75',desc: 'TYPAR FLASHING 12"X75\'',         definition: 'Flashing Typar', coverage_value: 75, coverage_unit: 'linear ft' },
+
+  // BELOW GRADE
+  { item: null, catalog: 'SB35', desc: 'SB-35PSI R10 BELOW GR. 2"X4\'X8\'', definition: 'Foundation Insulation', coverage_value: 32, coverage_unit: 'sq ft', section_notes: 'Below grade foundation insulation, alternative to Celfort' },
+
+  // SUBFLOOR OSB ALTERNATIVES
+  { item: null, catalog: '58TGOSB', desc: '4 X 8 - 5/8 T&G ORIENTED ST.BOARD', definition: 'Plywood Sheathing', coverage_value: 32, coverage_unit: 'sq ft', section_notes: 'Subfloor alternative to T&G plywood' },
+  { item: null, catalog: '34TGOSB', desc: '4 X 8 - 3/4 T&G ORIENTED ST.BOARD', definition: 'Plywood Sheathing', coverage_value: 32, coverage_unit: 'sq ft', section_notes: 'Subfloor alternative to T&G plywood' },
+
+  // CLEAR POLY
+  { item: null, catalog: 'CLARYPOLY', desc: '12 X 300FT CLEAR POLY', definition: 'Plate Poly', coverage_value: 300, coverage_unit: 'linear ft', section_notes: 'Plate poly for interior walls' },
+];
+
+// Catalog-number fixups for previously-seeded SKUs that were inserted with null catalog.
+const SKU_CATALOG_FIXUPS = [
+  ["SILVERBOARD GRAPHITE 4X8 1\" R5",     '1SB'],
+  ["SILVERBOARD GRAPHITE 4X8 1.5\" R7.5", '112SB'],
+  ["SILVERBOARD GRAPHITE 4X8 2\" R10",    '2SB'],
+];
+
+const SYSTEM_SETTINGS_DEFAULTS = [
+  // Wall defaults
+  ['default_exterior_stud_type', 'exterior_2x6'],
+  ['default_interior_stud_type', 'interior_2x4'],
+  ['default_stud_spacing', '16'],
+  ['default_wall_height_floor1', '9'],
+  ['default_wall_height_floor2', '9'],
+  ['default_corner_style', '3_stud'],
+  // Sheathing / wrap
+  ['default_wall_sheathing', '7/16_osb'],
+  ['default_roof_sheathing', '1/2_csp'],
+  ['default_rafter_spacing', '24_oc'],
+  ['default_silverboard', 'silverboard_1'],
+  // Insulation / drywall
+  ['default_wall_insulation', 'pink_r22_15'],
+  ['default_ceiling_drywall', '41212dw'],
+  // Waste factors (decimal, e.g. 0.05 = 5%)
+  ['waste_lumber',     '0.05'],
+  ['waste_sheet',      '0.10'],
+  ['waste_roof_sheet', '0.10'],
+  ['waste_concrete',   '0.05'],
+  ['waste_housewrap',  '0.10'],
+  ['waste_insulation', '0.00'],
 ];
 
 async function seedSkuCatalog() {
@@ -382,6 +464,24 @@ async function seedSkuCatalog() {
         s.coverage_unit ?? null,
         s.section_notes ?? null,
       ]
+    );
+  }
+  // Apply catalog-number fixups for rows seeded earlier without catalogs.
+  for (const [desc, catalog] of SKU_CATALOG_FIXUPS) {
+    await pool.query(
+      `UPDATE sku_catalog SET catalog_number = $1
+       WHERE description = $2 AND (catalog_number IS NULL OR catalog_number <> $1)`,
+      [catalog, desc]
+    );
+  }
+}
+
+async function seedSystemSettings() {
+  for (const [key, value] of SYSTEM_SETTINGS_DEFAULTS) {
+    await pool.query(
+      `INSERT INTO system_settings (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO NOTHING`,
+      [key, value]
     );
   }
 }
@@ -492,6 +592,8 @@ async function run() {
     await seedExamples();
     await seedSkuCatalog();
     console.log('SKU catalog seeded.');
+    await seedSystemSettings();
+    console.log('System settings seeded.');
     console.log('Migration done.');
   } catch (err) {
     console.error('Migration failed:', err);

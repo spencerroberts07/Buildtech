@@ -57,6 +57,10 @@ export const SECTIONS = {
 };
 
 // Section order: every level's sections in order, then no-prefix solos.
+// Note: SOLO_SECTIONS.EXTERIOR_INSULATION is no longer in the order — Silverboard
+// now lands in the per-level Exterior Walls section. The constant is kept on
+// SOLO_SECTIONS so old test imports of SECTIONS.EXTERIOR_INSULATION still resolve,
+// but no rows will sort to that string.
 function buildSectionOrder() {
   const out = [];
   for (const level of [LEVELS.FOUNDATION, LEVELS.FLOOR1, LEVELS.FLOOR2]) {
@@ -71,7 +75,6 @@ function buildSectionOrder() {
     );
   }
   out.push(SOLO_SECTIONS.ROOF);
-  out.push(SOLO_SECTIONS.EXTERIOR_INSULATION);
   out.push(SOLO_SECTIONS.PACKAGES);
   return out;
 }
@@ -100,7 +103,9 @@ export const CATEGORIES = {
   HEADER: 'Header',
   JACK_STUDS: 'Jack Studs',
   SHIMS: 'Shims',
-  DRYWALL: 'Drywall',
+  DRYWALL: 'Drywall',           // legacy — kept for any old code paths
+  WALL_DRYWALL: 'Wall Drywall',
+  CEILING_DRYWALL: 'Ceiling Drywall',
   SUBFLOOR: 'Subfloor',
   SUBFLOOR_ADHESIVE: 'Subfloor Adhesive',
 };
@@ -120,7 +125,9 @@ export const CATEGORY_ORDER = [
   CATEGORIES.INSULATION,
   CATEGORIES.VAPOUR_BARRIER,
   CATEGORIES.PLATE_POLY,
-  CATEGORIES.DRYWALL,
+  CATEGORIES.WALL_DRYWALL,
+  CATEGORIES.CEILING_DRYWALL,
+  CATEGORIES.DRYWALL, // legacy fallback if any caller still emits it
   CATEGORIES.SUBFLOOR,
   CATEGORIES.SUBFLOOR_ADHESIVE,
   'Hardware',
@@ -171,8 +178,25 @@ const SILVERBOARD_SHEET_AREA_SF = 32;
 // ---------- canonical SKUs ----------
 const HOUSEWRAP_NAME = "9'X100' TYPAR HOUSEWRAP";
 const WRAP_TAPE_NAME = 'TAPE,SHEATHING PLY RED 60MMX55M';
+// Legacy drywall name (kept exported for backward-compat in case anything imports it).
+// New code picks per-height via wallDrywallNameForHeight().
 const DRYWALL_NAME = '4 X 12 - 1/2 DRYWALL';
 const OSB_NAME = '4 X 8 - 7/16 ORIENTED STRAND BOARD';
+
+// Wall drywall picker (height-driven). Sheet sizes match sku_catalog descriptions.
+const WALL_DRYWALL_LADDER = [
+  { maxHeightFt: 8.5,  name: '4 X 8 - 1/2" DRYWALL',  sheetSf: 32 },
+  { maxHeightFt: 9.5,  name: '4 X 9 - 1/2" DRYWALL',  sheetSf: 36 },
+  { maxHeightFt: 10.5, name: '4 X 10 - 1/2" DRYWALL', sheetSf: 40 },
+];
+function wallDrywallForHeight(heightFt) {
+  for (const r of WALL_DRYWALL_LADDER) if (heightFt <= r.maxHeightFt) return r;
+  return WALL_DRYWALL_LADDER[WALL_DRYWALL_LADDER.length - 1];
+}
+export const CEILING_DRYWALL_OPTIONS = {
+  '41212dw': { name: '4 X 12 - 1/2" DRYWALL', sheetSf: 48 },
+  '41012dw': { name: '4 X 10 - 1/2" DRYWALL', sheetSf: 40 },
+};
 const SILL_GASKET_55_NAME = 'GASKET,SILL 3/16 WHITE 5.5X82';
 const SILL_GASKET_35_NAME = 'GASKET,SILL 3/16 WHITE 3.5X82';
 const BRACING_NAME = '2 X 4 X 16 PREMIUM SPRUCE';
@@ -236,8 +260,24 @@ function wallHeightFt(wall, settings) {
   return num(wall.height) ?? num(settings.wallHeight) ?? 9;
 }
 
+// Default waste factors. Each key is referenced by name in the compute functions.
+// They can be overridden by passing a wasteFactors object on the settings parameter
+// (loaded from system_settings at the API layer).
+export const DEFAULT_WASTE_FACTORS = {
+  lumber:     0.05,
+  sheet:      0.10,
+  roofSheet:  0.10,
+  concrete:   0.05,
+  housewrap:  0.10,
+  insulation: 0.00,
+};
+
+function w(settings, key) {
+  return settings?.wasteFactors?.[key] ?? DEFAULT_WASTE_FACTORS[key];
+}
+
 // ---------- settings resolver ----------
-export function resolveProjectSettings(projectRow, globalRow, level = LEVELS.FLOOR1) {
+export function resolveProjectSettings(projectRow, globalRow, level = LEVELS.FLOOR1, options = {}) {
   const g = globalRow || {};
   const p = projectRow || {};
   // Per-level wall height default. Foundation has no default (per-wall only);
@@ -261,6 +301,8 @@ export function resolveProjectSettings(projectRow, globalRow, level = LEVELS.FLO
     scaleFtPerGrid:    num(p.scale_ft_per_grid) ?? 1,
     insulationType:    p.insulation_type || DEFAULT_INSULATION_KEY,
     silverboardType:   p.silverboard_type || DEFAULT_SILVERBOARD_KEY,
+    ceilingDrywallType: p.ceiling_drywall_type || '41212dw',
+    wasteFactors:      options.wasteFactors || null,
   };
 }
 
@@ -288,17 +330,20 @@ export function computeWallMaterials(wall, settings, wallOpenings = [], level = 
 
   const items = [];
 
+  const lumberWaste = w(settings, 'lumber');
+  const sheetWaste = w(settings, 'sheet');
+
   items.push({
     section: wallSection, category: CATEGORIES.BOTTOM_PLATE,
     name: `${lumberDim} X 16 PREMIUM SPRUCE`,
     unit: 'each',
-    quantity: Math.ceil(lengthFt / PLATE_BOARD_LENGTH_FT) * (1 + PLATE_WASTE),
+    quantity: Math.ceil(lengthFt / PLATE_BOARD_LENGTH_FT) * (1 + lumberWaste),
   });
   items.push({
     section: wallSection, category: CATEGORIES.TOP_PLATE,
     name: `${lumberDim} X 16 PREMIUM SPRUCE`,
     unit: 'each',
-    quantity: Math.ceil((lengthFt * 2) / PLATE_BOARD_LENGTH_FT) * (1 + PLATE_WASTE),
+    quantity: Math.ceil((lengthFt * 2) / PLATE_BOARD_LENGTH_FT) * (1 + lumberWaste),
   });
 
   const studCount = Math.ceil((lengthFt * 12) / studSpacing) + 1 + extraCorner;
@@ -309,35 +354,39 @@ export function computeWallMaterials(wall, settings, wallOpenings = [], level = 
     quantity: studCount,
   });
 
+  // Wall drywall — height-specific sheet, lands in Finishings under "Wall Drywall".
+  const wallDw = wallDrywallForHeight(heightFt);
+
   if (isExterior) {
     items.push({
       section: wallSection, category: CATEGORIES.SHEATHING,
       name: OSB_NAME,
       unit: 'sheet',
-      quantity: Math.ceil(netArea / sheetAreaFromName(OSB_NAME)) * (1 + SHEET_WASTE),
+      quantity: Math.ceil(netArea / sheetAreaFromName(OSB_NAME)) * (1 + sheetWaste),
     });
     if (settings.silverboardType && settings.silverboardType !== 'none') {
       const sb = SILVERBOARD_TYPES[settings.silverboardType];
       if (!sb) throw new Error(`Unknown silverboard_type: ${settings.silverboardType}`);
+      // Silverboard now lands in the Exterior Walls section (was a separate solo section).
       items.push({
-        section: SOLO_SECTIONS.EXTERIOR_INSULATION, category: CATEGORIES.EXTERIOR_INSULATION,
+        section: wallSection, category: CATEGORIES.EXTERIOR_INSULATION,
         name: sb.name,
         unit: 'EA',
-        quantity: Math.ceil(netArea / SILVERBOARD_SHEET_AREA_SF) * (1 + SHEET_WASTE),
+        quantity: Math.ceil(netArea / SILVERBOARD_SHEET_AREA_SF) * (1 + sheetWaste),
       });
     }
     items.push({
-      section: finishingsSection, category: CATEGORIES.DRYWALL,
-      name: DRYWALL_NAME,
+      section: finishingsSection, category: CATEGORIES.WALL_DRYWALL,
+      name: wallDw.name,
       unit: 'sheet',
-      quantity: Math.ceil(netArea / sheetAreaFromName(DRYWALL_NAME)) * (1 + SHEET_WASTE),
+      quantity: Math.ceil(netArea / wallDw.sheetSf) * (1 + sheetWaste),
     });
   } else {
     items.push({
-      section: finishingsSection, category: CATEGORIES.DRYWALL,
-      name: DRYWALL_NAME,
+      section: finishingsSection, category: CATEGORIES.WALL_DRYWALL,
+      name: wallDw.name,
       unit: 'sheet',
-      quantity: Math.ceil((netArea * 2) / sheetAreaFromName(DRYWALL_NAME)) * (1 + SHEET_WASTE),
+      quantity: Math.ceil((netArea * 2) / wallDw.sheetSf) * (1 + sheetWaste),
     });
   }
 

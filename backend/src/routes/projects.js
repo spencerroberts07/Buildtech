@@ -61,6 +61,7 @@ const PROJECT_SETTING_FIELDS = [
   'pdf_scale',
   'pdf_page',
   'pdf_filename',
+  'ceiling_drywall_type',
 ];
 
 const WALL_TYPES = ['exterior_2x6', 'interior_2x4', 'interior_2x6'];
@@ -498,7 +499,7 @@ router.delete('/:id/openings/:oid', async (req, res) => {
 // ---------------- Floor plans (polygon-based) ----------------
 const FLOOR_PLAN_WALL_FIELDS = ['wall_type', 'height', 'sheathing_override', 'drywall_override', 'on_concrete'];
 const INTERIOR_WALL_TYPES = new Set(['interior_2x4', 'interior_2x6']);
-const INTERIOR_WALL_FIELDS = ['x1', 'y1', 'x2', 'y2', 'wall_type', 'height', 'on_concrete', 'sheathing_override', 'drywall_override'];
+const INTERIOR_WALL_FIELDS = ['x1', 'y1', 'x2', 'y2', 'wall_type', 'height', 'on_concrete', 'sheathing_override', 'drywall_override', 'interior_wall_type_label'];
 const FLOOR_PLAN_PUT_EXTRA_FIELDS = ['drawing_phase'];
 
 async function loadFloorPlanFull(projectId, fpId) {
@@ -619,6 +620,34 @@ router.put('/:id/floor-plans/:fpid', async (req, res) => {
             [fpid, i]
           );
         }
+      }
+    }
+    // Auto-calc enclosed floor area (shoelace) → cache on the matching floors row.
+    // We use scale_ft_per_grid (project-level scale) to convert grid² → ft².
+    if (corners.length >= 3) {
+      const proj = await client.query('SELECT scale_ft_per_grid FROM projects WHERE id = $1', [id]);
+      const sft = Number(proj.rows[0]?.scale_ft_per_grid) || 1;
+      let acc = 0;
+      for (let i = 0; i < corners.length; i++) {
+        const a = corners[i];
+        const b = corners[(i + 1) % corners.length];
+        acc += (Number(a.x) * Number(b.y) - Number(b.x) * Number(a.y));
+      }
+      const areaSf = Math.abs(acc) / 2 * (sft * sft);
+      const lvl = fp.rows[0].level || 'floor1';
+      // Upsert into floors: prefer the row matching this floor plan's level.
+      const f = await client.query(
+        'SELECT id FROM floors WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1',
+        [id, lvl]
+      );
+      if (f.rows[0]) {
+        await client.query(
+          'UPDATE floors SET auto_floor_area_sf = $1 WHERE id = $2',
+          [areaSf, f.rows[0].id]
+        );
+      } else {
+        // Don't auto-create the row — only update if the user has already created a floor.
+        // (Avoids cluttering projects that don't want floor materials.)
       }
     }
     await client.query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
@@ -760,12 +789,13 @@ router.post('/:id/floor-plans/:fpid/interior-walls', async (req, res) => {
   }
   const { rows } = await query(
     `INSERT INTO floor_plan_interior_walls
-       (floor_plan_id, x1, y1, x2, y2, wall_type, height, on_concrete, sheathing_override, drywall_override)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+       (floor_plan_id, x1, y1, x2, y2, wall_type, height, on_concrete, sheathing_override, drywall_override, interior_wall_type_label)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
     [
       fpid, b.x1, b.y1, b.x2, b.y2,
       wallType, b.height ?? null, !!b.on_concrete,
       b.sheathing_override ?? null, b.drywall_override ?? null,
+      b.interior_wall_type_label ?? null,
     ]
   );
   await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
@@ -1133,6 +1163,42 @@ router.delete('/:id/overrides/:oid', async (req, res) => {
   res.status(204).end();
 });
 
+// ---------------- Material deletions (per-row hide-from-list) ----------------
+router.get('/:id/deletions', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    'SELECT * FROM material_deletions WHERE project_id = $1 ORDER BY id', [id]
+  );
+  res.json(rows);
+});
+
+router.post('/:id/deletions', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const desc = (b.description || '').trim();
+  const section = (b.section || '').trim();
+  if (!desc || !section) return res.status(400).json({ error: 'description and section required' });
+  const { rows } = await query(
+    `INSERT INTO material_deletions (project_id, description, section)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (project_id, description, section) DO UPDATE SET created_at = NOW()
+     RETURNING *`,
+    [id, desc, section]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.delete('/:id/deletions/:did', async (req, res) => {
+  const { id, did } = req.params;
+  await query(
+    'DELETE FROM material_deletions WHERE id = $1 AND project_id = $2',
+    [did, id]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
 // Material list — combined rollup of typed measurements + sketched walls
 router.get('/:id/material-list', async (req, res) => {
   const { id } = req.params;
@@ -1157,8 +1223,21 @@ router.get('/:id/material-list', async (req, res) => {
   if (!projectRow) return res.status(404).json({ error: 'not found' });
   const globalRow = (await query('SELECT * FROM settings WHERE id = 1')).rows[0];
   const walls = (await query('SELECT * FROM walls WHERE project_id = $1', [id])).rows;
+
+  // Load system_settings (waste factors + global defaults) once.
+  const sysRows = (await query('SELECT key, value FROM system_settings')).rows;
+  const sys = Object.fromEntries(sysRows.map((r) => [r.key, r.value]));
+  const wasteFactors = {
+    lumber:     parseFloat(sys.waste_lumber)     || 0.05,
+    sheet:      parseFloat(sys.waste_sheet)      || 0.10,
+    roofSheet:  parseFloat(sys.waste_roof_sheet) || 0.10,
+    concrete:   parseFloat(sys.waste_concrete)   || 0.05,
+    housewrap:  parseFloat(sys.waste_housewrap)  || 0.10,
+    insulation: parseFloat(sys.waste_insulation) || 0.00,
+  };
+
   // Default settings (Floor 1) used by legacy walls fallback
-  const settings = resolveProjectSettings(projectRow, globalRow, LEVELS.FLOOR1);
+  const settings = resolveProjectSettings(projectRow, globalRow, LEVELS.FLOOR1, { wasteFactors });
 
   // Prefer floor plans (new polygon flow). Fall back to legacy walls table if no floor plan exists.
   const fpRows = (await query(
@@ -1173,7 +1252,7 @@ router.get('/:id/material-list', async (req, res) => {
       if (fp.level === LEVELS.ROOF) continue;
       // Floor 2 only counts on 2-storey projects
       if (fp.level === LEVELS.FLOOR2 && Number(projectRow.num_storeys) < 2) continue;
-      const lvlSettings = resolveProjectSettings(projectRow, globalRow, fp.level);
+      const lvlSettings = resolveProjectSettings(projectRow, globalRow, fp.level, { wasteFactors });
       const fpWalls = (await query(
         'SELECT * FROM floor_plan_walls WHERE floor_plan_id = $1 ORDER BY wall_index',
         [fp.id]
@@ -1247,12 +1326,16 @@ router.get('/:id/material-list', async (req, res) => {
   )).rows[0];
   if (roofRow) wallItems.push(...computeRoofMaterials(roofRow));
 
-  // Floor items (subfloor + adhesive). Singleton per project.
+  // Floor items (subfloor + adhesive + ceiling drywall). Singleton per project.
   const floorRow = (await query(
     'SELECT * FROM floors WHERE project_id = $1 ORDER BY id LIMIT 1', [id]
   )).rows[0];
   if (floorRow) {
-    const areaSf = Number(floorRow.floor_area_sf) || 0;
+    // Resolve effective floor area: manual override (floor_area_sf) takes precedence;
+    // otherwise the auto-calculated value (auto_floor_area_sf, set on polygon save).
+    const overrideSf = Number(floorRow.floor_area_sf) || 0;
+    const autoSf = Number(floorRow.auto_floor_area_sf) || 0;
+    const areaSf = overrideSf > 0 ? overrideSf : autoSf;
     if (areaSf > 0) {
       const lvl = floorRow.level || 'floor1';
       const floorSection = sectionFor('FLOOR', lvl);
@@ -1262,12 +1345,22 @@ router.get('/:id/material-list', async (req, res) => {
       wallItems.push({
         section: floorSection, category: 'Subfloor',
         name: subfloorName, unit: 'EA',
-        quantity: Math.ceil(areaSf / 32) * 1.10,
+        quantity: Math.ceil(areaSf / 32) * (1 + wasteFactors.sheet),
       });
       wallItems.push({
         section: floorSection, category: 'Subfloor Adhesive',
         name: 'ADHSV,CNSTR PL PREM PNT825ML', unit: 'EA',
         quantity: Math.ceil(areaSf / 500),
+      });
+      // Ceiling drywall — sheet selected by project setting (default 4x12).
+      const cdwKey = projectRow.ceiling_drywall_type || '41212dw';
+      const ceilingSheet = cdwKey === '41012dw'
+        ? { name: '4 X 10 - 1/2" DRYWALL', sheetSf: 40 }
+        : { name: '4 X 12 - 1/2" DRYWALL', sheetSf: 48 };
+      wallItems.push({
+        section: sectionFor('FINISHINGS', lvl), category: 'Ceiling Drywall',
+        name: ceilingSheet.name, unit: 'sheet',
+        quantity: Math.ceil(areaSf / ceilingSheet.sheetSf) * (1 + wasteFactors.sheet),
       });
     }
   }
@@ -1383,7 +1476,36 @@ router.get('/:id/material-list', async (req, res) => {
     });
   }
 
-  res.json(out);
+  // Apply deletions. By default, deleted rows are filtered out. With
+  // ?include_deleted=1, they're returned with deleted: true so the UI can render
+  // them in the "Show deleted items" view.
+  const includeDeleted = req.query.include_deleted === '1' || req.query.include_deleted === 'true';
+  const delRows = (await query(
+    'SELECT id, description, section FROM material_deletions WHERE project_id = $1', [id]
+  )).rows;
+  const delKeys = new Set(delRows.map((d) =>
+    `${(d.section || '').trim().toLowerCase()}|${(d.description || '').trim().toLowerCase()}`
+  ));
+  const delIdByKey = new Map(delRows.map((d) =>
+    [`${(d.section || '').trim().toLowerCase()}|${(d.description || '').trim().toLowerCase()}`, d.id]
+  ));
+  const filtered = [];
+  for (const r of out) {
+    // Match deletion against the ORIGINAL description (so substitution overrides
+    // don't accidentally hide a different SKU). Falls back to material_name if no override.
+    const matchDesc = r.original_description || r.material_name;
+    const key = `${(r.section || '').trim().toLowerCase()}|${(matchDesc || '').trim().toLowerCase()}`;
+    if (delKeys.has(key)) {
+      if (includeDeleted) {
+        filtered.push({ ...r, deleted: true, deletion_id: delIdByKey.get(key) });
+      }
+      // else drop the row.
+      continue;
+    }
+    filtered.push({ ...r, deleted: false });
+  }
+
+  res.json(filtered);
 });
 
 export default router;

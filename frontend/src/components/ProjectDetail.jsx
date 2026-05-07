@@ -18,6 +18,7 @@ export default function ProjectDetail() {
   const [packages, setPackages] = useState([]);
   const [floor, setFloor] = useState(null);
   const [skuCatalog, setSkuCatalog] = useState([]);
+  const [showDeleted, setShowDeleted] = useState(false);
   const [tab, setTab] = useState('measurements');
   const [error, setError] = useState('');
   // Per-section collapsed state (true = collapsed, false/undefined = expanded)
@@ -74,9 +75,11 @@ export default function ProjectDetail() {
   }, [id]);
 
   const refetchMaterialList = useCallback(async () => {
-    try { setMaterialList(await api.materialList(id)); }
-    catch (e) { setError(e.message); }
-  }, [id]);
+    try {
+      const fn = showDeleted ? api.materialListWithDeleted : api.materialList;
+      setMaterialList(await fn(id));
+    } catch (e) { setError(e.message); }
+  }, [id, showDeleted]);
 
   const refetchProjectSettings = useCallback(async () => {
     try { setProjectSettings(await api.getProjectSettings(id)); }
@@ -101,6 +104,8 @@ export default function ProjectDetail() {
   }, [id]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
+  // Re-fetch material list when the show-deleted toggle changes.
+  useEffect(() => { refetchMaterialList(); }, [showDeleted, refetchMaterialList]);
 
   // ---- project settings save (debounced) ----
   const settingsTimer = useRef(null);
@@ -142,25 +147,32 @@ export default function ProjectDetail() {
     await loadAll();
   }
 
+  // Helper: empty string for null/undefined/em-dash so Excel doesn't show â€" symbols.
+  const csvCell = (v) => {
+    if (v == null) return '';
+    const s = String(v);
+    if (s === '—') return '';
+    return s;
+  };
+
   function exportFullCsv() {
-    const header = ['Group', 'Section', 'Catalog#', 'Item#', 'Material', 'Unit', 'Total Qty'];
-    const rows = materialList.map(r => [
-      r.section || '—',
-      r.category || '—',
-      r.catalog_number ?? '—',
-      r.item_number ?? '—',
-      r.material_name,
-      r.material_unit,
-      String(Number(r.total_quantity)),
-    ]);
-    const csv = [header, ...rows].map(r => r.map(escapeCsv).join(',')).join('\n');
-    downloadCsv(csv, `${project.name.replace(/[^a-z0-9-_]+/gi,'_')}_material_list.csv`);
+    const header = ['Group', 'Section', 'Item#', 'Catalog#', 'Material', 'Unit', 'Total Qty'];
+    const rows = materialList
+      .filter((r) => !r.deleted)
+      .map((r) => [
+        csvCell(r.section), csvCell(r.category),
+        csvCell(r.item_number), csvCell(r.catalog_number),
+        csvCell(r.material_name), csvCell(r.material_unit),
+        String(Number(r.total_quantity)),
+      ]);
+    const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
+    downloadCsv(csv, `${project.name.replace(/[^a-z0-9-_]+/gi, '_')}_material_list.csv`);
   }
 
   function exportPosCsv() {
-    // Group by catalog_number; rows without a catalog group by description.
     const groups = new Map();
     for (const r of materialList) {
+      if (r.deleted) continue;
       const key = r.catalog_number
         ? `cat|${r.catalog_number}`
         : `desc|${(r.material_name || '').trim().toLowerCase()}`;
@@ -179,20 +191,19 @@ export default function ProjectDetail() {
     }
     const rows = Array.from(groups.values())
       .sort((a, b) => (a.description || '').localeCompare(b.description || ''))
-      .map(r => [
-        r.catalog_number ?? '—',
-        r.item_number ?? '—',
-        r.description,
-        String(r.total_quantity),
-        r.unit,
+      .map((r) => [
+        csvCell(r.item_number), csvCell(r.catalog_number),
+        csvCell(r.description), String(r.total_quantity), csvCell(r.unit),
       ]);
-    const header = ['Catalog#', 'Item#', 'Description', 'Total Qty', 'Unit'];
-    const csv = [header, ...rows].map(r => r.map(escapeCsv).join(',')).join('\n');
-    downloadCsv(csv, `${project.name.replace(/[^a-z0-9-_]+/gi,'_')}_pos_list.csv`);
+    const header = ['Item#', 'Catalog#', 'Description', 'Total Qty', 'Unit'];
+    const csv = [header, ...rows].map((r) => r.map(escapeCsv).join(',')).join('\r\n');
+    downloadCsv(csv, `${project.name.replace(/[^a-z0-9-_]+/gi, '_')}_pos_list.csv`);
   }
 
   function downloadCsv(csv, filename) {
-    const blob = new Blob([csv], { type: 'text/csv' });
+    // Prepend UTF-8 BOM so Excel reads accented chars and em-dashes correctly.
+    const withBom = '﻿' + csv;
+    const blob = new Blob([withBom], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -210,6 +221,20 @@ export default function ProjectDetail() {
         original_description: originalDescription,
         override_description: overrideDescription,
       });
+      await refetchMaterialList();
+    } catch (e) { setError(e.message); }
+  }, [id, refetchMaterialList]);
+
+  const deleteMaterial = useCallback(async (description, section) => {
+    try {
+      await api.createMaterialDeletion(id, { description, section });
+      await refetchMaterialList();
+    } catch (e) { setError(e.message); }
+  }, [id, refetchMaterialList]);
+
+  const restoreMaterial = useCallback(async (deletionId) => {
+    try {
+      await api.deleteMaterialDeletion(id, deletionId);
       await refetchMaterialList();
     } catch (e) { setError(e.message); }
   }, [id, refetchMaterialList]);
@@ -363,20 +388,26 @@ export default function ProjectDetail() {
             <tr>
               <th>Section</th>
               <th>Category</th>
-              <th>Catalog#</th>
               <th>Item#</th>
+              <th>Catalog#</th>
               <th>Material</th>
               <th>Qty</th>
               <th>Unit</th>
-              <th style={{ width: '2.5rem' }}></th>
+              <th style={{ width: '4rem' }}></th>
             </tr>
           </thead>
           <tbody>
             {renderGroupedMaterialRows(materialList, collapsedSections, toggleSection, {
-              skusByDefinition, applyOverride, resetOverride,
+              skusByDefinition, applyOverride, resetOverride, deleteMaterial, restoreMaterial,
             })}
           </tbody>
         </table>
+      )}
+      {materialList.length > 0 && (
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.5rem' }}>
+          <input type="checkbox" checked={showDeleted} onChange={(e) => setShowDeleted(e.target.checked)} />
+          <span className="muted">Show deleted items</span>
+        </label>
       )}
 
       <h2>Packages</h2>
@@ -453,6 +484,8 @@ function renderGroupedMaterialRows(rows, collapsedSections, toggleSection, opts 
             skusByDefinition={skusByDefinition}
             applyOverride={applyOverride}
             resetOverride={resetOverride}
+            deleteMaterial={opts.deleteMaterial}
+            restoreMaterial={opts.restoreMaterial}
           />
         );
       });
@@ -461,9 +494,8 @@ function renderGroupedMaterialRows(rows, collapsedSections, toggleSection, opts 
   return out;
 }
 
-function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, resetOverride }) {
+function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, resetOverride, deleteMaterial, restoreMaterial }) {
   const [open, setOpen] = useState(false);
-  // Substitutes: SKUs in the same definition group, excluding the current displayed SKU.
   const substitutes = (() => {
     if (!skusByDefinition || !row.definition) return [];
     const list = skusByDefinition.get(row.definition) || [];
@@ -471,16 +503,21 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
   })();
   const hasGroup = substitutes.length > 0 || row.modified;
   const isPackage = !!row.is_package;
+  const isDeleted = !!row.deleted;
+
+  const cellStyle = isDeleted
+    ? { textDecoration: 'line-through', color: '#9CA3AF' }
+    : undefined;
 
   return (
     <tr className="material-row">
-      <td className="material-row-section-cell">
+      <td className="material-row-section-cell" style={cellStyle}>
         {sectionLabel || <span className="muted">—</span>}
       </td>
-      <td>{row.category || <span className="muted">—</span>}</td>
-      <td>{row.catalog_number || <span className="muted">—</span>}</td>
-      <td>{row.item_number || <span className="muted">—</span>}</td>
-      <td>
+      <td style={cellStyle}>{row.category || <span className="muted">—</span>}</td>
+      <td style={cellStyle}>{row.item_number || <span className="muted">—</span>}</td>
+      <td style={cellStyle}>{row.catalog_number || <span className="muted">—</span>}</td>
+      <td style={cellStyle}>
         {row.material_name}
         {row.modified && (
           <span
@@ -493,74 +530,96 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
           />
         )}
       </td>
-      <td>{Number(row.total_quantity)}</td>
-      <td>{row.material_unit}</td>
-      <td style={{ position: 'relative', textAlign: 'center' }}>
-        {!isPackage && hasGroup && (
+      <td style={cellStyle}>{Number(row.total_quantity)}</td>
+      <td style={cellStyle}>{row.material_unit}</td>
+      <td style={{ position: 'relative', textAlign: 'center', whiteSpace: 'nowrap' }}>
+        {isDeleted ? (
+          <button
+            type="button"
+            onClick={() => restoreMaterial?.(row.deletion_id)}
+            title="Restore"
+            className="secondary"
+            style={{ padding: '0.1rem 0.4rem', fontSize: '0.75rem' }}
+          >Restore</button>
+        ) : (
           <>
+            {!isPackage && hasGroup && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setOpen((v) => !v)}
+                  title="Substitute material"
+                  style={{
+                    background: 'transparent', border: 'none', cursor: 'pointer',
+                    padding: '0.1rem 0.25rem', fontSize: '0.85rem', color: '#6B7280',
+                  }}
+                >▼</button>
+                {open && (
+                  <div
+                    style={{
+                      position: 'absolute', right: 0, top: '100%',
+                      background: 'white', border: '1px solid #E5E7EB',
+                      borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
+                      zIndex: 50, minWidth: 280, maxHeight: 320, overflowY: 'auto',
+                      textAlign: 'left',
+                    }}
+                    onMouseLeave={() => setOpen(false)}
+                  >
+                    {row.modified && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpen(false);
+                          resetOverride(row.original_description);
+                        }}
+                        style={{
+                          display: 'block', width: '100%', textAlign: 'left',
+                          padding: '0.5rem 0.75rem', background: 'transparent',
+                          border: 'none', borderBottom: '1px solid #E5E7EB',
+                          cursor: 'pointer', fontWeight: 600, color: '#B91C1C',
+                        }}
+                      >Reset to original ({row.original_description})</button>
+                    )}
+                    {substitutes.length === 0 ? (
+                      <div style={{ padding: '0.5rem 0.75rem', color: '#6B7280' }}>No alternates available.</div>
+                    ) : (
+                      substitutes.map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => {
+                            setOpen(false);
+                            const original = row.original_description || row.material_name;
+                            applyOverride(original, s.description);
+                          }}
+                          style={{
+                            display: 'block', width: '100%', textAlign: 'left',
+                            padding: '0.45rem 0.75rem', background: 'transparent',
+                            border: 'none', cursor: 'pointer', fontSize: '0.85rem',
+                            borderBottom: '1px solid #F3F4F6',
+                          }}
+                        >
+                          <div style={{ fontWeight: 500 }}>{s.description}</div>
+                          <div style={{ color: '#6B7280', fontSize: '0.75rem' }}>
+                            {s.catalog_number || '—'} · {s.item_number || '—'}
+                          </div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </>
+            )}
             <button
               type="button"
-              onClick={() => setOpen((v) => !v)}
-              title="Substitute material"
+              onClick={() => deleteMaterial?.(row.original_description || row.material_name, row.section)}
+              title="Hide this row"
               style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',
-                padding: '0.1rem 0.35rem', fontSize: '0.85rem', color: '#6B7280',
+                padding: '0.1rem 0.25rem', fontSize: '0.9rem', color: '#9CA3AF',
+                marginLeft: 4,
               }}
-            >▼</button>
-            {open && (
-              <div
-                style={{
-                  position: 'absolute', right: 0, top: '100%',
-                  background: 'white', border: '1px solid #E5E7EB',
-                  borderRadius: 6, boxShadow: '0 4px 12px rgba(0,0,0,0.12)',
-                  zIndex: 50, minWidth: 280, maxHeight: 320, overflowY: 'auto',
-                  textAlign: 'left',
-                }}
-                onMouseLeave={() => setOpen(false)}
-              >
-                {row.modified && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOpen(false);
-                      resetOverride(row.original_description);
-                    }}
-                    style={{
-                      display: 'block', width: '100%', textAlign: 'left',
-                      padding: '0.5rem 0.75rem', background: 'transparent',
-                      border: 'none', borderBottom: '1px solid #E5E7EB',
-                      cursor: 'pointer', fontWeight: 600, color: '#B91C1C',
-                    }}
-                  >Reset to original ({row.original_description})</button>
-                )}
-                {substitutes.length === 0 ? (
-                  <div style={{ padding: '0.5rem 0.75rem', color: '#6B7280' }}>No alternates available.</div>
-                ) : (
-                  substitutes.map((s) => (
-                    <button
-                      key={s.id}
-                      type="button"
-                      onClick={() => {
-                        setOpen(false);
-                        const original = row.original_description || row.material_name;
-                        applyOverride(original, s.description);
-                      }}
-                      style={{
-                        display: 'block', width: '100%', textAlign: 'left',
-                        padding: '0.45rem 0.75rem', background: 'transparent',
-                        border: 'none', cursor: 'pointer', fontSize: '0.85rem',
-                        borderBottom: '1px solid #F3F4F6',
-                      }}
-                    >
-                      <div style={{ fontWeight: 500 }}>{s.description}</div>
-                      <div style={{ color: '#6B7280', fontSize: '0.75rem' }}>
-                        {s.catalog_number || '—'} · {s.item_number || '—'}
-                      </div>
-                    </button>
-                  ))
-                )}
-              </div>
-            )}
+            >🗑</button>
           </>
         )}
       </td>
@@ -580,10 +639,11 @@ function FloorPanel({ projectId, floor, setFloor, onMaterialsChanged, onPackages
   const saveTimer = useRef(null);
 
   async function createFloor() {
-    if (!draftArea) return;
     try {
+      // Blank → 0 means "use auto-calculated area from polygon".
+      const sf = draftArea === '' ? 0 : Number(draftArea);
       const created = await api.createFloor(projectId, {
-        floor_area_sf: Number(draftArea),
+        floor_area_sf: sf,
         subfloor_type: '58tgcsp',
       });
       setFloor(created);
@@ -618,12 +678,13 @@ function FloorPanel({ projectId, floor, setFloor, onMaterialsChanged, onPackages
     return (
       <div className="card">
         <p className="muted" style={{ marginTop: 0 }}>
-          No floor yet. Enter the floor area below to add subfloor + adhesive to the takeoff.
+          No floor yet. Click create to start tracking floor materials. Floor area is
+          calculated automatically from the exterior polygon, but can be overridden.
         </p>
         <div className="row">
           <div>
-            <label>Floor area (sf)</label>
-            <input type="number" value={draftArea} onChange={(e) => setDraftArea(e.target.value)} placeholder="720" />
+            <label>Floor area override (sf, optional)</label>
+            <input type="number" value={draftArea} onChange={(e) => setDraftArea(e.target.value)} placeholder="leave blank to use auto" />
           </div>
           <div style={{ flex: '0 0 auto' }}>
             <button className="primary" onClick={createFloor}>Create floor</button>
@@ -634,20 +695,38 @@ function FloorPanel({ projectId, floor, setFloor, onMaterialsChanged, onPackages
     );
   }
 
+  const autoSf = Number(floor.auto_floor_area_sf) || 0;
+  const overrideSf = Number(floor.floor_area_sf) || 0;
+  const effectiveSf = overrideSf > 0 ? overrideSf : autoSf;
+
   return (
     <div className="card">
       <div className="row" style={{ marginBottom: '0.5rem' }}>
         <strong style={{ flex: 1 }}>
-          Floor: {Number(floor.floor_area_sf)} sf · {SUBFLOOR_OPTIONS.find((o) => o.value === floor.subfloor_type)?.label || floor.subfloor_type}
+          Floor: {effectiveSf.toFixed(0)} sf{overrideSf > 0 ? ' (manual override)' : ' (auto)'} · {SUBFLOOR_OPTIONS.find((o) => o.value === floor.subfloor_type)?.label || floor.subfloor_type}
         </strong>
         <button className="danger" style={{ flex: '0 0 auto', padding: '0.3rem 0.7rem' }} onClick={deleteFloor}>Delete floor</button>
       </div>
       <div className="row">
         <div>
-          <label>Floor area (sf)</label>
+          <label>
+            Floor area (auto)
+            <span title="Calculated from exterior polygon. Override below if needed." style={{ marginLeft: 4, color: '#9CA3AF', cursor: 'help' }}>ⓘ</span>
+          </label>
           <input
             type="number"
-            value={floor.floor_area_sf ?? ''}
+            value={autoSf > 0 ? autoSf.toFixed(1) : ''}
+            placeholder="(no polygon yet)"
+            readOnly
+            style={{ background: '#F3F4F6' }}
+          />
+        </div>
+        <div>
+          <label>Override area (sf)</label>
+          <input
+            type="number"
+            value={overrideSf > 0 ? overrideSf : ''}
+            placeholder="(use auto)"
             onChange={(e) => patchFloor({ floor_area_sf: e.target.value === '' ? null : Number(e.target.value) })}
           />
         </div>

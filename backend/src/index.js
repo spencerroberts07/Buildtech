@@ -10,6 +10,7 @@ import projectsRouter from './routes/projects.js';
 import settingsRouter from './routes/settings.js';
 import skuCatalogRouter from './routes/skuCatalog.js';
 import customersRouter from './routes/customers.js';
+import systemSettingsRouter from './routes/systemSettings.js';
 
 dotenv.config();
 
@@ -30,6 +31,15 @@ app.post('/auth/login', async (req, res) => {
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
   res.json({ token: signToken(user), user: { id: user.id, username: user.username } });
+});
+
+app.post('/auth/verify-password', authRequired, async (req, res) => {
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ error: 'password required' });
+  const { rows } = await query('SELECT password_hash FROM users WHERE id=$1', [req.user.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'user not found' });
+  const ok = await bcrypt.compare(password, rows[0].password_hash);
+  res.json({ valid: !!ok });
 });
 
 app.post('/auth/change-password', authRequired, async (req, res) => {
@@ -53,6 +63,7 @@ app.use('/projects', authRequired, projectsRouter);
 app.use('/settings', authRequired, settingsRouter);
 app.use('/sku-catalog', authRequired, skuCatalogRouter);
 app.use('/customers', authRequired, customersRouter);
+app.use('/system-settings', authRequired, systemSettingsRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);

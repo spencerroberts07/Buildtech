@@ -142,6 +142,18 @@ export default function ProjectSettings({ settings, globalSettings, onChange }) 
       </div>
       <div className="row">
         <div style={{ flex: 2 }}>
+          <label>Ceiling drywall sheet</label>
+          <select
+            value={settings.ceiling_drywall_type ?? '41212dw'}
+            onChange={(e) => onChange('ceiling_drywall_type', e.target.value)}
+          >
+            <option value="41212dw">4 X 12 - 1/2" DRYWALL</option>
+            <option value="41012dw">4 X 10 - 1/2" DRYWALL</option>
+          </select>
+        </div>
+      </div>
+      <div className="row">
+        <div style={{ flex: 2 }}>
           <label>Exterior Rigid Insulation (Silverboard)</label>
           <select
             value={settings.silverboard_type ?? 'silverboard_1'}

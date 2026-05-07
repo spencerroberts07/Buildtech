@@ -9,6 +9,7 @@ import Materials from './components/Materials.jsx';
 import Settings from './components/Settings.jsx';
 import Customers from './components/Customers.jsx';
 import CustomerDetail from './components/CustomerDetail.jsx';
+import Defaults from './components/Defaults.jsx';
 
 function useAuth() {
   const [token, setToken] = React.useState(localStorage.getItem('token'));
@@ -63,6 +64,11 @@ function Shell({ user, onLogout, children }) {
             <NavLink to="/materials" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
               Materials
             </NavLink>
+            {user?.username === 'admin' && (
+              <NavLink to="/defaults" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
+                Defaults
+              </NavLink>
+            )}
           </nav>
         </aside>
         <main className="app-main">
@@ -98,6 +104,7 @@ export default function App() {
         <Route path="/assemblies/new" element={<AssemblyEditor />} />
         <Route path="/assemblies/:id" element={<AssemblyEditor />} />
         <Route path="/materials" element={<Materials />} />
+        <Route path="/defaults" element={<Defaults />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/projects" replace />} />
       </Routes>

@@ -141,11 +141,11 @@ test('Vapour barrier lands in "First Floor — Insulation"', () => {
   // 24 × 9 = 216 sf × 1.05 = 226.8 / 1500 = 0.151 → ceil 1
   assert.equal(row.quantity, 1);
 });
-test('Silverboard lands in "Exterior Insulation"', () => {
+test('Silverboard lands in the Exterior Walls section (no longer a standalone section)', () => {
   const items = sumMaterials(computeWallMaterials({
     x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0,
   }, baseSettings));
-  assert.ok(findRow(items, SECTIONS.EXTERIOR_INSULATION, 'SILVERBOARD GRAPHITE 4X8 1" R5'));
+  assert.ok(findRow(items, SECTIONS.EXTERIOR_WALLS, 'SILVERBOARD GRAPHITE 4X8 1" R5'));
 });
 test('Interior wall framing lands in "First Floor — Interior Walls"', () => {
   const items = sumMaterials(computeWallMaterials({
@@ -159,7 +159,7 @@ test('Plate poly lands in "First Floor — Interior Walls"', () => {
   const items = sumMaterials(computeProjectMaterials([wall], baseSettings));
   assert.ok(findRow(items, SECTIONS.INTERIOR_WALLS, '12 X 300FT CLEAR POLY'));
 });
-test('All drywall lands in "First Floor — Finishings" (exterior face + interior both faces)', () => {
+test('All wall drywall lands in "First Floor — Finishings" — height-specific sheet (4x9 for 9ft walls)', () => {
   const ext = { id: 1, x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
   const int = { id: 2, x1:0,y1:0,x2:'12',y2:0, wall_type:'interior_2x4', height:null, extra_corner_studs:0 };
   const all = [
@@ -167,11 +167,13 @@ test('All drywall lands in "First Floor — Finishings" (exterior face + interio
     ...computeWallMaterials(int, baseSettings),
   ];
   const items = sumMaterials(all);
-  // No drywall row in Exterior Walls or Interior Walls
-  assert.equal(findRow(items, SECTIONS.EXTERIOR_WALLS, '4 X 12 - 1/2 DRYWALL'), undefined);
-  assert.equal(findRow(items, SECTIONS.INTERIOR_WALLS, '4 X 12 - 1/2 DRYWALL'), undefined);
-  // Drywall row exists in Finishings
-  assert.ok(findRow(items, SECTIONS.FINISHINGS, '4 X 12 - 1/2 DRYWALL'));
+  // No wall drywall row in Exterior Walls or Interior Walls (lands in Finishings)
+  assert.equal(findRow(items, SECTIONS.EXTERIOR_WALLS, '4 X 9 - 1/2" DRYWALL'), undefined);
+  assert.equal(findRow(items, SECTIONS.INTERIOR_WALLS, '4 X 9 - 1/2" DRYWALL'), undefined);
+  // Wall drywall row exists in Finishings with the new category label
+  const r = findRow(items, SECTIONS.FINISHINGS, '4 X 9 - 1/2" DRYWALL');
+  assert.ok(r, 'expected wall drywall row in Finishings');
+  assert.equal(r.category, 'Wall Drywall');
 });
 test('Window header + jacks land in "First Floor — Windows"', () => {
   const wall = { id: 1, x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
@@ -200,6 +202,45 @@ test('Shims always land in "First Floor — Windows" regardless of openings', ()
   assert.ok(findRow(winOnly, SECTIONS.WINDOWS, 'SHIMS 10/10 BAG OF 60'));
   assert.ok(findRow(doorOnly, SECTIONS.WINDOWS, 'SHIMS 10/10 BAG OF 60'));
   assert.ok(findRow(both, SECTIONS.WINDOWS, 'SHIMS 10/10 BAG OF 60'));
+});
+
+console.log('\n=== Wall drywall — height-driven sheet picker ===');
+test('8ft wall → 4x8 drywall', () => {
+  const w8 = { x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:'8', extra_corner_studs:0 };
+  const items = sumMaterials(computeWallMaterials(w8, baseSettings));
+  // 24*8 = 192 sf / 32 sf = 6 ×1.10 = 6.6 → 7
+  const r = findRow(items, SECTIONS.FINISHINGS, '4 X 8 - 1/2" DRYWALL');
+  assert.ok(r, '4x8 drywall row missing'); assert.equal(r.quantity, 7);
+});
+test('9ft wall → 4x9 drywall', () => {
+  const items = sumMaterials(computeWallMaterials({
+    x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0,
+  }, baseSettings));
+  assert.ok(findRow(items, SECTIONS.FINISHINGS, '4 X 9 - 1/2" DRYWALL'));
+});
+test('10ft wall → 4x10 drywall', () => {
+  const w10 = { x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:'10', extra_corner_studs:0 };
+  const items = sumMaterials(computeWallMaterials(w10, baseSettings));
+  assert.ok(findRow(items, SECTIONS.FINISHINGS, '4 X 10 - 1/2" DRYWALL'));
+});
+
+console.log('\n=== Waste factors are parameterizable ===');
+test('Lumber waste factor override flows into plate quantities', () => {
+  const wall = { x1:0,y1:0,x2:'80',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
+  // baseline: 80 / 16 = 5 boards, × 1.05 = 5.25 → ceil 6
+  const baseline = sumMaterials(computeWallMaterials(wall, baseSettings));
+  const baseQty = findRow(baseline, SECTIONS.EXTERIOR_WALLS, '2 X 6 X 16 PREMIUM SPRUCE').quantity;
+  // override 10% lumber waste: 5 × 1.10 = 5.5 → ceil 6 (same after ceil; bump to 200ft to differentiate)
+  const longWall = { ...wall, x2: '200' };
+  const settingsHi = { ...baseSettings, wasteFactors: { lumber: 0.20 } };
+  const settingsLo = { ...baseSettings, wasteFactors: { lumber: 0.00 } };
+  // 200/16=12.5 → ceil 13. Lo: 13×1.00=13. Hi: 13×1.20=15.6 → ceil 16.
+  const lo = sumMaterials(computeWallMaterials(longWall, settingsLo));
+  const hi = sumMaterials(computeWallMaterials(longWall, settingsHi));
+  const loQty = findRow(lo, SECTIONS.EXTERIOR_WALLS, '2 X 6 X 16 PREMIUM SPRUCE').quantity;
+  const hiQty = findRow(hi, SECTIONS.EXTERIOR_WALLS, '2 X 6 X 16 PREMIUM SPRUCE').quantity;
+  assert.ok(hiQty > loQty, `expected higher waste to give more boards: hi=${hiQty}, lo=${loQty}`);
+  assert.ok(baseQty >= 6); // sanity
 });
 
 console.log('\n=== Sill gasket per-wall-type bucketing ===');
@@ -233,20 +274,20 @@ test('Exterior gasket and interior 2x6 gasket are separate rows (same SKU, diffe
 
 console.log('\n=== Silverboard ===');
 const ext24 = { x1:0,y1:0,x2:'24',y2:0, wall_type:'exterior_2x6', height:null, extra_corner_studs:0 };
-test('Silverboard 1" R5 (default): 8 sheets (ceil(216/32)=7 ×1.10 = 7.7 → 8)', () => {
+test('Silverboard 1" R5 (default): 8 sheets — now in Exterior Walls section', () => {
   const items = sumMaterials(computeWallMaterials(ext24, baseSettings));
-  const r = findRow(items, SECTIONS.EXTERIOR_INSULATION, 'SILVERBOARD GRAPHITE 4X8 1" R5');
+  const r = findRow(items, SECTIONS.EXTERIOR_WALLS, 'SILVERBOARD GRAPHITE 4X8 1" R5');
   assert.equal(r.quantity, 8);
 });
 test('Silverboard "none" omits the row entirely', () => {
   const s = resolveProjectSettings({ ...PG_PROJECT, silverboard_type: 'none' }, PG_GLOBAL);
   const items = sumMaterials(computeWallMaterials(ext24, s));
-  assert.equal(items.find((r) => r.section === SECTIONS.EXTERIOR_INSULATION), undefined);
+  assert.equal(items.find((r) => r.name === 'SILVERBOARD GRAPHITE 4X8 1" R5'), undefined);
 });
 test('Silverboard absent on interior walls', () => {
   const interior = { x1:0,y1:0,x2:'12',y2:0, wall_type:'interior_2x4', height:null, extra_corner_studs:0 };
   const items = sumMaterials(computeWallMaterials(interior, baseSettings));
-  assert.equal(items.find((r) => r.section === SECTIONS.EXTERIOR_INSULATION), undefined);
+  assert.equal(items.find((r) => r.name === 'SILVERBOARD GRAPHITE 4X8 1" R5'), undefined);
 });
 
 console.log('\n=== Opening area deductions ===');
@@ -257,13 +298,13 @@ test('Sheathing deducts opening area: ceil(183.25/32)=6 ×1.10 = 6.6 → 7', () 
   const items = sumMaterials(computeWallMaterials(ext24, baseSettings, [window36x48, door36x83]));
   assert.equal(findRow(items, SECTIONS.EXTERIOR_WALLS, '4 X 8 - 7/16 ORIENTED STRAND BOARD').quantity, 7);
 });
-test('Drywall deducts opening area: ceil(183.25/48)=4 ×1.10 = 4.4 → 5 (in Finishings)', () => {
+test('Wall drywall (4x9) deducts opening area: ceil(183.25/36)=6 ×1.10 = 6.6 → 7 (in Finishings)', () => {
   const items = sumMaterials(computeWallMaterials(ext24, baseSettings, [window36x48, door36x83]));
-  assert.equal(findRow(items, SECTIONS.FINISHINGS, '4 X 12 - 1/2 DRYWALL').quantity, 5);
+  assert.equal(findRow(items, SECTIONS.FINISHINGS, '4 X 9 - 1/2" DRYWALL').quantity, 7);
 });
-test('Silverboard deducts opening area → 7', () => {
+test('Silverboard deducts opening area → 7 (in Exterior Walls)', () => {
   const items = sumMaterials(computeWallMaterials(ext24, baseSettings, [window36x48, door36x83]));
-  assert.equal(findRow(items, SECTIONS.EXTERIOR_INSULATION, 'SILVERBOARD GRAPHITE 4X8 1" R5').quantity, 7);
+  assert.equal(findRow(items, SECTIONS.EXTERIOR_WALLS, 'SILVERBOARD GRAPHITE 4X8 1" R5').quantity, 7);
 });
 test('Studs/plates NOT affected by openings', () => {
   const without = sumMaterials(computeWallMaterials(ext24, baseSettings));
@@ -400,8 +441,8 @@ const expected3 = [
   [SECTIONS.EXTERIOR_WALLS, 'Sill Gasket', 'GASKET,SILL 3/16 WHITE 5.5X82', 1],
   [SECTIONS.EXTERIOR_WALLS, 'Wall Bracing', '2 X 4 X 16 PREMIUM SPRUCE', 8],
   [SECTIONS.INSULATION,     'Insulation',   'R22-15 FIBREGLASS INSUL. 49.0 SQ FT', 12],
-  [SECTIONS.EXTERIOR_INSULATION, 'Exterior Insulation', 'SILVERBOARD GRAPHITE 4X8 1" R5', 20],
-  [SECTIONS.FINISHINGS,     'Drywall',      '4 X 12 - 1/2 DRYWALL', 14],
+  [SECTIONS.EXTERIOR_WALLS, 'Exterior Insulation', 'SILVERBOARD GRAPHITE 4X8 1" R5', 20],
+  [SECTIONS.FINISHINGS,     'Wall Drywall', '4 X 9 - 1/2" DRYWALL', 17],
 ];
 for (const [section, category, name, qty] of expected3) {
   test(`${section} / ${category} / ${name} = ${qty}`, () => {
@@ -436,10 +477,10 @@ test('interior-only: 2x4 top plate row = 3 (2.10 → 3)', () => {
 test('interior-only: 2x4 studs in Interior Walls', () => {
   assert.equal(findRow(intRolled, SECTIONS.INTERIOR_WALLS, '2 X 4 X 104-5/8 PREMIUM SPRUCE').quantity, 10);
 });
-test('interior-only: drywall in Finishings (both faces)', () => {
-  // 12*9*2/48 = 4.5 → 5 ×1.10 = 5.5 → ceil 6
-  const r = findRow(intRolled, SECTIONS.FINISHINGS, '4 X 12 - 1/2 DRYWALL');
-  assert.equal(r.quantity, 6);
+test('interior-only: wall drywall (4x9) in Finishings (both faces)', () => {
+  // 12*9*2 = 216 sf / 36 sf-per-sheet = 6 ×1.10 = 6.6 → ceil 7
+  const r = findRow(intRolled, SECTIONS.FINISHINGS, '4 X 9 - 1/2" DRYWALL');
+  assert.equal(r.quantity, 7);
 });
 test('interior-only: plate poly in Interior Walls', () => {
   assert.ok(findRow(intRolled, SECTIONS.INTERIOR_WALLS, '12 X 300FT CLEAR POLY'));
@@ -531,8 +572,8 @@ const expectedRect = [
   [SECTIONS.EXTERIOR_WALLS, 'Sill Gasket', 'GASKET,SILL 3/16 WHITE 5.5X82', 2],
   [SECTIONS.EXTERIOR_WALLS, 'Wall Bracing', '2 X 4 X 16 PREMIUM SPRUCE', 14],
   [SECTIONS.INSULATION,     'Insulation',   'R22-15 FIBREGLASS INSUL. 49.0 SQ FT', 20],
-  [SECTIONS.EXTERIOR_INSULATION, 'Exterior Insulation', 'SILVERBOARD GRAPHITE 4X8 1" R5', 36],
-  [SECTIONS.FINISHINGS,     'Drywall',      '4 X 12 - 1/2 DRYWALL', 25],
+  [SECTIONS.EXTERIOR_WALLS, 'Exterior Insulation', 'SILVERBOARD GRAPHITE 4X8 1" R5', 36],
+  [SECTIONS.FINISHINGS,     'Wall Drywall', '4 X 9 - 1/2" DRYWALL', 31],
 ];
 for (const [section, category, name, qty] of expectedRect) {
   test(`rectangle ${category} / ${name} = ${qty}`, () => {
@@ -621,10 +662,11 @@ test('SECTION_ORDER places Foundation before Floor 1 before Floor 2', () => {
   const i2 = SECTION_ORDER.indexOf('Floor 1 — Exterior Walls');
   const i3 = SECTION_ORDER.indexOf('Floor 2 — Exterior Walls');
   const iRoof = SECTION_ORDER.indexOf('Roof');
-  const iExtIns = SECTION_ORDER.indexOf('Exterior Insulation');
   assert.ok(i1 >= 0 && i2 > i1 && i3 > i2);
   assert.ok(iRoof > i3);
-  assert.ok(iExtIns > i3);
+  // The standalone "Exterior Insulation" section was removed (silverboard now in
+  // per-level Exterior Walls section).
+  assert.equal(SECTION_ORDER.indexOf('Exterior Insulation'), -1);
 });
 
 console.log('\n=== Multi-storey: per-level materials ===');
@@ -667,10 +709,13 @@ test('Floor 1 + Floor 2 stacked rectangles produce per-level prefixes (no mergin
   // Floor 2 studs are 92-5/8 (different SKU from Floor 1)
   assert.ok(rolled.find((r) => r.section === 'Floor 2 — Exterior Walls' && r.name === '2 X 6 X 92-5/8 PREMIUM SPRUCE'));
   assert.ok(rolled.find((r) => r.section === 'Floor 1 — Exterior Walls' && r.name === '2 X 6 X 104-5/8 PREMIUM SPRUCE'));
-  // Silverboard merges across levels (no level prefix)
+  // Silverboard now lives in the per-level Exterior Walls section, so it splits.
   const allSilver = rolled.filter((r) => r.name === 'SILVERBOARD GRAPHITE 4X8 1" R5');
-  assert.equal(allSilver.length, 1);
-  assert.equal(allSilver[0].section, 'Exterior Insulation');
+  assert.equal(allSilver.length, 2);
+  const f1Silver = allSilver.find((r) => r.section === 'Floor 1 — Exterior Walls');
+  const f2Silver = allSilver.find((r) => r.section === 'Floor 2 — Exterior Walls');
+  assert.ok(f1Silver, 'expected silverboard in Floor 1 Exterior Walls');
+  assert.ok(f2Silver, 'expected silverboard in Floor 2 Exterior Walls');
 });
 
 console.log('\n=== Roof materials (Session 3) ===');
