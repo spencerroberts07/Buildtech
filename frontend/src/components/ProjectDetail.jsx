@@ -276,6 +276,7 @@ export default function ProjectDetail() {
           ) : project.customer}
         </p>
       )}
+      <p className="muted">Created by: {project.created_by || '—'}</p>
 
       <div className="tabs">
         <button

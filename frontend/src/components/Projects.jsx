@@ -43,7 +43,7 @@ export default function Projects() {
       ) : (
         <table>
           <thead>
-            <tr><th>Name</th><th>Customer</th><th>Last updated</th><th></th></tr>
+            <tr><th>Name</th><th>Customer</th><th>Created by</th><th>Last updated</th><th></th></tr>
           </thead>
           <tbody>
             {projects.map(p => (
@@ -57,6 +57,7 @@ export default function Projects() {
                     <Link to={`/customers/${p.customer_id}`}>{p.customer_name || p.customer || ''}</Link>
                   ) : (p.customer || '')}
                 </td>
+                <td>{p.created_by || '—'}</td>
                 <td>{new Date(p.updated_at).toLocaleString()}</td>
                 <td><button className="danger" onClick={() => remove(p.id)}>Delete</button></td>
               </tr>

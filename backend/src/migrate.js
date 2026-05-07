@@ -275,6 +275,8 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS ceiling_drywall_type TEXT NOT NULL DEFAULT '41212dw'`,
   // User role for admin-only gates.
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`,
+  // Track which user created each project (NULL for projects predating this column).
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS created_by TEXT`,
 ];
 
 const SKU_CATALOG_SEED = [

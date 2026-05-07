@@ -68,7 +68,7 @@ const WALL_FIELDS = [
 router.get('/', async (req, res) => {
   const { rows } = await query(`
     SELECT p.id, p.name, p.customer, p.customer_id, p.notes, p.num_storeys,
-           p.created_at, p.updated_at,
+           p.created_by, p.created_at, p.updated_at,
            c.name AS customer_name
     FROM projects p
     LEFT JOIN customers c ON c.id = p.customer_id
@@ -100,14 +100,15 @@ router.post('/', async (req, res) => {
   const { name, customer, customer_id, notes, num_storeys, floor2_wall_height, default_wall_height } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
   const storeys = Number(num_storeys ?? 1);
+  const createdBy = req.user?.username || null;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const proj = await client.query(
-      `INSERT INTO projects (name, customer, customer_id, notes, num_storeys, floor2_wall_height, default_wall_height)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      `INSERT INTO projects (name, customer, customer_id, notes, num_storeys, floor2_wall_height, default_wall_height, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
       [name, customer || null, customer_id || null, notes || null, storeys,
-       floor2_wall_height ?? 9, default_wall_height ?? null]
+       floor2_wall_height ?? 9, default_wall_height ?? null, createdBy]
     );
     const projectId = proj.rows[0].id;
     // Auto-create floor plans for all applicable levels.
