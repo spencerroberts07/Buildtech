@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { query, pool } from '../db.js';
 import { computeProjectMaterialList } from '../materialListBuilder.js';
+import { parseLumberDimensions, needsMbfConversion } from '../lumberPricing.js';
 
 const router = Router();
 
@@ -32,10 +33,39 @@ async function generateQuoteNumber(client) {
   return `Q-${year}-${String(next).padStart(4, '0')}`;
 }
 
+// Apply on-the-fly MBF→per-piece conversion to a matched SKU row when the row
+// is priced in MBF and hasn't been pre-converted by the import script. Uses
+// the material-list line's description to parse lumber dimensions, since the
+// curated sku_catalog rows can carry trimmed/standardized descriptions.
+function applyMbfFallback(matched, materialDesc) {
+  if (!matched) return matched;
+  if (matched.is_mbf_converted) return matched;
+  // Treat the row as MBF-priced if either the matched row OR the material
+  // description on the quote line trips the lumber detection — covers
+  // mislabeled MEA stock and ensures we don't double-convert later.
+  if (!needsMbfConversion(matched) && !needsMbfConversion({ description: materialDesc, unit: matched.unit })) {
+    return matched;
+  }
+  const d = parseLumberDimensions(materialDesc) || parseLumberDimensions(matched.description);
+  if (!d || !(d.board_feet > 0)) return matched;
+  const f = (mbf) => mbf == null ? null : (Number(mbf) / 1000) * d.board_feet;
+  return {
+    ...matched,
+    cost: f(matched.cost),
+    price1: f(matched.price1),
+    price2: f(matched.price2),
+    price3: f(matched.price3),
+    price4: f(matched.price4),
+  };
+}
+
 // Look up cost/price for a single material-list row. Tries:
 //  1. sku_catalog by item_number → catalog_number → exact LOWER(description)
 //  2. sku_catalog_full by item_number → catalog_number → exact LOWER(description)
 // Returns { cost, price1..4, item_number, catalog_number, unit } or empty fields.
+// Lumber rows priced in MBF are converted to per-piece on the fly when the
+// stored row hasn't been pre-converted (covers any rows imported before the
+// MBF-aware import script ran).
 async function lookupPricing(row, skuCurated, skuFull) {
   const item = row.item_number ? String(row.item_number) : null;
   const catalog = row.catalog_number ? String(row.catalog_number) : null;
@@ -51,6 +81,7 @@ async function lookupPricing(row, skuCurated, skuFull) {
 
   let m = pick(skuCurated);
   if (m && (m.cost != null || m.price1 != null)) {
+    m = applyMbfFallback(m, row.material_name);
     return {
       cost: m.cost, price1: m.price1, price2: m.price2, price3: m.price3, price4: m.price4,
       item_number: m.item_number || row.item_number,
@@ -60,6 +91,7 @@ async function lookupPricing(row, skuCurated, skuFull) {
   }
   m = pick(skuFull);
   if (m) {
+    m = applyMbfFallback(m, row.material_name);
     return {
       cost: m.cost, price1: m.price1, price2: m.price2, price3: m.price3, price4: m.price4,
       item_number: m.item_number || row.item_number,
@@ -75,14 +107,18 @@ async function lookupPricing(row, skuCurated, skuFull) {
 }
 
 async function buildLookupMaps() {
+  // sku_catalog has no unit column so we use NULL — those rows are lookup-only;
+  // any MBF conversion happens via the sku_catalog_full match instead.
   const curated = (await query(`
     SELECT item_number, catalog_number, description, NULL AS unit,
-           cost, price1, price2, price3, price4
+           cost, price1, price2, price3, price4,
+           false AS is_mbf_converted
     FROM sku_catalog
   `)).rows;
   const full = (await query(`
     SELECT item_number, catalog_number, description, unit,
-           cost, price1, price2, price3, price4
+           cost, price1, price2, price3, price4,
+           is_mbf_converted
     FROM sku_catalog_full
   `)).rows;
   const toMap = (rows) => {
@@ -249,7 +285,8 @@ router.get('/', async (req, res) => {
   if (project_id) { params.push(project_id); where.push(`q.project_id = $${params.length}`); }
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const { rows } = await query(`
-    SELECT q.id, q.quote_number, q.status, q.price_level, q.total, q.margin_pct,
+    SELECT q.id, q.quote_number, q.status, q.price_level,
+           q.subtotal, q.tax_rate, q.tax_amount, q.total, q.margin_pct,
            q.created_by, q.created_at, q.valid_until,
            p.name AS project_name,
            c.name AS customer_name

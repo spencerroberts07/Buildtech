@@ -10,6 +10,21 @@ const STATUS_TABS = [
   { value: 'expired', label: 'Expired' },
 ];
 
+const PRICE_LEVEL_LABELS = {
+  1: 'Level 1 — Retail',
+  2: 'Level 2 — Builder',
+  3: 'Level 3 — Large Builder',
+  4: 'Level 4 — Top Volume',
+};
+
+function fmtMoney(v) {
+  if (v == null) return '—';
+  return `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function fmtPct(v) {
+  if (v == null) return '—';
+  return `${Number(v).toFixed(1)}%`;
+}
 function marginColor(pct) {
   if (pct == null) return '#6B7280';
   if (pct >= 20) return '#16A34A';
@@ -23,13 +38,29 @@ export default function QuotesList() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [error, setError] = useState('');
 
-  async function load() {
-    try {
-      const params = statusFilter === 'all' ? {} : { status: statusFilter };
-      setQuotes(await api.listQuotes(params));
-    } catch (e) { setError(e.message); }
-  }
-  useEffect(() => { load(); }, [statusFilter]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const params = statusFilter === 'all' ? {} : { status: statusFilter };
+        const rows = await api.listQuotes(params);
+        if (!cancelled) setQuotes(rows);
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [statusFilter]);
+
+  const summary = (() => {
+    const count = quotes.length;
+    const totalValue = quotes.reduce((s, q) => s + (q.total != null ? Number(q.total) : 0), 0);
+    const marginsWithValue = quotes.filter((q) => q.margin_pct != null).map((q) => Number(q.margin_pct));
+    const avgMargin = marginsWithValue.length
+      ? marginsWithValue.reduce((s, m) => s + m, 0) / marginsWithValue.length
+      : null;
+    return { count, totalValue, avgMargin };
+  })();
 
   return (
     <div>
@@ -43,6 +74,24 @@ export default function QuotesList() {
           >{t.label}</button>
         ))}
       </div>
+
+      <div className="card" style={{ display: 'flex', gap: '2rem', marginTop: '0.5rem' }}>
+        <div>
+          <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>Total quotes</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 600 }}>{summary.count}</div>
+        </div>
+        <div>
+          <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>Total value</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 600 }}>{fmtMoney(summary.totalValue)}</div>
+        </div>
+        <div>
+          <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>Average margin</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 600, color: marginColor(summary.avgMargin) }}>
+            {fmtPct(summary.avgMargin)}
+          </div>
+        </div>
+      </div>
+
       {error && <p className="error">{error}</p>}
       {quotes.length === 0 ? (
         <p className="muted">No quotes match this filter.</p>
@@ -55,7 +104,10 @@ export default function QuotesList() {
               <th>Customer</th>
               <th>Estimator</th>
               <th>Date</th>
-              <th>Total</th>
+              <th>Price Level</th>
+              <th>Subtotal</th>
+              <th>HST</th>
+              <th>Grand Total</th>
               <th>Margin %</th>
               <th>Status</th>
             </tr>
@@ -68,10 +120,11 @@ export default function QuotesList() {
                 <td>{q.customer_name || '—'}</td>
                 <td>{q.created_by || '—'}</td>
                 <td>{new Date(q.created_at).toLocaleDateString()}</td>
-                <td>{q.total != null ? `$${Number(q.total).toFixed(2)}` : '—'}</td>
-                <td style={{ color: marginColor(q.margin_pct), fontWeight: 600 }}>
-                  {q.margin_pct != null ? `${Number(q.margin_pct).toFixed(1)}%` : '—'}
-                </td>
+                <td>{PRICE_LEVEL_LABELS[q.price_level] || `Level ${q.price_level}`}</td>
+                <td>{fmtMoney(q.subtotal)}</td>
+                <td>{fmtMoney(q.tax_amount)}</td>
+                <td style={{ fontWeight: 700, color: '#CC0000' }}>{fmtMoney(q.total)}</td>
+                <td style={{ color: marginColor(q.margin_pct), fontWeight: 600 }}>{fmtPct(q.margin_pct)}</td>
                 <td>{q.status}</td>
               </tr>
             ))}

@@ -245,6 +245,7 @@ CREATE TABLE IF NOT EXISTS sku_catalog_full (
   price4 NUMERIC,
   product_group TEXT,
   product_section TEXT,
+  is_mbf_converted BOOLEAN DEFAULT false,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -355,6 +356,11 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS price4 NUMERIC`,
   // Project-level price tier for quote generation (1=Retail, 2=Builder, 3=Large Builder, 4=Top Volume).
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS price_level INTEGER NOT NULL DEFAULT 1`,
+  // Marks rows whose stored cost/price values have already been converted from
+  // MBF (price per thousand board feet) to per-piece. Importers that do the
+  // conversion set this true; lookup code only runs the on-the-fly MBF math
+  // when this is false (covers legacy rows from before the import re-run).
+  `ALTER TABLE sku_catalog_full ADD COLUMN IF NOT EXISTS is_mbf_converted BOOLEAN DEFAULT false`,
 ];
 
 const SKU_CATALOG_SEED = [

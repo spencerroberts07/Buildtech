@@ -11,6 +11,7 @@
 import fs from 'fs';
 import readline from 'readline';
 import { pool } from './db.js';
+import { parseLumberDimensions, maybeConvertMbf } from './lumberPricing.js';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -27,9 +28,11 @@ const [costPath, pricePath] = fileArgs;
 
 // Cost file (Item Valuation Report) row layout:
 //   ITEM CATALOG DESCRIPTION TYPE QUAN-ON-HAND UNITS-ON-HAND UNIT AVG-COST AVG-VAL LAST-COST LAST-VAL
-// Strategy: tokenize on whitespace; find the ALL-CAPS unit token (EA, RL, BX, etc.);
-// description = tokens between catalog and unit, with trailing pure-numeric tokens
-// stripped (those are the type/quan/units columns). First decimal after unit = avg cost.
+// Strategy: tokenize on whitespace, then walk from the END of the line collecting
+// X.XX decimals (the trailing cost/value columns). The token immediately before
+// all those decimals is the unit. This anchors correctly even when the
+// description contains 2-4 char ALL-CAPS sub-tokens like "KD" or "SPF" that
+// would confuse a forward-search.
 function parseCostLine(line) {
   if (!/^\d{8}/.test(line)) return null;
   const tokens = line.trim().split(/\s+/);
@@ -37,19 +40,26 @@ function parseCostLine(line) {
   const item = tokens[0].replace(/^0+/, '') || '0';
   const catalog = tokens[1];
 
-  let unitIdx = -1;
-  for (let i = 2; i < tokens.length; i++) {
-    if (/^[A-Z]{2,4}$/.test(tokens[i])) { unitIdx = i; break; }
+  // Walk backward, collecting decimals until we hit a non-decimal token (the unit).
+  let i = tokens.length - 1;
+  const decimals = [];
+  while (i >= 2 && /^-?\d+\.\d+$/.test(tokens[i])) {
+    decimals.unshift(parseFloat(tokens[i]));
+    i--;
   }
-  if (unitIdx === -1) return null;
+  if (decimals.length === 0 || i < 3) return null;
 
-  const unit = tokens[unitIdx];
-  const descTokens = tokens.slice(2, unitIdx);
+  const unit = tokens[i];
+  if (!/^[A-Z]{2,5}$/.test(unit)) return null;
+
+  // Description = tokens between catalog and unit, minus trailing pure-numeric
+  // tokens (those are the type/quan/units columns).
+  const descTokens = tokens.slice(2, i);
   while (descTokens.length > 0 && /^-?\d+(\.\d+)?$/.test(descTokens[descTokens.length - 1])) {
     descTokens.pop();
   }
   const description = descTokens.join(' ');
-  const cost = parseFloat(tokens[unitIdx + 1]);
+  const cost = decimals[0];
   if (Number.isNaN(cost) || !description) return null;
   return { item, catalog, description, unit, cost };
 }
@@ -148,10 +158,24 @@ async function parsePriceFile(path) {
 function mergeRows(costMap, priceMap) {
   // Price file is primary (it has the canonical description/unit/prices).
   // Cost file fills in cost. Items present only in cost file still get a row.
+  // MBF-priced lumber rows (unit=MBF or known lumber description patterns) are
+  // converted to per-piece pricing here.
   const merged = new Map();
+  let mbfConverted = 0;
+  let mbfSkipped = 0;
+  const warnings = [];
+  const onWarn = (row, field, price) => {
+    if (warnings.length < 50) {
+      warnings.push(`  ${row.item_number} ${row.description} → ${field}=$${price.toFixed(2)}`);
+    }
+  };
+  const considered = (raw) => {
+    return (raw.unit || '').toUpperCase() === 'MBF'
+      || /PREMIUM SPRUCE|#\s*2\s*&\s*BTR|STD\s*&\s*BTR|SPF\s*KD|SPF\s*\(PC\)|PREMIUM SPF/i.test(raw.description || '');
+  };
   for (const [item, p] of priceMap) {
     const c = costMap.get(item);
-    merged.set(item, {
+    const raw = {
       item_number: item,
       catalog_number: p.catalog || null,
       description: p.description,
@@ -160,11 +184,17 @@ function mergeRows(costMap, priceMap) {
       price1: p.price1, price2: p.price2, price3: p.price3, price4: p.price4,
       product_group: p.product_group,
       product_section: p.product_section,
-    });
+    };
+    const isCandidate = considered(raw);
+    const out = maybeConvertMbf(raw, onWarn);
+    if (isCandidate) {
+      if (out.is_mbf_converted) mbfConverted++; else mbfSkipped++;
+    }
+    merged.set(item, out);
   }
   for (const [item, c] of costMap) {
     if (merged.has(item)) continue;
-    merged.set(item, {
+    const raw = {
       item_number: item,
       catalog_number: c.catalog || null,
       description: c.description,
@@ -173,7 +203,18 @@ function mergeRows(costMap, priceMap) {
       price1: null, price2: null, price3: null, price4: null,
       product_group: null,
       product_section: null,
-    });
+    };
+    const isCandidate = considered(raw);
+    const out = maybeConvertMbf(raw, onWarn);
+    if (isCandidate) {
+      if (out.is_mbf_converted) mbfConverted++; else mbfSkipped++;
+    }
+    merged.set(item, out);
+  }
+  console.log(`MBF conversion: ${mbfConverted} converted, ${mbfSkipped} candidate rows skipped (couldn't parse dimensions)`);
+  if (warnings.length > 0) {
+    console.log(`Suspicious per-piece prices (${warnings.length} shown):`);
+    for (const w of warnings) console.log(w);
   }
   return merged;
 }
@@ -183,7 +224,7 @@ async function upsertBatch(rows) {
   const cols = [
     'item_number', 'catalog_number', 'description', 'unit',
     'cost', 'price1', 'price2', 'price3', 'price4',
-    'product_group', 'product_section',
+    'product_group', 'product_section', 'is_mbf_converted',
   ];
   const placeholders = [];
   const values = [];
@@ -194,7 +235,7 @@ async function upsertBatch(rows) {
     values.push(
       r.item_number, r.catalog_number, r.description, r.unit,
       r.cost, r.price1, r.price2, r.price3, r.price4,
-      r.product_group, r.product_section,
+      r.product_group, r.product_section, !!r.is_mbf_converted,
     );
   }
   const sql = `
@@ -211,6 +252,7 @@ async function upsertBatch(rows) {
       price4 = EXCLUDED.price4,
       product_group = EXCLUDED.product_group,
       product_section = EXCLUDED.product_section,
+      is_mbf_converted = EXCLUDED.is_mbf_converted,
       updated_at = NOW()
   `;
   await pool.query(sql, values);
