@@ -6,3 +6,4 @@ dist/
 .DS_Store
 backend/uploads/
 .claude/settings.local.json
+data/

@@ -10,6 +10,8 @@ import Settings from './components/Settings.jsx';
 import Customers from './components/Customers.jsx';
 import CustomerDetail from './components/CustomerDetail.jsx';
 import Defaults from './components/Defaults.jsx';
+import QuotesList from './components/QuotesList.jsx';
+import QuotePage from './components/QuotePage.jsx';
 
 function useAuth() {
   const [token, setToken] = React.useState(localStorage.getItem('token'));
@@ -127,6 +129,9 @@ function Shell({ user, onLogout, children }) {
             <NavLink to="/projects" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
               Projects
             </NavLink>
+            <NavLink to="/quotes" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
+              Quotes
+            </NavLink>
             <NavLink to="/customers" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')}>
               Customers
             </NavLink>
@@ -177,6 +182,8 @@ export default function App() {
         <Route path="/assemblies/:id" element={<AssemblyEditor />} />
         <Route path="/materials" element={<Materials />} />
         <Route path="/defaults" element={<Defaults />} />
+        <Route path="/quotes" element={<QuotesList />} />
+        <Route path="/quotes/:id" element={<QuotePage />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/projects" replace />} />
       </Routes>

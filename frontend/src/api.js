@@ -192,4 +192,28 @@ export const api = {
     request(`/projects/${projectId}/openings/${oid}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteOpening: (projectId, oid) =>
     request(`/projects/${projectId}/openings/${oid}`, { method: 'DELETE' }),
+
+  // Quotes
+  listQuotes: (params = {}) => {
+    const qs = new URLSearchParams(params).toString();
+    return request(`/quotes${qs ? '?' + qs : ''}`);
+  },
+  listProjectQuotes: (projectId) => request(`/projects/${projectId}/quotes`),
+  generateQuote: (projectId, data) =>
+    request(`/projects/${projectId}/quotes`, { method: 'POST', body: JSON.stringify(data) }),
+  getQuote: (qid) => request(`/quotes/${qid}`),
+  updateQuote: (qid, data) =>
+    request(`/quotes/${qid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteQuote: (qid) => request(`/quotes/${qid}`, { method: 'DELETE' }),
+  adjustQuote: (qid, data) =>
+    request(`/quotes/${qid}/adjust`, { method: 'POST', body: JSON.stringify(data) }),
+  resetQuotePrices: (qid) => request(`/quotes/${qid}/reset`, { method: 'POST' }),
+  addQuoteLineItem: (qid, data) =>
+    request(`/quotes/${qid}/line-items`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteQuoteLineItem: (qid, liid) =>
+    request(`/quotes/${qid}/line-items/${liid}`, { method: 'DELETE' }),
+
+  // SKU search (full warehouse catalog)
+  skuSearch: (q, limit = 20) =>
+    request(`/sku-search?q=${encodeURIComponent(q)}&limit=${limit}`),
 };

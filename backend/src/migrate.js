@@ -231,6 +231,75 @@ CREATE TABLE IF NOT EXISTS sku_catalog (
   section_notes TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS sku_catalog_full (
+  id SERIAL PRIMARY KEY,
+  item_number TEXT UNIQUE NOT NULL,
+  catalog_number TEXT,
+  description TEXT NOT NULL,
+  unit TEXT,
+  cost NUMERIC,
+  price1 NUMERIC,
+  price2 NUMERIC,
+  price3 NUMERIC,
+  price4 NUMERIC,
+  product_group TEXT,
+  product_section TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sku_full_item ON sku_catalog_full(item_number);
+CREATE INDEX IF NOT EXISTS idx_sku_full_catalog ON sku_catalog_full(catalog_number);
+CREATE INDEX IF NOT EXISTS idx_sku_full_desc ON sku_catalog_full(LOWER(description));
+
+CREATE TABLE IF NOT EXISTS quotes (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL,
+  quote_number TEXT UNIQUE NOT NULL,
+  price_level INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'draft',
+  valid_until DATE,
+  subtotal NUMERIC,
+  tax_rate NUMERIC NOT NULL DEFAULT 0.13,
+  tax_amount NUMERIC,
+  total NUMERIC,
+  total_cost NUMERIC,
+  gross_profit NUMERIC,
+  margin_pct NUMERIC,
+  margin_adjustment NUMERIC DEFAULT 0,
+  notes TEXT,
+  created_by TEXT,
+  sent_at TIMESTAMPTZ,
+  sent_to TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS quote_line_items (
+  id SERIAL PRIMARY KEY,
+  quote_id INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+  section TEXT,
+  category TEXT,
+  item_number TEXT,
+  catalog_number TEXT,
+  description TEXT NOT NULL,
+  quantity NUMERIC NOT NULL,
+  unit TEXT,
+  unit_cost NUMERIC,
+  base_unit_price NUMERIC,
+  unit_price NUMERIC,
+  line_cost NUMERIC,
+  line_price NUMERIC,
+  margin_pct NUMERIC,
+  price_overridden BOOLEAN DEFAULT false,
+  is_package BOOLEAN DEFAULT false,
+  sort_order INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_quotes_project ON quotes(project_id);
+CREATE INDEX IF NOT EXISTS idx_quote_line_items_quote ON quote_line_items(quote_id);
 `;
 
 const PROJECT_COLUMN_ALTERS = [
@@ -278,6 +347,14 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'admin'`,
   // Track which user created each project (NULL for projects predating this column).
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS created_by TEXT`,
+  // Pricing fields on the curated SKU catalog (synced from sku_catalog_full by import script).
+  `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS cost NUMERIC`,
+  `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS price1 NUMERIC`,
+  `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS price2 NUMERIC`,
+  `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS price3 NUMERIC`,
+  `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS price4 NUMERIC`,
+  // Project-level price tier for quote generation (1=Retail, 2=Builder, 3=Large Builder, 4=Top Volume).
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS price_level INTEGER NOT NULL DEFAULT 1`,
 ];
 
 const SKU_CATALOG_SEED = [

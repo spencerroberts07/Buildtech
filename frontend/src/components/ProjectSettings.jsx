@@ -154,6 +154,20 @@ export default function ProjectSettings({ settings, globalSettings, onChange }) 
       </div>
       <div className="row">
         <div style={{ flex: 2 }}>
+          <label>Quote price level</label>
+          <select
+            value={settings.price_level ?? 1}
+            onChange={(e) => onChange('price_level', Number(e.target.value))}
+          >
+            <option value={1}>Level 1 — Retail</option>
+            <option value={2}>Level 2 — Builder</option>
+            <option value={3}>Level 3 — Large Builder</option>
+            <option value={4}>Level 4 — Top Volume</option>
+          </select>
+        </div>
+      </div>
+      <div className="row">
+        <div style={{ flex: 2 }}>
           <label>Exterior Rigid Insulation (Silverboard)</label>
           <select
             value={settings.silverboard_type ?? 'silverboard_1'}

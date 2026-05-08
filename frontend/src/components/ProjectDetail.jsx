@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import Sketch from './Sketch.jsx';
 import ProjectSettings from './ProjectSettings.jsx';
@@ -7,7 +7,10 @@ import OpeningsTable from './OpeningsTable.jsx';
 
 export default function ProjectDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [project, setProject] = useState(null);
+  const [projectQuotes, setProjectQuotes] = useState([]);
+  const [generatingQuote, setGeneratingQuote] = useState(false);
   const [assemblies, setAssemblies] = useState([]);
   const [materialList, setMaterialList] = useState([]);
   const [projectSettings, setProjectSettings] = useState(null);
@@ -288,6 +291,10 @@ export default function ProjectDetail() {
           onClick={() => setTab('sketch')}
         >Sketch</button>
         <button
+          className={tab === 'quotes' ? 'tab active' : 'tab'}
+          onClick={async () => { setTab('quotes'); try { setProjectQuotes(await api.listProjectQuotes(id)); } catch (e) { setError(e.message); } }}
+        >Quotes</button>
+        <button
           className={tab === 'settings' ? 'tab active' : 'tab'}
           onClick={() => setTab('settings')}
         >Project settings</button>
@@ -366,6 +373,35 @@ export default function ProjectDetail() {
         />
       )}
 
+      {tab === 'quotes' && (
+        <div className="card">
+          {projectQuotes.length === 0 ? (
+            <p className="muted" style={{ marginTop: 0 }}>
+              No quotes yet. Click "Generate Quote" below the material list to create one.
+            </p>
+          ) : (
+            <table>
+              <thead>
+                <tr><th>Quote #</th><th>Status</th><th>Price level</th><th>Total</th><th>Margin %</th><th>Created by</th><th>Date</th></tr>
+              </thead>
+              <tbody>
+                {projectQuotes.map((q) => (
+                  <tr key={q.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/quotes/${q.id}`)}>
+                    <td><Link to={`/quotes/${q.id}`}>{q.quote_number}</Link></td>
+                    <td>{q.status}</td>
+                    <td>L{q.price_level}</td>
+                    <td>{q.total != null ? `$${Number(q.total).toFixed(2)}` : '—'}</td>
+                    <td>{q.margin_pct != null ? `${Number(q.margin_pct).toFixed(1)}%` : '—'}</td>
+                    <td>{q.created_by || '—'}</td>
+                    <td>{new Date(q.created_at).toLocaleDateString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
       <OpeningsTable openings={openings} walls={walls} floorPlanWalls={floorPlanWalls} />
 
       <h2>Floor</h2>
@@ -423,6 +459,21 @@ export default function ProjectDetail() {
         <button className="primary" onClick={exportFullCsv} disabled={!materialList.length}>Export Full List</button>
         <button className="primary" onClick={exportPosCsv} disabled={!materialList.length}>Export POS List</button>
         <button className="secondary" onClick={printList} disabled={!materialList.length}>Print</button>
+        <button
+          className="primary"
+          disabled={!materialList.length || generatingQuote}
+          onClick={async () => {
+            setGeneratingQuote(true);
+            try {
+              const q = await api.generateQuote(id, { price_level: projectSettings?.price_level || 1 });
+              navigate(`/quotes/${q.id}`);
+            } catch (e) {
+              setError(e.message);
+            } finally {
+              setGeneratingQuote(false);
+            }
+          }}
+        >{generatingQuote ? 'Generating…' : 'Generate Quote'}</button>
         <span className="muted">Quantities include all per-material waste factors.</span>
       </div>
       {error && <p className="error">{error}</p>}
