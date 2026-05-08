@@ -69,6 +69,14 @@ export default function QuotePage() {
     } catch (e) { setError(e.message); }
   }
 
+  async function deleteThisQuote() {
+    if (!confirm(`Delete quote ${quote.quote_number}? This cannot be undone.`)) return;
+    try {
+      await api.deleteQuote(id);
+      navigate(`/projects/${quote.project_id}`);
+    } catch (e) { setError(e.message); }
+  }
+
   async function downloadPdf() {
     setPdfBusy(true);
     setError('');
@@ -117,6 +125,7 @@ export default function QuotePage() {
         <button className="primary" disabled>Send Email</button>
         <button className="secondary" onClick={() => setAddOpen(true)}>+ Add Item</button>
         <button className="secondary" onClick={resetPrices}>Reset to original prices</button>
+        <button className="danger" onClick={deleteThisQuote}>Delete quote</button>
         <select
           value={quote.status}
           onChange={(e) => changeStatus(e.target.value)}

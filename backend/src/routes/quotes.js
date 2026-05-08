@@ -421,13 +421,10 @@ router.put('/:qid', async (req, res) => {
   }
 });
 
-// DELETE /quotes/:qid — only if status = draft
+// DELETE /quotes/:qid — allowed for any status.
 router.delete('/:qid', async (req, res) => {
-  const r = await query('SELECT status FROM quotes WHERE id = $1', [req.params.qid]);
+  const r = await query('SELECT id FROM quotes WHERE id = $1', [req.params.qid]);
   if (!r.rows[0]) return res.status(404).json({ error: 'not found' });
-  if (r.rows[0].status !== 'draft') {
-    return res.status(409).json({ error: 'only draft quotes can be deleted' });
-  }
   await query('DELETE FROM quotes WHERE id = $1', [req.params.qid]);
   res.status(204).end();
 });

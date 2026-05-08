@@ -38,6 +38,14 @@ export default function QuotesList() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [error, setError] = useState('');
 
+  async function load() {
+    try {
+      const params = statusFilter === 'all' ? {} : { status: statusFilter };
+      const rows = await api.listQuotes(params);
+      setQuotes(rows);
+    } catch (e) { setError(e.message); }
+  }
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -51,6 +59,15 @@ export default function QuotesList() {
     })();
     return () => { cancelled = true; };
   }, [statusFilter]);
+
+  async function removeQuote(q, ev) {
+    ev.stopPropagation();
+    if (!confirm(`Delete quote ${q.quote_number}? This cannot be undone.`)) return;
+    try {
+      await api.deleteQuote(q.id);
+      await load();
+    } catch (e) { setError(e.message); }
+  }
 
   const summary = (() => {
     const count = quotes.length;
@@ -110,6 +127,7 @@ export default function QuotesList() {
               <th>Grand Total</th>
               <th>Margin %</th>
               <th>Status</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -126,6 +144,14 @@ export default function QuotesList() {
                 <td style={{ fontWeight: 700, color: '#CC0000' }}>{fmtMoney(q.total)}</td>
                 <td style={{ color: marginColor(q.margin_pct), fontWeight: 600 }}>{fmtPct(q.margin_pct)}</td>
                 <td>{q.status}</td>
+                <td>
+                  <button
+                    className="danger"
+                    style={{ padding: '0.2rem 0.55rem', fontSize: '0.85rem' }}
+                    title="Delete quote"
+                    onClick={(e) => removeQuote(q, e)}
+                  >Delete</button>
+                </td>
               </tr>
             ))}
           </tbody>
