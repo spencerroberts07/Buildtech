@@ -503,6 +503,28 @@ const SKU_CATALOG_FIXUPS = [
   ["SILVERBOARD GRAPHITE 4X8 2\" R10",    '2SB'],
 ];
 
+// Item-number fixups for SKUs originally seeded with null item_number.
+// Looked up from the warehouse catalog after the fact. Pairs of [catalog_number, item_number].
+// Silverboard 1"/1.5"/2" and CLARYPOLY are still pending — left null until item numbers are known.
+const SKU_CATALOG_ITEM_NUMBER_FIXUPS = [
+  ['112SB',      '5120002'],
+  ['2SB',        '5120003'],
+  ['4812DW',     '6010410'],
+  ['49DRY',      '6010421'],
+  ['41012DW',    '6010420'],
+  ['41212DW',    '6010430'],
+  ['4858FCDW',   '6010450'],
+  ['TYPAR',      '26010001'],
+  ['TYPAR36',    '26010002'],
+  ['TYPAR9X75',  '26010006'],
+  ['TYPAR4X75',  '26010005'],
+  ['TYPAR6X75',  '26010010'],
+  ['TYPAR12X75', '26010009'],
+  ['SB35',       '5120004'],
+  ['58TGOSB',    '2021115'],
+  ['34TGOSB',    '2021116'],
+];
+
 const SYSTEM_SETTINGS_DEFAULTS = [
   // Wall defaults
   ['default_exterior_stud_type', 'exterior_2x6'],
@@ -552,6 +574,14 @@ async function seedSkuCatalog() {
       `UPDATE sku_catalog SET catalog_number = $1
        WHERE description = $2 AND (catalog_number IS NULL OR catalog_number <> $1)`,
       [catalog, desc]
+    );
+  }
+  // Apply item-number fixups for rows seeded with null item_number.
+  for (const [catalog, item] of SKU_CATALOG_ITEM_NUMBER_FIXUPS) {
+    await pool.query(
+      `UPDATE sku_catalog SET item_number = $1
+       WHERE catalog_number = $2 AND (item_number IS NULL OR item_number = '')`,
+      [item, catalog]
     );
   }
 }
