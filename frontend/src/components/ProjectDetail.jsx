@@ -466,7 +466,8 @@ export default function ProjectDetail() {
             setGeneratingQuote(true);
             try {
               const q = await api.generateQuote(id, { price_level: projectSettings?.price_level || 1 });
-              navigate(`/quotes/${q.id}`);
+              window.open(`/quotes/${q.id}`, '_blank');
+              try { setProjectQuotes(await api.listProjectQuotes(id)); } catch {}
             } catch (e) {
               setError(e.message);
             } finally {
