@@ -584,6 +584,26 @@ async function seedSkuCatalog() {
       [item, catalog]
     );
   }
+  // Description-based pricing sync for any sku_catalog row still missing
+  // an item_number — finds the matching row in sku_catalog_full by exact
+  // description (case-insensitive, trimmed) and pulls in cost + prices +
+  // item_number. Runs only after sku_catalog_full has been populated by
+  // the import script; harmless if that table is empty.
+  await pool.query(`
+    UPDATE sku_catalog sc
+    SET
+      cost   = scf.cost,
+      price1 = scf.price1,
+      price2 = scf.price2,
+      price3 = scf.price3,
+      price4 = scf.price4,
+      item_number = scf.item_number,
+      catalog_number = COALESCE(sc.catalog_number, scf.catalog_number)
+    FROM sku_catalog_full scf
+    WHERE sc.item_number IS NULL
+      AND LOWER(TRIM(sc.description)) = LOWER(TRIM(scf.description))
+      AND (scf.cost IS NOT NULL OR scf.price1 IS NOT NULL)
+  `);
 }
 
 async function seedSystemSettings() {

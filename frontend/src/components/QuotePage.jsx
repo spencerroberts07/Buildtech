@@ -32,6 +32,11 @@ export default function QuotePage() {
   const [adjOpen, setAdjOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
 
+  // Memoized section grouping — must run on every render (hooks ordering rule),
+  // so it tolerates a null quote on first paint.
+  const sections = useMemo(() => groupBySection(quote?.line_items || []), [quote]);
+  const sectionList = Array.from(sections.keys());
+
   async function load() {
     try { setQuote(await api.getQuote(id)); }
     catch (e) { setError(e.message); }
@@ -39,9 +44,6 @@ export default function QuotePage() {
   useEffect(() => { load(); }, [id]);
 
   if (!quote) return <p className="muted">{error || 'Loading...'}</p>;
-
-  const sections = useMemo(() => groupBySection(quote.line_items || []), [quote]);
-  const sectionList = Array.from(sections.keys());
 
   async function changeStatus(newStatus) {
     try {
