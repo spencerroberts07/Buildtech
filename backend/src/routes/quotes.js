@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { query, pool } from '../db.js';
 import { computeProjectMaterialList } from '../materialListBuilder.js';
 import { parseLumberDimensions, needsMbfConversion } from '../lumberPricing.js';
+import { generateQuotePdf } from '../quote-pdf.js';
 
 const router = Router();
 
@@ -310,6 +311,24 @@ router.get('/:qid', async (req, res) => {
   const q = await loadFullQuote(req.params.qid);
   if (!q) return res.status(404).json({ error: 'not found' });
   res.json(q);
+});
+
+// GET /quotes/:qid/pdf — render the quote as a PDF and stream it back.
+// Bearer-auth gated by the parent app.use('/quotes', authRequired, ...).
+router.get('/:qid/pdf', async (req, res) => {
+  const q = await loadFullQuote(req.params.qid);
+  if (!q) return res.status(404).json({ error: 'not found' });
+  try {
+    const pdf = await generateQuotePdf(q);
+    const safeNumber = String(q.quote_number || `quote-${q.id}`).replace(/[^A-Za-z0-9_-]/g, '-');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Quote-${safeNumber}.pdf"`);
+    res.setHeader('Content-Length', pdf.length);
+    res.end(pdf);
+  } catch (e) {
+    console.error('PDF generation failed:', e);
+    res.status(500).json({ error: e.message || 'pdf generation failed' });
+  }
 });
 
 // PUT /quotes/:qid — update status, notes, valid_until, sent_to, sent_at, tax_rate;

@@ -216,4 +216,18 @@ export const api = {
   // SKU search (full warehouse catalog)
   skuSearch: (q, limit = 20) =>
     request(`/sku-search?q=${encodeURIComponent(q)}&limit=${limit}`),
+
+  // Quote PDF — fetches the binary as a blob (auth header is required).
+  fetchQuotePdf: async (qid) => {
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/quotes/${qid}/pdf`, { headers });
+    if (!res.ok) {
+      let msg = 'PDF generation failed';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.blob();
+  },
 };

@@ -31,6 +31,7 @@ export default function QuotePage() {
   const [error, setError] = useState('');
   const [adjOpen, setAdjOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   // Memoized section grouping — must run on every render (hooks ordering rule),
   // so it tolerates a null quote on first paint.
@@ -68,6 +69,26 @@ export default function QuotePage() {
     } catch (e) { setError(e.message); }
   }
 
+  async function downloadPdf() {
+    setPdfBusy(true);
+    setError('');
+    try {
+      const blob = await api.fetchQuotePdf(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Quote-${quote.quote_number}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPdfBusy(false);
+    }
+  }
+
   return (
     <div>
       <p><Link to={`/projects/${quote.project_id}`}>← Back to project</Link></p>
@@ -90,7 +111,9 @@ export default function QuotePage() {
       {error && <p className="error">{error}</p>}
 
       <div className="toolbar" style={{ marginTop: '1rem' }}>
-        <button className="primary" disabled>Generate PDF</button>
+        <button className="primary" disabled={pdfBusy} onClick={downloadPdf}>
+          {pdfBusy ? 'Generating…' : 'Generate PDF'}
+        </button>
         <button className="primary" disabled>Send Email</button>
         <button className="secondary" onClick={() => setAddOpen(true)}>+ Add Item</button>
         <button className="secondary" onClick={resetPrices}>Reset to original prices</button>
