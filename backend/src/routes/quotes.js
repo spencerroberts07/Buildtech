@@ -59,60 +59,66 @@ function applyMbfFallback(matched, materialDesc) {
   };
 }
 
-// Look up cost/price for a single material-list row. Tries:
-//  1. sku_catalog by item_number → catalog_number → exact LOWER(description)
-//  2. sku_catalog_full by item_number → catalog_number → exact LOWER(description)
-// Returns { cost, price1..4, item_number, catalog_number, unit } or empty fields.
-// Lumber rows priced in MBF are converted to per-piece on the fly when the
-// stored row hasn't been pre-converted (covers any rows imported before the
-// MBF-aware import script ran).
+// Look up cost/price for a single material-list row. Per spec, tries five
+// sequential matches and uses the first one that has actual price data:
+//   1. sku_catalog by item_number
+//   2. sku_catalog by catalog_number
+//   3. sku_catalog by LOWER(TRIM(description))
+//   4. sku_catalog_full by item_number
+//   5. sku_catalog_full by LOWER(TRIM(description))
+// A match that exists but has no cost AND no price1 is treated as no match,
+// so we fall through to the next step instead of returning empty pricing.
+//
+// MBF→per-piece conversion is applied on rows still flagged unconverted (set
+// is_mbf_converted=true on a row to skip). This covers legacy sku_catalog_full
+// rows imported before the MBF-aware script. sku_catalog rows are flagged as
+// already-converted in buildLookupMaps because the migrate sync pulls prices
+// from sku_catalog_full (which holds already-converted values).
+function priced(m) {
+  return m && (m.cost != null || m.price1 != null);
+}
+
 async function lookupPricing(row, skuCurated, skuFull) {
-  const item = row.item_number ? String(row.item_number) : null;
-  const catalog = row.catalog_number ? String(row.catalog_number) : null;
+  const item = row.item_number ? String(row.item_number).trim() : null;
+  const catalog = row.catalog_number ? String(row.catalog_number).trim() : null;
   const desc = (row.material_name || '').trim().toLowerCase();
 
-  function pick(map) {
-    let m = null;
-    if (item && map.byItem.has(item)) m = map.byItem.get(item);
-    else if (catalog && map.byCatalog.has(catalog)) m = map.byCatalog.get(catalog);
-    else if (desc && map.byDesc.has(desc)) m = map.byDesc.get(desc);
-    return m;
+  let matched = null;
+  if (item && priced(skuCurated.byItem.get(item))) matched = skuCurated.byItem.get(item);
+  else if (catalog && priced(skuCurated.byCatalog.get(catalog))) matched = skuCurated.byCatalog.get(catalog);
+  else if (desc && priced(skuCurated.byDesc.get(desc))) matched = skuCurated.byDesc.get(desc);
+  else if (item && priced(skuFull.byItem.get(item))) matched = skuFull.byItem.get(item);
+  else if (desc && priced(skuFull.byDesc.get(desc))) matched = skuFull.byDesc.get(desc);
+
+  if (!matched) {
+    return {
+      cost: null, price1: null, price2: null, price3: null, price4: null,
+      item_number: row.item_number, catalog_number: row.catalog_number,
+      unit: row.material_unit,
+    };
   }
 
-  let m = pick(skuCurated);
-  if (m && (m.cost != null || m.price1 != null)) {
-    m = applyMbfFallback(m, row.material_name);
-    return {
-      cost: m.cost, price1: m.price1, price2: m.price2, price3: m.price3, price4: m.price4,
-      item_number: m.item_number || row.item_number,
-      catalog_number: m.catalog_number || row.catalog_number,
-      unit: m.unit || row.material_unit,
-    };
-  }
-  m = pick(skuFull);
-  if (m) {
-    m = applyMbfFallback(m, row.material_name);
-    return {
-      cost: m.cost, price1: m.price1, price2: m.price2, price3: m.price3, price4: m.price4,
-      item_number: m.item_number || row.item_number,
-      catalog_number: m.catalog_number || row.catalog_number,
-      unit: m.unit || row.material_unit,
-    };
-  }
+  matched = applyMbfFallback(matched, row.material_name);
   return {
-    cost: null, price1: null, price2: null, price3: null, price4: null,
-    item_number: row.item_number, catalog_number: row.catalog_number,
-    unit: row.material_unit,
+    cost: matched.cost,
+    price1: matched.price1, price2: matched.price2,
+    price3: matched.price3, price4: matched.price4,
+    item_number: matched.item_number || row.item_number,
+    catalog_number: matched.catalog_number || row.catalog_number,
+    unit: matched.unit || row.material_unit,
   };
 }
 
 async function buildLookupMaps() {
-  // sku_catalog has no unit column so we use NULL — those rows are lookup-only;
-  // any MBF conversion happens via the sku_catalog_full match instead.
+  // sku_catalog has no unit or is_mbf_converted column. Its prices are synced
+  // from sku_catalog_full (which holds already-MBF-converted per-piece values),
+  // so curated rows are effectively pre-converted — flag them as such so the
+  // MBF fallback doesn't double-convert lumber descriptions like
+  // "2 X 6 X 16 PREMIUM SPRUCE".
   const curated = (await query(`
     SELECT item_number, catalog_number, description, NULL AS unit,
            cost, price1, price2, price3, price4,
-           false AS is_mbf_converted
+           true AS is_mbf_converted
     FROM sku_catalog
   `)).rows;
   const full = (await query(`
