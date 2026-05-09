@@ -5,6 +5,35 @@ import Sketch from './Sketch.jsx';
 import ProjectSettings from './ProjectSettings.jsx';
 import OpeningsTable from './OpeningsTable.jsx';
 
+const CAD_FORMATTER = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' });
+function fmtCad(v) {
+  if (v == null) return '—';
+  return CAD_FORMATTER.format(Number(v));
+}
+
+// Icon-only delete button: muted gray default, BuildTek red on hover.
+function TrashButton({ title, onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: 'transparent',
+        border: 'none',
+        padding: '0.25rem 0.5rem',
+        cursor: 'pointer',
+        fontSize: '1.1rem',
+        lineHeight: 1,
+        color: hover ? '#CC0000' : '#6B7280',
+      }}
+    >🗑</button>
+  );
+}
+
 export default function ProjectDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -382,7 +411,7 @@ export default function ProjectDetail() {
           ) : (
             <table>
               <thead>
-                <tr><th>Quote #</th><th>Status</th><th>Price level</th><th>Total</th><th>Margin %</th><th>Created by</th><th>Date</th></tr>
+                <tr><th>Quote #</th><th>Status</th><th>Price level</th><th>Total</th><th>Margin %</th><th>Created by</th><th>Date</th><th></th></tr>
               </thead>
               <tbody>
                 {projectQuotes.map((q) => (
@@ -390,10 +419,26 @@ export default function ProjectDetail() {
                     <td><Link to={`/quotes/${q.id}`}>{q.quote_number}</Link></td>
                     <td>{q.status}</td>
                     <td>L{q.price_level}</td>
-                    <td>{q.total != null ? `$${Number(q.total).toFixed(2)}` : '—'}</td>
+                    <td>{fmtCad(q.total)}</td>
                     <td>{q.margin_pct != null ? `${Number(q.margin_pct).toFixed(1)}%` : '—'}</td>
                     <td>{q.created_by || '—'}</td>
                     <td>{new Date(q.created_at).toLocaleDateString()}</td>
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <TrashButton
+                        title="Delete quote"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          if (!confirm('Delete this quote? This cannot be undone.')) return;
+                          const prev = projectQuotes;
+                          setProjectQuotes((cur) => cur.filter((x) => x.id !== q.id));
+                          try { await api.deleteQuote(q.id); }
+                          catch (err) {
+                            setProjectQuotes(prev);
+                            setError(`Delete failed: ${err.message}`);
+                          }
+                        }}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -39,6 +39,30 @@ function marginColor(pct) {
   return '#CC0000';
 }
 
+// Small icon-only delete button: muted gray default, BuildTek red on hover,
+// transparent background. Used in the per-row Delete cell.
+function TrashButton({ title, onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: 'transparent',
+        border: 'none',
+        padding: '0.25rem 0.5rem',
+        cursor: 'pointer',
+        fontSize: '1.1rem',
+        lineHeight: 1,
+        color: hover ? '#CC0000' : '#6B7280',
+      }}
+    >🗑</button>
+  );
+}
+
 export default function QuotesList() {
   const navigate = useNavigate();
   const [quotes, setQuotes] = useState([]);
@@ -159,12 +183,10 @@ export default function QuotesList() {
                 <td>{fmtLongDate(q.created_at)}</td>
                 <td>{q.status}</td>
                 <td>
-                  <button
-                    className="danger"
-                    style={{ padding: '0.2rem 0.55rem', fontSize: '0.85rem' }}
+                  <TrashButton
                     title="Delete quote"
                     onClick={(e) => removeQuote(q, e)}
-                  >Delete</button>
+                  />
                 </td>
               </tr>
             ))}
