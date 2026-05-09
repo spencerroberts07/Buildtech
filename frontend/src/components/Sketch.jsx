@@ -2626,15 +2626,67 @@ function drawOpening(ctx, opening, walls, corners, vp, selected) {
   for (let i = 1; i < 4; i++) ctx.lineTo(corners4[i][0], corners4[i][1]);
   ctx.closePath(); ctx.fill();
 
-  const presetLabel = findPresetLabel(opening.type, opening.rough_opening_width, opening.rough_opening_height);
-  const labelText = opening.label || presetLabel;
-  ctx.font = '500 11px "Segoe UI", -apple-system, sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  const offX = sc.x + 14 * nx;
-  const offY = sc.y + 14 * ny;
-  const m = ctx.measureText(labelText);
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  ctx.fillRect(offX - m.width / 2 - 2, offY - 1, m.width + 4, 14);
-  ctx.fillStyle = fill;
-  ctx.fillText(labelText, offX, offY);
+  const isInteriorDoor =
+    opening.type === 'door' &&
+    (wall.wall_type === 'interior_2x4' || wall.wall_type === 'interior_2x6');
+
+  if (isInteriorDoor) {
+    // Interior door: replace the size label with a swing arc + door panel + swing
+    // label. There is no objective "inside" for an interior wall, so +n is treated
+    // as the inswing side by convention; the four LHI/LHO/RHI/RHO combinations
+    // render distinctly so the estimator can read direction at a glance.
+    const swing = opening.swing || 'RHI';
+    const isLeft = swing === 'LHI' || swing === 'LHO';
+    const isInswing = swing === 'LHI' || swing === 'RHI';
+    const hingeX = sc.x + (isLeft ? -halfL : halfL) * ux;
+    const hingeY = sc.y + (isLeft ? -halfL : halfL) * uy;
+    const sxv = isInswing ? nx : -nx;
+    const syv = isInswing ? ny : -ny;
+    const radius = halfL * 2;
+
+    ctx.save();
+    ctx.strokeStyle = DOOR_COLOR;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(hingeX, hingeY);
+    ctx.lineTo(hingeX + radius * sxv, hingeY + radius * syv);
+    ctx.stroke();
+    const wallDirX = isLeft ? ux : -ux;
+    const wallDirY = isLeft ? uy : -uy;
+    const startAngle = Math.atan2(wallDirY, wallDirX);
+    const endAngle = Math.atan2(syv, sxv);
+    let delta = endAngle - startAngle;
+    while (delta > Math.PI) delta -= 2 * Math.PI;
+    while (delta < -Math.PI) delta += 2 * Math.PI;
+    ctx.beginPath();
+    ctx.arc(hingeX, hingeY, radius, startAngle, endAngle, delta < 0);
+    ctx.stroke();
+    ctx.restore();
+
+    // Place the swing label on the opposite side of the swing arc so it
+    // doesn't sit on top of the arc/panel strokes.
+    const labelDirX = isInswing ? -nx : nx;
+    const labelDirY = isInswing ? -ny : ny;
+    const offX = sc.x + 14 * labelDirX;
+    const offY = sc.y + 14 * labelDirY;
+    ctx.font = '600 10px "Segoe UI", -apple-system, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const m = ctx.measureText(swing);
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.fillRect(offX - m.width / 2 - 2, offY - 1, m.width + 4, 13);
+    ctx.fillStyle = DOOR_COLOR;
+    ctx.fillText(swing, offX, offY);
+  } else {
+    const presetLabel = findPresetLabel(opening.type, opening.rough_opening_width, opening.rough_opening_height);
+    const labelText = opening.label || presetLabel;
+    ctx.font = '500 11px "Segoe UI", -apple-system, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const offX = sc.x + 14 * nx;
+    const offY = sc.y + 14 * ny;
+    const m = ctx.measureText(labelText);
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.fillRect(offX - m.width / 2 - 2, offY - 1, m.width + 4, 14);
+    ctx.fillStyle = fill;
+    ctx.fillText(labelText, offX, offY);
+  }
 }
