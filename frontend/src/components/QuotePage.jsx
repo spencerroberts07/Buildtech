@@ -177,17 +177,18 @@ export default function QuotePage() {
                   <td>{Number(li.quantity).toLocaleString()}</td>
                   <td>{li.unit || '—'}</td>
                   <td>
-                    {li.is_package ? <span className="muted">— Quoted Separately —</span>
+                    {li.is_package && li.unit_price == null
+                      ? <span className="muted">— Quoted Separately —</span>
                       : li.unit_price == null ? <span style={{ color: '#9CA3AF' }}>TBD</span>
                       : fmtMoney(li.unit_price)}
                   </td>
                   <td>
-                    {li.is_package ? '—'
+                    {li.is_package && li.line_price == null ? '—'
                       : li.line_price == null ? <span style={{ color: '#9CA3AF' }}>TBD</span>
                       : fmtMoney(li.line_price)}
                   </td>
                   <td style={{ color: marginColor(li.margin_pct), fontWeight: 600 }}>
-                    {li.is_package ? '—' : fmtPct(li.margin_pct)}
+                    {li.is_package && li.line_price == null ? '—' : fmtPct(li.margin_pct)}
                   </td>
                   <td>
                     <button

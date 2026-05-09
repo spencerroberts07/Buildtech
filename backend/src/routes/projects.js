@@ -1010,7 +1010,7 @@ router.delete('/:id/roof', async (req, res) => {
 });
 
 // ---------------- Packages (line items quoted separately) ----------------
-const PACKAGE_FIELDS = ['name', 'package_type', 'notes', 'quantity', 'unit'];
+const PACKAGE_FIELDS = ['name', 'package_type', 'notes', 'quantity', 'unit', 'cost', 'price1', 'price2', 'price3', 'price4'];
 
 router.get('/:id/packages', async (req, res) => {
   const { id } = req.params;

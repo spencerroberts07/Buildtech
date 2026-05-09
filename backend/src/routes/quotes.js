@@ -173,20 +173,32 @@ async function buildLineItemsForProject(projectId, priceLevel) {
   let sortOrder = 0;
   for (const r of matRows) {
     if (r.is_package) {
+      const qty = Number(r.total_quantity);
+      const unitCost = num(r.package_cost);
+      // Pick the package's price for the selected level; fall back to price1
+      // if that level is unset. If all four are null the package stays
+      // unpriced and renders as "— Quoted Separately —".
+      const levelPrice = num(r[`package_${priceField}`]);
+      const baseUnit = levelPrice != null ? levelPrice : num(r.package_price1);
+      const unitPrice = baseUnit;
+      const lineCost = unitCost != null ? qty * unitCost : null;
+      const linePrice = unitPrice != null ? qty * unitPrice : null;
+      const marginPct = (linePrice && lineCost != null && linePrice > 0)
+        ? ((linePrice - lineCost) / linePrice) * 100 : null;
       items.push({
         section: r.section,
         category: r.category,
         item_number: null,
         catalog_number: null,
         description: r.material_name,
-        quantity: Number(r.total_quantity),
+        quantity: qty,
         unit: r.material_unit,
-        unit_cost: null,
-        base_unit_price: null,
-        unit_price: null,
-        line_cost: null,
-        line_price: null,
-        margin_pct: null,
+        unit_cost: unitCost,
+        base_unit_price: baseUnit,
+        unit_price: unitPrice,
+        line_cost: lineCost,
+        line_price: linePrice,
+        margin_pct: marginPct,
         price_overridden: false,
         is_package: true,
         sort_order: sortOrder++,

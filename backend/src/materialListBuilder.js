@@ -283,6 +283,11 @@ export async function computeProjectMaterialList(projectId, options = {}) {
       modified: false,
       is_package: true,
       package_type: p.package_type,
+      package_cost: p.cost,
+      package_price1: p.price1,
+      package_price2: p.price2,
+      package_price3: p.price3,
+      package_price4: p.price4,
     });
   }
 

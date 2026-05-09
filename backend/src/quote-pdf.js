@@ -90,10 +90,10 @@ function renderHtml(quote) {
   for (const [sectionName, items] of sections) {
     lineItemsHtml += `<tr class="section-band-row"><td colspan="7" class="section-band">${esc(sectionName)}</td></tr>`;
     for (const li of items) {
-      const unitPrice = li.is_package
+      const unitPrice = (li.is_package && li.unit_price == null)
         ? '<span class="muted">— Quoted Separately —</span>'
         : (li.unit_price == null ? '<span class="tbd">TBD</span>' : fmtMoney(li.unit_price));
-      const total = li.is_package
+      const total = (li.is_package && li.line_price == null)
         ? '—'
         : (li.line_price == null ? '<span class="tbd">TBD</span>' : fmtMoney(li.line_price));
       lineItemsHtml += `

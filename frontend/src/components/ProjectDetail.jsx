@@ -860,6 +860,15 @@ function PackagesSection({ projectId, packages, onChanged, onError }) {
   const [draftNotes, setDraftNotes] = useState('');
   const [draftQty, setDraftQty] = useState('1');
   const [draftUnit, setDraftUnit] = useState('PKG');
+  const [expandedPricing, setExpandedPricing] = useState(() => new Set());
+
+  function togglePricing(pid) {
+    setExpandedPricing((prev) => {
+      const next = new Set(prev);
+      if (next.has(pid)) next.delete(pid); else next.add(pid);
+      return next;
+    });
+  }
 
   function changeType(t) {
     setDraftType(t);
@@ -901,6 +910,23 @@ function PackagesSection({ projectId, packages, onChanged, onError }) {
     } catch (e) { onError?.(e.message); }
   }
 
+  // Save a numeric pricing field on blur. Empty string clears the field
+  // (server stores NULL → quote falls back to "— Quoted Separately —").
+  // Skip the patch when the value matches what's already on the row so we
+  // don't spam the server every time the user tabs through fields.
+  async function patchPkgPrice(p, field, raw) {
+    const cur = p[field];
+    if (raw === '' || raw == null) {
+      if (cur == null) return;
+      await patchPkg(p, { [field]: null });
+      return;
+    }
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return;
+    if (cur != null && Number(cur) === v) return;
+    await patchPkg(p, { [field]: v });
+  }
+
   return (
     <>
       {packages.length === 0 ? (
@@ -913,42 +939,125 @@ function PackagesSection({ projectId, packages, onChanged, onError }) {
               <th>Notes</th>
               <th>Qty</th>
               <th>Unit</th>
+              <th>Pricing</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {packages.map((p) => (
-              <tr key={p.id}>
-                <td>
-                  <input
-                    defaultValue={p.name}
-                    onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.name) patchPkg(p, { name: v }); }}
-                  />
-                </td>
-                <td>
-                  <input
-                    defaultValue={p.notes || ''}
-                    onBlur={(e) => patchPkg(p, { notes: e.target.value })}
-                  />
-                </td>
-                <td>
-                  <input
-                    type="number"
-                    style={{ width: '5rem' }}
-                    defaultValue={Number(p.quantity)}
-                    onBlur={(e) => { const v = Number(e.target.value); if (!isNaN(v) && v !== Number(p.quantity)) patchPkg(p, { quantity: v }); }}
-                  />
-                </td>
-                <td>
-                  <input
-                    style={{ width: '5rem' }}
-                    defaultValue={p.unit}
-                    onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.unit) patchPkg(p, { unit: v }); }}
-                  />
-                </td>
-                <td><button className="danger" onClick={() => deletePkg(p.id)}>Delete</button></td>
-              </tr>
-            ))}
+            {packages.map((p) => {
+              const isOpen = expandedPricing.has(p.id);
+              const hasPricing = [p.cost, p.price1, p.price2, p.price3, p.price4].some((v) => v != null);
+              return (
+                <React.Fragment key={p.id}>
+                  <tr>
+                    <td>
+                      <input
+                        defaultValue={p.name}
+                        onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.name) patchPkg(p, { name: v }); }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        defaultValue={p.notes || ''}
+                        onBlur={(e) => patchPkg(p, { notes: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        style={{ width: '5rem' }}
+                        defaultValue={Number(p.quantity)}
+                        onBlur={(e) => { const v = Number(e.target.value); if (!isNaN(v) && v !== Number(p.quantity)) patchPkg(p, { quantity: v }); }}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        style={{ width: '5rem' }}
+                        defaultValue={p.unit}
+                        onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== p.unit) patchPkg(p, { unit: v }); }}
+                      />
+                    </td>
+                    <td>
+                      <button
+                        className="secondary"
+                        style={{ padding: '0.15rem 0.5rem', fontSize: '0.85rem' }}
+                        onClick={() => togglePricing(p.id)}
+                        title={isOpen ? 'Hide pricing' : 'Edit pricing'}
+                      >
+                        {isOpen ? '▼' : '▶'} {hasPricing ? `$${Number(p.price1 ?? p.cost ?? 0).toLocaleString()}` : 'Pricing'}
+                      </button>
+                    </td>
+                    <td><button className="danger" onClick={() => deletePkg(p.id)}>Delete</button></td>
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={6} style={{ background: '#FAFAFA', padding: '0.75rem 1rem' }}>
+                        <div className="row" style={{ gap: '0.75rem', flexWrap: 'wrap' }}>
+                          <div>
+                            <label>Our Cost ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              style={{ width: '8rem' }}
+                              placeholder="0.00"
+                              defaultValue={p.cost ?? ''}
+                              onBlur={(e) => patchPkgPrice(p, 'cost', e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label>Level 1 Retail ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              style={{ width: '8rem' }}
+                              placeholder="0.00"
+                              defaultValue={p.price1 ?? ''}
+                              onBlur={(e) => patchPkgPrice(p, 'price1', e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label>Level 2 Builder ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              style={{ width: '8rem' }}
+                              placeholder="0.00"
+                              defaultValue={p.price2 ?? ''}
+                              onBlur={(e) => patchPkgPrice(p, 'price2', e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label>Level 3 Large Builder ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              style={{ width: '8rem' }}
+                              placeholder="0.00"
+                              defaultValue={p.price3 ?? ''}
+                              onBlur={(e) => patchPkgPrice(p, 'price3', e.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label>Level 4 Top Volume ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              style={{ width: '8rem' }}
+                              placeholder="0.00"
+                              defaultValue={p.price4 ?? ''}
+                              onBlur={(e) => patchPkgPrice(p, 'price4', e.target.value)}
+                            />
+                          </div>
+                        </div>
+                        <p className="muted" style={{ margin: '0.5rem 0 0', fontSize: '0.85rem' }}>
+                          Leave blank to quote separately. The level matching the quote's price tier is used; if that level is blank, Level 1 is used as a fallback.
+                        </p>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       )}

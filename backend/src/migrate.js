@@ -367,6 +367,14 @@ const PROJECT_COLUMN_ALTERS = [
   // field is what customer-facing surfaces (quotes, PDFs, material list
   // table) display.
   `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS warehouse_description TEXT`,
+  // Manual cost/price overrides on packages (truss, floor, etc.). NULL = unpriced
+  // → quote line falls back to "— Quoted Separately —". When set, the package
+  // hits subtotal/HST/totals/margin like any other line item.
+  `ALTER TABLE packages ADD COLUMN IF NOT EXISTS cost NUMERIC`,
+  `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price1 NUMERIC`,
+  `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price2 NUMERIC`,
+  `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price3 NUMERIC`,
+  `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price4 NUMERIC`,
 ];
 
 const SKU_CATALOG_SEED = [
