@@ -84,8 +84,9 @@ function renderHtml(quote) {
     : '30 days from issue';
 
   // Customer-facing line items, grouped by section. Columns:
-  //   Item # | Catalog # | Description | Qty | Unit | Unit price | Total
-  // No margin %, no cost — purely customer-facing.
+  //   Category | Catalog # | Description | Qty | Unit | Unit price | Total
+  // No item #, no margin %, no cost — purely customer-facing. Section bands
+  // (e.g. "Floor 1 — Exterior Walls") still span all 7 columns.
   let lineItemsHtml = '';
   for (const [sectionName, items] of sections) {
     lineItemsHtml += `<tr class="section-band-row"><td colspan="7" class="section-band">${esc(sectionName)}</td></tr>`;
@@ -98,7 +99,7 @@ function renderHtml(quote) {
         : (li.line_price == null ? '<span class="tbd">TBD</span>' : fmtMoney(li.line_price));
       lineItemsHtml += `
         <tr>
-          <td>${esc(li.item_number || '—')}</td>
+          <td class="category">${esc(li.category || '')}</td>
           <td>${esc(li.catalog_number || '—')}</td>
           <td>${esc(li.description)}</td>
           <td class="num">${esc(Number(li.quantity).toLocaleString())}</td>
@@ -187,6 +188,7 @@ function renderHtml(quote) {
     vertical-align: top;
   }
   td.num { text-align: right; white-space: nowrap; }
+  td.category { color: #6B7280; font-size: 9px; }
 
   tr.section-band-row td {
     padding: 0;
@@ -287,13 +289,13 @@ function renderHtml(quote) {
   <table>
     <thead>
       <tr>
-        <th style="width:80px">Item #</th>
-        <th style="width:80px">Catalog #</th>
-        <th>Description</th>
-        <th style="width:50px;text-align:right">Qty</th>
-        <th style="width:50px">Unit</th>
-        <th style="width:90px;text-align:right">Unit price</th>
-        <th style="width:100px;text-align:right">Total</th>
+        <th style="width:14%">Category</th>
+        <th style="width:8%">Catalog #</th>
+        <th style="width:32%">Description</th>
+        <th style="width:6%;text-align:right">Qty</th>
+        <th style="width:5%">Unit</th>
+        <th style="width:11%;text-align:right">Unit price</th>
+        <th style="width:11%;text-align:right">Total</th>
       </tr>
     </thead>
     <tbody>
