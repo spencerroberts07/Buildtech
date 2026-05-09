@@ -9,9 +9,27 @@
 //
 // Throws if the API key is missing so the route can return 503.
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { Resend } from 'resend';
 
 const FROM_DEFAULT = 'admin@lyndhursthbc.com';
+
+// Load the store logo as base64 once at module load. Source priority:
+//   1. process.env.STORE_LOGO_BASE64 — pre-encoded JPEG bytes
+//   2. backend/assets/lyndhurst-logo.jpg — read + encoded here
+// If neither is available the email falls back to a plain coloured badge so
+// the header still renders.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+let LOGO_BASE64 = null;
+try {
+  const logoPath = path.join(__dirname, '../assets/lyndhurst-logo.jpg');
+  LOGO_BASE64 = fs.readFileSync(logoPath).toString('base64');
+} catch {
+  // logo file not found — fall through to env var or fallback badge
+}
+LOGO_BASE64 = process.env.STORE_LOGO_BASE64 || LOGO_BASE64;
 
 function esc(s) {
   if (s == null) return '';
@@ -69,19 +87,11 @@ function renderHtml({ quote, customMessage }) {
       <tr><td style="padding:0;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0A0A0A;">
           <tr>
-            <td style="padding:20px 24px;vertical-align:middle;width:64px;">
-              <svg xmlns="http://www.w3.org/2000/svg" width="52" height="52" viewBox="0 0 52 52" style="display:inline-block;vertical-align:middle;margin-right:12px;">
-                <rect x="0" y="0" width="52" height="52" rx="8" ry="8" fill="#FFD700"/>
-                <rect x="4" y="4" width="44" height="44" rx="6" ry="6" fill="#CC0000"/>
-                <polygon points="26,8 10,20 42,20" fill="white"/>
-                <rect x="10" y="19" width="8" height="22" rx="1" fill="white"/>
-                <rect x="34" y="19" width="8" height="22" rx="1" fill="white"/>
-                <rect x="7" y="38" width="14" height="4" rx="1" fill="white"/>
-                <rect x="31" y="38" width="14" height="4" rx="1" fill="white"/>
-                <rect x="18" y="27" width="16" height="5" rx="1" fill="white"/>
-                <rect x="18" y="19" width="6" height="22" rx="1" fill="white"/>
-                <rect x="28" y="19" width="6" height="22" rx="1" fill="white"/>
-              </svg>
+            <td style="padding:20px 24px;vertical-align:middle;width:80px;">
+              ${LOGO_BASE64
+                ? `<img src="data:image/jpeg;base64,${LOGO_BASE64}" width="70" height="70" alt="Lyndhurst Home Building Centre" style="display:block;border:0;outline:none;">`
+                : `<div style="width:70px;height:70px;background-color:#CC0000;border-radius:8px;display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;font-family:Arial,sans-serif;font-size:18px;">LH</div>`
+              }
             </td>
             <td style="padding:20px 0;vertical-align:middle;">
               <div style="color:white;font-size:16px;font-weight:700;font-family:Arial,Helvetica,sans-serif;margin:0;">Lyndhurst Home Building Centre</div>
