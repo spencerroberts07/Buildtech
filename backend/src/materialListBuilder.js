@@ -243,9 +243,11 @@ export async function computeProjectMaterialList(projectId, options = {}) {
     }
   }
 
-  // Attach SKU catalog metadata
+  // Attach SKU catalog metadata. The description column is the wall-rules
+  // match key; warehouse_description is the customer-facing label and may
+  // differ (e.g. "FILM,12\" CGSB SF CLR 300SF" vs "12 X 300FT CLEAR POLY").
   const skuRows = (await query(
-    'SELECT item_number, catalog_number, description, definition FROM sku_catalog'
+    'SELECT item_number, catalog_number, description, warehouse_description, definition FROM sku_catalog'
   )).rows;
   const skuByDesc = new Map();
   for (const s of skuRows) {
@@ -256,6 +258,7 @@ export async function computeProjectMaterialList(projectId, options = {}) {
     const sku = skuByDesc.get((r.material_name || '').trim().toLowerCase());
     r.catalog_number = sku?.catalog_number ?? null;
     r.item_number = sku?.item_number ?? null;
+    r.warehouse_description = sku?.warehouse_description ?? null;
     const origKey = (r.original_description || r.material_name || '').trim().toLowerCase();
     r.definition = skuByDesc.get(origKey)?.definition ?? null;
   }

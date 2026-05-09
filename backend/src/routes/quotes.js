@@ -95,7 +95,7 @@ async function lookupPricing(row, skuCurated, skuFull) {
     return {
       cost: null, price1: null, price2: null, price3: null, price4: null,
       item_number: row.item_number, catalog_number: row.catalog_number,
-      unit: row.material_unit,
+      unit: row.material_unit, description: null,
     };
   }
 
@@ -107,6 +107,7 @@ async function lookupPricing(row, skuCurated, skuFull) {
     item_number: matched.item_number || row.item_number,
     catalog_number: matched.catalog_number || row.catalog_number,
     unit: matched.unit || row.material_unit,
+    description: matched.description || null,
   };
 }
 
@@ -200,12 +201,20 @@ async function buildLineItemsForProject(projectId, priceLevel) {
     const linePrice = unitPrice != null ? qty * unitPrice : null;
     const marginPct = (linePrice && lineCost != null && linePrice > 0)
       ? ((linePrice - lineCost) / linePrice) * 100 : null;
+    // Customer-facing description: prefer warehouse-canonical text mirrored
+    // onto sku_catalog from the warehouse import, then the matched
+    // sku_catalog_full row's description, then fall back to the wall-rules
+    // emitted name. Manual line items added later go through their own path.
+    const displayDescription =
+      r.warehouse_description
+      || lookup.description
+      || r.material_name;
     items.push({
       section: r.section,
       category: r.category,
       item_number: lookup.item_number,
       catalog_number: lookup.catalog_number,
-      description: r.material_name,
+      description: displayDescription,
       quantity: qty,
       unit: lookup.unit || r.material_unit,
       unit_cost: unitCost,

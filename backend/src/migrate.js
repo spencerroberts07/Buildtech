@@ -361,6 +361,12 @@ const PROJECT_COLUMN_ALTERS = [
   // conversion set this true; lookup code only runs the on-the-fly MBF math
   // when this is false (covers legacy rows from before the import re-run).
   `ALTER TABLE sku_catalog_full ADD COLUMN IF NOT EXISTS is_mbf_converted BOOLEAN DEFAULT false`,
+  // Warehouse-canonical description, mirrored from sku_catalog_full by
+  // item/catalog match. sku_catalog.description stays the wall-rules match
+  // key (so the rules engine output continues to join correctly); this
+  // field is what customer-facing surfaces (quotes, PDFs, material list
+  // table) display.
+  `ALTER TABLE sku_catalog ADD COLUMN IF NOT EXISTS warehouse_description TEXT`,
 ];
 
 const SKU_CATALOG_SEED = [
@@ -632,6 +638,26 @@ async function seedSkuCatalog() {
     FROM sku_catalog_full scf
     WHERE sc.catalog_number = '2645840'
       AND scf.catalog_number = '2645840'
+  `);
+  // Mirror warehouse-canonical descriptions onto sku_catalog so customer-
+  // facing surfaces can display them. Match by item_number first (most
+  // specific), then by catalog_number for rows that don't have an item.
+  // sku_catalog.description is left alone — it remains the wall-rules
+  // match key and must not change without also updating wallRules output.
+  await pool.query(`
+    UPDATE sku_catalog sc
+    SET warehouse_description = scf.description
+    FROM sku_catalog_full scf
+    WHERE sc.item_number IS NOT NULL
+      AND sc.item_number = scf.item_number
+  `);
+  await pool.query(`
+    UPDATE sku_catalog sc
+    SET warehouse_description = scf.description
+    FROM sku_catalog_full scf
+    WHERE sc.warehouse_description IS NULL
+      AND sc.catalog_number IS NOT NULL
+      AND sc.catalog_number = scf.catalog_number
   `);
 }
 
