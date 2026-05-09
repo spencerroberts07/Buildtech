@@ -17,20 +17,24 @@ import { Resend } from 'resend';
 const FROM_DEFAULT = 'sales@lyndhursthbc.com';
 
 // Load the store logo as base64 once at module load. Source priority:
-//   1. process.env.STORE_LOGO_BASE64 — pre-encoded PNG bytes
-//   2. backend/assets/lyndhurst-logo.png — read + encoded here
-// If neither is available the email falls back to a plain coloured badge so
-// the header still renders. PNG (not JPEG) — the HH mark is solid-colour
-// geometry with hard edges, where JPEG compression smears the boundaries.
+//   1. backend/assets/lyndhurst-logo.png — the committed source of truth
+//   2. process.env.STORE_LOGO_BASE64 — fallback when running where the
+//      file isn't on disk (e.g. a stripped-down deploy)
+// If neither is available the email falls back to a plain coloured badge
+// so the header still renders. PNG (not JPEG) — the HH mark is solid-
+// colour geometry with hard edges, where JPEG compression smears the
+// boundaries.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let LOGO_BASE64 = null;
 try {
   const logoPath = path.join(__dirname, '../assets/lyndhurst-logo.png');
   LOGO_BASE64 = fs.readFileSync(logoPath).toString('base64');
 } catch {
-  // logo file not found — fall through to env var or fallback badge
+  // logo file not found — fall through to env var
 }
-LOGO_BASE64 = process.env.STORE_LOGO_BASE64 || LOGO_BASE64;
+if (!LOGO_BASE64) {
+  LOGO_BASE64 = process.env.STORE_LOGO_BASE64 || null;
+}
 
 function esc(s) {
   if (s == null) return '';
