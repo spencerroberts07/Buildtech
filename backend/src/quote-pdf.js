@@ -1,50 +1,43 @@
-// Quote PDF generation. Renders an HTML template with puppeteer-core +
-// @sparticuz/chromium so it works on Render's container env.
+// Quote PDF generation. Renders a customer-facing HTML template with
+// puppeteer-core + @sparticuz/chromium so it works on Render's container env.
 //
-// Logo source priority:
-//   1. process.env.STORE_LOGO_BASE64 — used directly as a data URI
-//   2. backend/assets/lyndhurst-logo.jpg — read from disk, base64-encoded
-//   3. Neither set → store name renders as plain text (no <img>)
+// This is a customer-facing document. No internal data (margin %, cost,
+// gross profit, price-level label, "INTERNAL" banners) appears on the PDF.
+// The web QuotePage still shows that information for the estimator.
 //
 // Local dev: puppeteer-core has no bundled Chrome. Set
 //   CHROME_EXECUTABLE_PATH=/path/to/chrome
 // to override the @sparticuz/chromium binary path. On Render the bundled
 // binary works as-is.
 
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOGO_PATH = path.resolve(__dirname, '../assets/lyndhurst-logo.jpg');
-
 const STORE = {
   name: 'Lyndhurst Home Building Centre',
-  address: '397 Lyndhurst Rd, Lyndhurst ON, K0E 1N0',
+  address: '397 Lyndhurst Rd, Lyndhurst ON  K0E 1N0',
   phone: '613-928-2828',
   email: 'admin@lyndhursthbc.com',
   disclaimer:
     'This estimate is provided for budgetary purposes only. Prices are valid for 30 days from the date of issue and are subject to change without notice. Lyndhurst Home Building Centre does not guarantee the completeness or accuracy of this material list. The builder and/or owner are solely responsible for verifying all quantities, specifications, and compliance with applicable building codes prior to ordering.',
 };
 
-// --- Logo loading ---------------------------------------------------------
-
-function getLogoHtml() {
-  if (process.env.STORE_LOGO_BASE64) {
-    return `<img src="data:image/jpeg;base64,${process.env.STORE_LOGO_BASE64}" alt="${esc(STORE.name)}" />`;
-  }
-  try {
-    if (fs.existsSync(LOGO_PATH)) {
-      const buf = fs.readFileSync(LOGO_PATH);
-      return `<img src="data:image/jpeg;base64,${buf.toString('base64')}" alt="${esc(STORE.name)}" />`;
-    }
-  } catch (e) {
-    console.warn('quote-pdf: failed to read local logo:', e.message);
-  }
-  return `<div class="store-name-fallback">${esc(STORE.name)}</div>`;
-}
+// Inline Home Hardware logo: yellow rounded outer + red rounded inner with
+// a stylized "dh" mark (two pillars with top/bottom serifs and a peaked
+// roof connecting them at the top). Drawn at 60×60.
+const HH_LOGO_SVG = `
+<svg viewBox="0 0 60 60" width="60" height="60" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Home Hardware">
+  <rect width="60" height="60" rx="10" ry="10" fill="#FFD700"/>
+  <rect x="4" y="4" width="52" height="52" rx="7" ry="7" fill="#CC0000"/>
+  <g fill="#FFFFFF">
+    <!-- Peaked roof connecting the top serifs -->
+    <path d="M 19 19 L 22 19 L 30 13 L 38 19 L 41 19 L 30 9 Z"/>
+    <!-- d-pillar: top + bottom serifs, mid bump extending right -->
+    <path d="M 9 18 L 23 18 L 23 23 L 19 23 L 19 28 L 26 28 L 26 32 L 19 32 L 19 42 L 23 42 L 23 47 L 9 47 L 9 42 L 13 42 L 13 23 L 9 23 Z"/>
+    <!-- h-pillar: top + bottom serifs, mid bump extending left -->
+    <path d="M 37 18 L 51 18 L 51 23 L 47 23 L 47 42 L 51 42 L 51 47 L 37 47 L 37 42 L 41 42 L 41 32 L 34 32 L 34 28 L 41 28 L 41 23 L 37 23 Z"/>
+  </g>
+</svg>`;
 
 // --- Helpers --------------------------------------------------------------
 
@@ -62,23 +55,6 @@ function fmtMoney(v) {
   if (v == null) return '—';
   return `$${Number(v).toLocaleString('en-CA', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
-function fmtPct(v) {
-  if (v == null) return '—';
-  return `${Number(v).toFixed(1)}%`;
-}
-function marginClass(pct) {
-  if (pct == null) return '';
-  if (pct >= 20) return 'margin-good';
-  if (pct >= 15) return 'margin-mid';
-  return 'margin-low';
-}
-
-const PRICE_LEVEL_LABELS = {
-  1: 'Level 1 — Retail',
-  2: 'Level 2 — Builder',
-  3: 'Level 3 — Large Builder',
-  4: 'Level 4 — Top Volume',
-};
 
 function groupBySection(items) {
   const m = new Map();
@@ -100,10 +76,12 @@ function renderHtml(quote) {
     ? new Date(quote.valid_until).toLocaleDateString('en-CA')
     : '30 days from issue';
 
-  // Customer-facing line items, grouped by section.
+  // Customer-facing line items, grouped by section. Columns:
+  //   Item # | Catalog # | Description | Qty | Unit | Unit price | Total
+  // No margin %, no cost — purely customer-facing.
   let lineItemsHtml = '';
   for (const [sectionName, items] of sections) {
-    lineItemsHtml += `<tr class="section-band-row"><td colspan="6" class="section-band">${esc(sectionName)}</td></tr>`;
+    lineItemsHtml += `<tr class="section-band-row"><td colspan="7" class="section-band">${esc(sectionName)}</td></tr>`;
     for (const li of items) {
       const unitPrice = li.is_package
         ? '<span class="muted">— Quoted Separately —</span>'
@@ -114,6 +92,7 @@ function renderHtml(quote) {
       lineItemsHtml += `
         <tr>
           <td>${esc(li.item_number || '—')}</td>
+          <td>${esc(li.catalog_number || '—')}</td>
           <td>${esc(li.description)}</td>
           <td class="num">${esc(Number(li.quantity).toLocaleString())}</td>
           <td>${esc(li.unit || '—')}</td>
@@ -123,33 +102,11 @@ function renderHtml(quote) {
     }
   }
 
-  // Internal-only per-section margin breakdown.
-  let marginRowsHtml = '';
-  for (const [sectionName, items] of sections) {
-    let revenue = 0, cost = 0;
-    for (const li of items) {
-      if (li.line_price != null) revenue += Number(li.line_price);
-      if (li.line_cost != null) cost += Number(li.line_cost);
-    }
-    const gp = revenue - cost;
-    const mp = revenue > 0 ? (gp / revenue) * 100 : null;
-    marginRowsHtml += `
-      <tr>
-        <td>${esc(sectionName)}</td>
-        <td class="num">${fmtMoney(revenue)}</td>
-        <td class="num">${fmtMoney(cost)}</td>
-        <td class="num">${fmtMoney(gp)}</td>
-        <td class="num margin-cell ${marginClass(mp)}">${fmtPct(mp)}</td>
-      </tr>`;
-  }
-
-  const logoHtml = getLogoHtml();
-
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Quote ${esc(quote.quote_number)}</title>
+<title>Estimate ${esc(quote.quote_number)}</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: 'Segoe UI', -apple-system, sans-serif; color: #1A1A1A; margin: 0; padding: 0; font-size: 11px; }
@@ -160,40 +117,50 @@ function renderHtml(quote) {
     padding: 24px 40px;
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 24px;
   }
-  .header img { height: 64px; max-width: 200px; object-fit: contain; }
-  .header .store-name-fallback { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
-  .header .store-meta { line-height: 1.5; }
-  .header .store-name { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; }
-  .header .store-info { font-size: 10px; color: #D1D1D1; }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .header-left svg { display: block; }
+  .header-left .store-name { font-size: 14px; font-weight: 700; letter-spacing: -0.2px; }
+  .header-left .store-info { font-size: 10px; color: #FFFFFF; }
+  .header-right { text-align: right; }
+  .header-right .estimate-label {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: #FFD700;
+  }
+  .header-right .quote-number { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .header-right .quote-meta-line { font-size: 10px; color: #D1D1D1; margin-top: 1px; }
 
-  .page { padding: 32px 40px 80px; }
-  .new-page { page-break-before: always; padding-top: 40px; }
+  .page { padding: 32px 40px 40px; }
 
-  h1 { font-size: 22px; margin: 0 0 4px; color: #0A0A0A; }
-  h1 .quote-num { color: #CC0000; }
-  h2 { font-size: 14px; margin: 24px 0 8px; color: #0A0A0A; }
+  h2 { font-size: 12px; margin: 18px 0 8px; color: #0A0A0A; text-transform: uppercase; letter-spacing: 0.6px; }
 
-  .quote-meta {
+  .bill-to {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 16px 32px;
-    margin: 16px 0 8px;
+    gap: 12px 32px;
+    margin: 0 0 8px;
     padding: 14px 16px;
     background: #F5F5F5;
     border-left: 3px solid #CC0000;
     border-radius: 4px;
   }
-  .quote-meta .field { line-height: 1.4; }
-  .quote-meta .label {
+  .bill-to .field { line-height: 1.4; }
+  .bill-to .label {
     color: #6B7280;
     text-transform: uppercase;
     font-size: 9px;
     letter-spacing: 0.5px;
     font-weight: 600;
   }
-  .quote-meta .value { font-size: 12px; }
+  .bill-to .value { font-size: 12px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 10px; }
   thead th {
@@ -256,22 +223,14 @@ function renderHtml(quote) {
     border-left: 3px solid #FFB800;
   }
 
-  .internal-banner {
-    background: #FFF0F0;
-    border: 1px solid #CC0000;
-    padding: 10px 14px;
-    margin-bottom: 16px;
-    color: #CC0000;
-    font-weight: 600;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
+  .footer {
+    margin-top: 16px;
+    padding-top: 10px;
+    border-top: 1px solid #E0E0E0;
+    text-align: center;
+    font-size: 9px;
+    color: #6B7280;
   }
-
-  .margin-cell { font-weight: 700; }
-  .margin-good { color: #16A34A; }
-  .margin-mid  { color: #B45309; }
-  .margin-low  { color: #CC0000; }
 
   .tbd { color: #9CA3AF; font-style: italic; }
   .muted { color: #6B7280; font-style: italic; }
@@ -280,48 +239,49 @@ function renderHtml(quote) {
 <body>
 
 <div class="header">
-  ${logoHtml}
-  <div class="store-meta">
-    <div class="store-name">${esc(STORE.name)}</div>
-    <div class="store-info">${esc(STORE.address)}</div>
-    <div class="store-info">${esc(STORE.phone)} · ${esc(STORE.email)}</div>
+  <div class="header-left">
+    ${HH_LOGO_SVG}
+    <div>
+      <div class="store-name">${esc(STORE.name)}</div>
+      <div class="store-info">${esc(STORE.address)}</div>
+      <div class="store-info">${esc(STORE.phone)}  |  ${esc(STORE.email)}</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="estimate-label">ESTIMATE</div>
+    <div class="quote-number">${esc(quote.quote_number)}</div>
+    <div class="quote-meta-line">Date: ${esc(today)}</div>
+    <div class="quote-meta-line">Valid until: ${esc(validUntil)}</div>
   </div>
 </div>
 
 <div class="page">
-  <h1>Quote <span class="quote-num">${esc(quote.quote_number)}</span></h1>
-  <div class="quote-meta">
-    <div class="field">
-      <div class="label">Project</div>
-      <div class="value">${esc(quote.project_name || '—')}</div>
-    </div>
-    <div class="field">
-      <div class="label">Quote date</div>
-      <div class="value">${esc(today)}</div>
-    </div>
+  <h2>Bill To / Project Details</h2>
+  <div class="bill-to">
     <div class="field">
       <div class="label">Customer</div>
       <div class="value">${esc(quote.customer_name || '—')}</div>
     </div>
     <div class="field">
-      <div class="label">Valid until</div>
-      <div class="value">${esc(validUntil)}</div>
+      <div class="label">Project</div>
+      <div class="value">${esc(quote.project_name || '—')}</div>
     </div>
     <div class="field">
       <div class="label">Estimator</div>
       <div class="value">${esc(quote.created_by || '—')}</div>
     </div>
     <div class="field">
-      <div class="label">Price level</div>
-      <div class="value">${esc(PRICE_LEVEL_LABELS[quote.price_level] || `Level ${quote.price_level}`)}</div>
+      <div class="label">Quote #</div>
+      <div class="value">${esc(quote.quote_number)}</div>
     </div>
   </div>
 
-  <h2>Line items</h2>
+  <h2>Materials</h2>
   <table>
     <thead>
       <tr>
-        <th style="width:90px">Item #</th>
+        <th style="width:80px">Item #</th>
+        <th style="width:80px">Catalog #</th>
         <th>Description</th>
         <th style="width:50px;text-align:right">Qty</th>
         <th style="width:50px">Unit</th>
@@ -330,7 +290,7 @@ function renderHtml(quote) {
       </tr>
     </thead>
     <tbody>
-      ${lineItemsHtml || '<tr><td colspan="6" class="muted">No line items.</td></tr>'}
+      ${lineItemsHtml || '<tr><td colspan="7" class="muted">No line items.</td></tr>'}
     </tbody>
   </table>
 
@@ -341,36 +301,9 @@ function renderHtml(quote) {
   </div>
 
   <div class="disclaimer">${esc(STORE.disclaimer)}</div>
-</div>
 
-<div class="page new-page">
-  <div class="internal-banner">Internal use only — do not share with customer</div>
-  <h1>Margin Summary <span class="quote-num">${esc(quote.quote_number)}</span></h1>
-
-  <h2>By section</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Section</th>
-        <th style="text-align:right;width:90px">Revenue</th>
-        <th style="text-align:right;width:90px">Cost</th>
-        <th style="text-align:right;width:100px">Gross profit</th>
-        <th style="text-align:right;width:80px">Margin %</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${marginRowsHtml || '<tr><td colspan="5" class="muted">No data.</td></tr>'}
-    </tbody>
-  </table>
-
-  <div class="totals">
-    <div class="row"><span>Total revenue</span><span>${fmtMoney(quote.subtotal)}</span></div>
-    <div class="row"><span>Total cost</span><span>${fmtMoney(quote.total_cost)}</span></div>
-    <div class="row"><span>Gross profit</span><span>${fmtMoney(quote.gross_profit)}</span></div>
-    <div class="row grand">
-      <span>Overall margin</span>
-      <span class="margin-cell ${marginClass(quote.margin_pct)}">${fmtPct(quote.margin_pct)}</span>
-    </div>
+  <div class="footer">
+    ${esc(STORE.name)}  ·  ${esc(STORE.phone)}  ·  ${esc(STORE.email)}
   </div>
 </div>
 
@@ -381,8 +314,6 @@ function renderHtml(quote) {
 // --- Puppeteer ------------------------------------------------------------
 
 async function launchBrowser() {
-  // Allow CHROME_EXECUTABLE_PATH override for local dev (where the
-  // @sparticuz/chromium Lambda binary won't run on Windows/macOS).
   const executablePath = process.env.CHROME_EXECUTABLE_PATH
     || (await chromium.executablePath());
   return puppeteer.launch({
