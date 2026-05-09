@@ -10,8 +10,32 @@
 // to override the @sparticuz/chromium binary path. On Render the bundled
 // binary works as-is.
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const HH_LOGO_PATH = path.resolve(__dirname, '../assets/home-hardware-logo.svg');
+
+// Read the official Home Hardware SVG once at module load. Strip any root
+// width/height attributes so the header's CSS sizing controls the rendered
+// dimensions. The viewBox stays, so it scales correctly.
+const HH_LOGO_SVG = (() => {
+  try {
+    const raw = fs.readFileSync(HH_LOGO_PATH, 'utf8');
+    return raw
+      .replace(/<\?xml[^?]*\?>/, '')
+      .replace(/<!DOCTYPE[^>]*>/, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/(<svg\b[^>]*?)\s+width="[^"]*"/i, '$1')
+      .replace(/(<svg\b[^>]*?)\s+height="[^"]*"/i, '$1');
+  } catch (e) {
+    console.warn('quote-pdf: failed to read HH logo SVG:', e.message);
+    return '';
+  }
+})();
 
 const STORE = {
   name: 'Lyndhurst Home Building Centre',
@@ -21,23 +45,6 @@ const STORE = {
   disclaimer:
     'This estimate is provided for budgetary purposes only. Prices are valid for 30 days from the date of issue and are subject to change without notice. Lyndhurst Home Building Centre does not guarantee the completeness or accuracy of this material list. The builder and/or owner are solely responsible for verifying all quantities, specifications, and compliance with applicable building codes prior to ordering.',
 };
-
-// Inline Home Hardware logo: yellow rounded outer + red rounded inner with
-// a stylized "dh" mark (two pillars with top/bottom serifs and a peaked
-// roof connecting them at the top). Drawn at 60×60.
-const HH_LOGO_SVG = `
-<svg viewBox="0 0 60 60" width="60" height="60" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Home Hardware">
-  <rect width="60" height="60" rx="10" ry="10" fill="#FFD700"/>
-  <rect x="4" y="4" width="52" height="52" rx="7" ry="7" fill="#CC0000"/>
-  <g fill="#FFFFFF">
-    <!-- Peaked roof connecting the top serifs -->
-    <path d="M 19 19 L 22 19 L 30 13 L 38 19 L 41 19 L 30 9 Z"/>
-    <!-- d-pillar: top + bottom serifs, mid bump extending right -->
-    <path d="M 9 18 L 23 18 L 23 23 L 19 23 L 19 28 L 26 28 L 26 32 L 19 32 L 19 42 L 23 42 L 23 47 L 9 47 L 9 42 L 13 42 L 13 23 L 9 23 Z"/>
-    <!-- h-pillar: top + bottom serifs, mid bump extending left -->
-    <path d="M 37 18 L 51 18 L 51 23 L 47 23 L 47 42 L 51 42 L 51 47 L 37 47 L 37 42 L 41 42 L 41 32 L 34 32 L 34 28 L 41 28 L 41 23 L 37 23 Z"/>
-  </g>
-</svg>`;
 
 // --- Helpers --------------------------------------------------------------
 
@@ -125,7 +132,7 @@ function renderHtml(quote) {
     align-items: center;
     gap: 14px;
   }
-  .header-left svg { display: block; }
+  .header-left svg { display: block; height: 60px; width: auto; }
   .header-left .store-name { font-size: 14px; font-weight: 700; letter-spacing: -0.2px; }
   .header-left .store-info { font-size: 10px; color: #FFFFFF; }
   .header-right { text-align: right; }
