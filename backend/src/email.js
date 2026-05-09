@@ -164,7 +164,11 @@ export async function sendQuoteEmail({ quote, recipientEmail, customMessage, pdf
     subject,
     html,
     attachments: pdfBuffer
-      ? [{ filename: `Quote-${quote.quote_number}.pdf`, content: pdfBuffer }]
+      ? [{
+          filename: `Quote-${quote.quote_number}.pdf`,
+          content: pdfBuffer.toString('base64'),
+          encoding: 'base64',
+        }]
       : [],
   });
   if (error) {
