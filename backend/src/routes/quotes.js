@@ -356,7 +356,13 @@ router.post('/:qid/send', async (req, res) => {
   const q = await loadFullQuote(qid);
   if (!q) return res.status(404).json({ error: 'not found' });
   try {
-    const pdfBuffer = await generateQuotePdf(q);
+    const rawPdf = await generateQuotePdf(q);
+    // Newer puppeteer can return a Uint8Array; normalize to a Buffer so the
+    // Resend SDK gets the binary type it expects.
+    const pdfBuffer = Buffer.isBuffer(rawPdf) ? rawPdf : Buffer.from(rawPdf);
+    if (!pdfBuffer || pdfBuffer.length < 1000) {
+      throw new Error('PDF generation produced empty or invalid output');
+    }
     await sendQuoteEmail({ quote: q, recipientEmail, customMessage, pdfBuffer });
     await query(
       `UPDATE quotes SET status='sent', sent_at=NOW(), sent_to=$1, updated_at=NOW() WHERE id=$2`,

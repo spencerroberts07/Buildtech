@@ -65,10 +65,34 @@ function renderHtml({ quote, customMessage }) {
 
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFFFF;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
 
-      <!-- Header -->
-      <tr><td style="background:#0A0A0A;color:#FFFFFF;padding:24px;">
-        <div style="font-size:18px;font-weight:700;letter-spacing:-0.2px;">Lyndhurst Home Building Centre</div>
-        <div style="font-size:11px;color:#9CA3AF;margin-top:4px;">397 Lyndhurst Rd, Lyndhurst ON  K0E 1N0</div>
+      <!-- Header (table layout for Outlook/Gmail/Apple Mail compatibility) -->
+      <tr><td style="padding:0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0A0A0A;">
+          <tr>
+            <td style="padding:20px 24px;vertical-align:middle;width:64px;">
+              <svg xmlns="http://www.w3.org/2000/svg" width="52" height="52" viewBox="0 0 52 52" style="display:inline-block;vertical-align:middle;margin-right:12px;">
+                <rect x="0" y="0" width="52" height="52" rx="8" ry="8" fill="#FFD700"/>
+                <rect x="4" y="4" width="44" height="44" rx="6" ry="6" fill="#CC0000"/>
+                <polygon points="26,8 10,20 42,20" fill="white"/>
+                <rect x="10" y="19" width="8" height="22" rx="1" fill="white"/>
+                <rect x="34" y="19" width="8" height="22" rx="1" fill="white"/>
+                <rect x="7" y="38" width="14" height="4" rx="1" fill="white"/>
+                <rect x="31" y="38" width="14" height="4" rx="1" fill="white"/>
+                <rect x="18" y="27" width="16" height="5" rx="1" fill="white"/>
+                <rect x="18" y="19" width="6" height="22" rx="1" fill="white"/>
+                <rect x="28" y="19" width="6" height="22" rx="1" fill="white"/>
+              </svg>
+            </td>
+            <td style="padding:20px 0;vertical-align:middle;">
+              <div style="color:white;font-size:16px;font-weight:700;font-family:Arial,Helvetica,sans-serif;margin:0;">Lyndhurst Home Building Centre</div>
+              <div style="color:#9CA3AF;font-size:11px;font-family:Arial,Helvetica,sans-serif;margin-top:4px;">397 Lyndhurst Rd, Lyndhurst ON  K0E 1N0  |  613-928-2828</div>
+            </td>
+            <td style="padding:20px 24px;vertical-align:middle;text-align:right;">
+              <div style="color:#CC0000;font-size:13px;font-weight:700;font-family:Arial,Helvetica,sans-serif;">MATERIAL ESTIMATE</div>
+              <div style="color:#9CA3AF;font-size:11px;font-family:Arial,Helvetica,sans-serif;margin-top:2px;">admin@lyndhursthbc.com</div>
+            </td>
+          </tr>
+        </table>
       </td></tr>
 
       <!-- Body -->
@@ -164,11 +188,7 @@ export async function sendQuoteEmail({ quote, recipientEmail, customMessage, pdf
     subject,
     html,
     attachments: pdfBuffer
-      ? [{
-          filename: `Quote-${quote.quote_number}.pdf`,
-          content: pdfBuffer.toString('base64'),
-          encoding: 'base64',
-        }]
+      ? [{ filename: `Quote-${quote.quote_number}.pdf`, content: pdfBuffer }]
       : [],
   });
   if (error) {
