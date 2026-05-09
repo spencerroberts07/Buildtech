@@ -289,7 +289,7 @@ function renderHtml(quote) {
   <table>
     <thead>
       <tr>
-        <th style="width:14%">Category</th>
+        <th style="width:14%">Section</th>
         <th style="width:8%">Catalog #</th>
         <th style="width:32%">Description</th>
         <th style="width:6%;text-align:right">Qty</th>
