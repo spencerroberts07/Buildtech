@@ -5,7 +5,7 @@
 // Required env:
 //   RESEND_API_KEY — re_xxxxxxx, from the Resend dashboard
 //   EMAIL_FROM     — the verified-domain From address; defaults to
-//                    admin@lyndhursthbc.com
+//                    sales@lyndhursthbc.com
 //
 // Throws if the API key is missing so the route can return 503.
 
@@ -14,7 +14,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { Resend } from 'resend';
 
-const FROM_DEFAULT = 'admin@lyndhursthbc.com';
+const FROM_DEFAULT = 'sales@lyndhursthbc.com';
 
 // Load the store logo as base64 once at module load. Source priority:
 //   1. process.env.STORE_LOGO_BASE64 — pre-encoded JPEG bytes
@@ -99,7 +99,7 @@ function renderHtml({ quote, customMessage }) {
             </td>
             <td style="padding:20px 24px;vertical-align:middle;text-align:right;">
               <div style="color:#CC0000;font-size:13px;font-weight:700;font-family:Arial,Helvetica,sans-serif;">MATERIAL ESTIMATE</div>
-              <div style="color:#9CA3AF;font-size:11px;font-family:Arial,Helvetica,sans-serif;margin-top:2px;">admin@lyndhursthbc.com</div>
+              <div style="color:#9CA3AF;font-size:11px;font-family:Arial,Helvetica,sans-serif;margin-top:2px;">sales@lyndhursthbc.com</div>
             </td>
           </tr>
         </table>
@@ -155,7 +155,7 @@ function renderHtml({ quote, customMessage }) {
             Phone: <a href="tel:6139282828" style="color:#CC0000;text-decoration:none;">613-928-2828</a>
           </td></tr>
           <tr><td style="font-size:13px;color:#1A1A1A;line-height:1.6;padding:0 0 4px 0;">
-            Email: <a href="mailto:admin@lyndhursthbc.com" style="color:#CC0000;text-decoration:none;">admin@lyndhursthbc.com</a>
+            Email: <a href="mailto:sales@lyndhursthbc.com" style="color:#CC0000;text-decoration:none;">sales@lyndhursthbc.com</a>
           </td></tr>
 
         </table>
