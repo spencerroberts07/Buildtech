@@ -3,6 +3,7 @@ import { query, pool } from '../db.js';
 import { computeProjectMaterialList } from '../materialListBuilder.js';
 import { parseLumberDimensions, needsMbfConversion } from '../lumberPricing.js';
 import { generateQuotePdf } from '../quote-pdf.js';
+import { sendQuoteEmail } from '../email.js';
 
 const router = Router();
 
@@ -276,7 +277,7 @@ async function updateQuoteTotals(client, quoteId) {
 async function loadFullQuote(quoteId) {
   const q = (await query(`
     SELECT q.*, p.name AS project_name, p.customer AS project_customer_text,
-           c.name AS customer_name
+           c.name AS customer_name, c.email AS customer_email
     FROM quotes q
     JOIN projects p ON p.id = q.project_id
     LEFT JOIN customers c ON c.id = q.customer_id
@@ -303,9 +304,9 @@ router.get('/', async (req, res) => {
   const { rows } = await query(`
     SELECT q.id, q.quote_number, q.status, q.price_level,
            q.subtotal, q.tax_rate, q.tax_amount, q.total, q.margin_pct,
-           q.created_by, q.created_at, q.valid_until,
+           q.created_by, q.created_at, q.valid_until, q.sent_at, q.sent_to,
            p.name AS project_name,
-           c.name AS customer_name
+           c.name AS customer_name, c.email AS customer_email
     FROM quotes q
     JOIN projects p ON p.id = q.project_id
     LEFT JOIN customers c ON c.id = q.customer_id
@@ -337,6 +338,37 @@ router.get('/:qid/pdf', async (req, res) => {
   } catch (e) {
     console.error('PDF generation failed:', e);
     res.status(500).json({ error: e.message || 'pdf generation failed' });
+  }
+});
+
+// POST /quotes/:qid/send — generate the PDF and email it to the recipient.
+//   Body: { recipient_email: string, message?: string }
+//   On success: stamps quotes.sent_at = NOW(), quotes.sent_to = recipient,
+//   flips quotes.status to 'sent' (regardless of prior status), returns
+//   { ok: true }. 503 if RESEND_API_KEY is missing.
+router.post('/:qid/send', async (req, res) => {
+  const { qid } = req.params;
+  const recipientEmail = (req.body?.recipient_email || '').trim();
+  const customMessage = req.body?.message ?? '';
+  if (!recipientEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+    return res.status(400).json({ error: 'recipient_email required and must be a valid email' });
+  }
+  const q = await loadFullQuote(qid);
+  if (!q) return res.status(404).json({ error: 'not found' });
+  try {
+    const pdfBuffer = await generateQuotePdf(q);
+    await sendQuoteEmail({ quote: q, recipientEmail, customMessage, pdfBuffer });
+    await query(
+      `UPDATE quotes SET status='sent', sent_at=NOW(), sent_to=$1, updated_at=NOW() WHERE id=$2`,
+      [recipientEmail, qid]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    if (e?.code === 'EMAIL_NOT_CONFIGURED') {
+      return res.status(503).json({ error: 'Email service not configured' });
+    }
+    console.error('Email send failed:', e);
+    res.status(500).json({ error: e.message || 'email send failed' });
   }
 });
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
+import SendQuoteEmailModal from './SendQuoteEmailModal.jsx';
 
 const STATUS_TABS = [
   { value: 'all', label: 'All' },
@@ -63,11 +64,36 @@ function TrashButton({ title, onClick }) {
   );
 }
 
+// Email icon button — same hover pattern, used to open the send modal.
+function EnvelopeButton({ title, onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        background: 'transparent',
+        border: 'none',
+        padding: '0.25rem 0.5rem',
+        cursor: 'pointer',
+        fontSize: '1.1rem',
+        lineHeight: 1,
+        color: hover ? '#CC0000' : '#6B7280',
+      }}
+    >✉️</button>
+  );
+}
+
 export default function QuotesList() {
   const navigate = useNavigate();
   const [quotes, setQuotes] = useState([]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [error, setError] = useState('');
+  const [emailQuote, setEmailQuote] = useState(null);
+  const [toast, setToast] = useState('');
 
   async function load() {
     try {
@@ -182,7 +208,11 @@ export default function QuotesList() {
                 <td style={{ color: marginColor(q.margin_pct), fontWeight: 600 }}>{fmtPct(q.margin_pct)}</td>
                 <td>{fmtLongDate(q.created_at)}</td>
                 <td>{q.status}</td>
-                <td>
+                <td onClick={(e) => e.stopPropagation()} style={{ whiteSpace: 'nowrap' }}>
+                  <EnvelopeButton
+                    title="Email quote"
+                    onClick={(e) => { e.stopPropagation(); setEmailQuote(q); }}
+                  />
                   <TrashButton
                     title="Delete quote"
                     onClick={(e) => removeQuote(q, e)}
@@ -192,6 +222,38 @@ export default function QuotesList() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {emailQuote && (
+        <SendQuoteEmailModal
+          quote={emailQuote}
+          onClose={() => setEmailQuote(null)}
+          onSent={(recipient) => {
+            const sentId = emailQuote.id;
+            setEmailQuote(null);
+            setToast(`Quote sent to ${recipient}`);
+            // Optimistically flip this row's status badge.
+            setQuotes((cur) => cur.map((x) => x.id === sentId
+              ? { ...x, status: 'sent', sent_to: recipient, sent_at: new Date().toISOString() }
+              : x));
+            window.setTimeout(() => setToast(''), 4000);
+          }}
+        />
+      )}
+
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          bottom: 24,
+          right: 24,
+          background: '#16A34A',
+          color: 'white',
+          padding: '12px 18px',
+          borderRadius: 8,
+          fontWeight: 600,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.18)',
+          zIndex: 1000,
+        }}>{toast}</div>
       )}
     </div>
   );

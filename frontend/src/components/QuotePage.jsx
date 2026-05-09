@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
+import SendQuoteEmailModal from './SendQuoteEmailModal.jsx';
 
 const PRICE_LEVEL_LABELS = {
   1: 'Level 1 — Retail',
@@ -31,6 +32,8 @@ export default function QuotePage() {
   const [error, setError] = useState('');
   const [adjOpen, setAdjOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [toast, setToast] = useState('');
   const [pdfBusy, setPdfBusy] = useState(false);
 
   // Memoized section grouping — must run on every render (hooks ordering rule),
@@ -122,7 +125,7 @@ export default function QuotePage() {
         <button className="primary" disabled={pdfBusy} onClick={downloadPdf}>
           {pdfBusy ? 'Generating…' : 'Generate PDF'}
         </button>
-        <button className="primary" disabled>Send Email</button>
+        <button className="primary" onClick={() => setEmailOpen(true)}>Send Email</button>
         <button className="secondary" onClick={() => setAddOpen(true)}>+ Add Item</button>
         <button className="secondary" onClick={resetPrices}>Reset to original prices</button>
         <button className="danger" onClick={deleteThisQuote}>Delete quote</button>
@@ -230,6 +233,35 @@ export default function QuotePage() {
           onClose={() => setAddOpen(false)}
           onAdded={async () => { setAddOpen(false); await load(); }}
         />
+      )}
+
+      {emailOpen && (
+        <SendQuoteEmailModal
+          quote={quote}
+          onClose={() => setEmailOpen(false)}
+          onSent={(recipient) => {
+            setEmailOpen(false);
+            setToast(`Quote sent to ${recipient}`);
+            // Optimistic local update so the badge flips without a full reload.
+            setQuote((q) => q ? { ...q, status: 'sent', sent_to: recipient, sent_at: new Date().toISOString() } : q);
+            window.setTimeout(() => setToast(''), 4000);
+          }}
+        />
+      )}
+
+      {toast && (
+        <div style={{
+          position: 'fixed',
+          bottom: 24,
+          right: 24,
+          background: '#16A34A',
+          color: 'white',
+          padding: '12px 18px',
+          borderRadius: 8,
+          fontWeight: 600,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.18)',
+          zIndex: 1000,
+        }}>{toast}</div>
       )}
     </div>
   );

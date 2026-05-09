@@ -217,6 +217,10 @@ export const api = {
   skuSearch: (q, limit = 20) =>
     request(`/sku-search?q=${encodeURIComponent(q)}&limit=${limit}`),
 
+  // Send a quote by email (Resend on the backend, with PDF attached).
+  sendQuoteEmail: (qid, data) =>
+    request(`/quotes/${qid}/send`, { method: 'POST', body: JSON.stringify(data) }),
+
   // Quote PDF — fetches the binary as a blob (auth header is required).
   fetchQuotePdf: async (qid) => {
     const headers = {};
