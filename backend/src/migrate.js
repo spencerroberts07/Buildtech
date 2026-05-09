@@ -499,7 +499,7 @@ const SKU_CATALOG_SEED = [
   { item: null, catalog: '34TGOSB', desc: '4 X 8 - 3/4 T&G ORIENTED ST.BOARD', definition: 'Plywood Sheathing', coverage_value: 32, coverage_unit: 'sq ft', section_notes: 'Subfloor alternative to T&G plywood' },
 
   // CLEAR POLY
-  { item: null, catalog: 'CLARYPOLY', desc: '12 X 300FT CLEAR POLY', definition: 'Plate Poly', coverage_value: 300, coverage_unit: 'linear ft', section_notes: 'Plate poly for interior walls' },
+  { item: null, catalog: '2645840', desc: '12 X 300FT CLEAR POLY', definition: 'Plate Poly', coverage_value: 300, coverage_unit: 'linear ft', section_notes: 'Plate poly for interior walls' },
 ];
 
 // Catalog-number fixups for previously-seeded SKUs that were inserted with null catalog.
@@ -609,6 +609,29 @@ async function seedSkuCatalog() {
     WHERE sc.item_number IS NULL
       AND LOWER(TRIM(sc.description)) = LOWER(TRIM(scf.description))
       AND (scf.cost IS NOT NULL OR scf.price1 IS NOT NULL)
+  `);
+  // Clear-poly fixup: the legacy catalog 'CLARYPOLY' isn't in the warehouse
+  // catalog. The real SKU is catalog 2645840 ("FILM,12" CGSB SF CLR 300SF",
+  // item 2225). Reset the row to the new catalog and pull cost+prices+item
+  // from sku_catalog_full by catalog match (description differs, so the
+  // description-based sync above won't catch it).
+  await pool.query(`
+    UPDATE sku_catalog
+    SET catalog_number = '2645840', item_number = NULL
+    WHERE description = '12 X 300FT CLEAR POLY'
+  `);
+  await pool.query(`
+    UPDATE sku_catalog sc
+    SET
+      cost   = scf.cost,
+      price1 = scf.price1,
+      price2 = scf.price2,
+      price3 = scf.price3,
+      price4 = scf.price4,
+      item_number = scf.item_number
+    FROM sku_catalog_full scf
+    WHERE sc.catalog_number = '2645840'
+      AND scf.catalog_number = '2645840'
   `);
 }
 
