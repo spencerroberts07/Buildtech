@@ -84,41 +84,14 @@ async function lookupPricing(row, skuCurated, skuFull) {
   const catalog = row.catalog_number ? String(row.catalog_number).trim() : null;
   const desc = (row.material_name || '').trim().toLowerCase();
 
-  // [QUOTE-DEBUG] — temporary diagnostic. Remove once pricing lookup confirmed.
-  const dbg = (step, result) => {
-    const v = result ? `cost=${result.cost} price1=${result.price1}` : 'MISS';
-    console.log(`[QUOTE-DEBUG]   ${step}: ${v}`);
-  };
-
-  console.log(`[QUOTE-DEBUG] lookup desc='${row.material_name}' item='${item}' catalog='${catalog}'`);
-
-  let matched = null, source = 'none';
-  const c1 = item ? skuCurated.byItem.get(item) : null;
-  dbg('1) sku_catalog.byItem', c1);
-  if (priced(c1)) { matched = c1; source = 'curated:item'; }
-  else {
-    const c2 = catalog ? skuCurated.byCatalog.get(catalog) : null;
-    dbg('2) sku_catalog.byCatalog', c2);
-    if (priced(c2)) { matched = c2; source = 'curated:catalog'; }
-    else {
-      const c3 = desc ? skuCurated.byDesc.get(desc) : null;
-      dbg('3) sku_catalog.byDesc', c3);
-      if (priced(c3)) { matched = c3; source = 'curated:desc'; }
-      else {
-        const c4 = item ? skuFull.byItem.get(item) : null;
-        dbg('4) sku_catalog_full.byItem', c4);
-        if (priced(c4)) { matched = c4; source = 'full:item'; }
-        else {
-          const c5 = desc ? skuFull.byDesc.get(desc) : null;
-          dbg('5) sku_catalog_full.byDesc', c5);
-          if (priced(c5)) { matched = c5; source = 'full:desc'; }
-        }
-      }
-    }
-  }
+  let matched = null;
+  if (item && priced(skuCurated.byItem.get(item))) matched = skuCurated.byItem.get(item);
+  else if (catalog && priced(skuCurated.byCatalog.get(catalog))) matched = skuCurated.byCatalog.get(catalog);
+  else if (desc && priced(skuCurated.byDesc.get(desc))) matched = skuCurated.byDesc.get(desc);
+  else if (item && priced(skuFull.byItem.get(item))) matched = skuFull.byItem.get(item);
+  else if (desc && priced(skuFull.byDesc.get(desc))) matched = skuFull.byDesc.get(desc);
 
   if (!matched) {
-    console.log(`[QUOTE-DEBUG]   → no match — returning TBD`);
     return {
       cost: null, price1: null, price2: null, price3: null, price4: null,
       item_number: row.item_number, catalog_number: row.catalog_number,
@@ -126,9 +99,7 @@ async function lookupPricing(row, skuCurated, skuFull) {
     };
   }
 
-  const beforeMbf = { cost: matched.cost, price1: matched.price1 };
   matched = applyMbfFallback(matched, row.material_name);
-  console.log(`[QUOTE-DEBUG]   → ${source}: pre-mbf cost=${beforeMbf.cost} p1=${beforeMbf.price1}; post-mbf cost=${matched.cost} p1=${matched.price1}`);
   return {
     cost: matched.cost,
     price1: matched.price1, price2: matched.price2,
@@ -157,10 +128,6 @@ async function buildLookupMaps() {
            is_mbf_converted
     FROM sku_catalog_full
   `)).rows;
-  // [QUOTE-DEBUG] confirm the maps got data and that prices are populated.
-  const curatedPriced = curated.filter((r) => r.cost != null || r.price1 != null).length;
-  const fullPriced = full.filter((r) => r.cost != null || r.price1 != null).length;
-  console.log(`[QUOTE-DEBUG] sku_catalog rows=${curated.length} priced=${curatedPriced}; sku_catalog_full rows=${full.length} priced=${fullPriced}`);
   const toMap = (rows) => {
     const byItem = new Map(), byCatalog = new Map(), byDesc = new Map();
     for (const r of rows) {
@@ -195,18 +162,10 @@ function recomputeQuoteTotals(lineItems, taxRate) {
 
 // Build a fresh set of line items for a project + price level.
 async function buildLineItemsForProject(projectId, priceLevel) {
-  console.log(`[QUOTE-DEBUG] buildLineItemsForProject project=${projectId} priceLevel=${priceLevel}`);
   const matRows = await computeProjectMaterialList(projectId, { includeDeleted: false });
   if (matRows === null) throw new Error('project not found');
-  console.log(`[QUOTE-DEBUG] material list returned ${matRows.length} rows`);
-  // Log a sample of the first 3 non-package rows to confirm item_number / catalog_number are present.
-  const sample = matRows.filter((r) => !r.is_package).slice(0, 3);
-  for (const r of sample) {
-    console.log(`[QUOTE-DEBUG]   matlist sample: '${r.material_name}' item=${r.item_number} catalog=${r.catalog_number}`);
-  }
   const maps = await buildLookupMaps();
   const priceField = PRICE_LEVEL_FIELDS[priceLevel] || 'price1';
-  console.log(`[QUOTE-DEBUG] using priceField='${priceField}'`);
 
   const items = [];
   let sortOrder = 0;
