@@ -224,10 +224,15 @@ const SHIMS_PER_OPENING = 6;
 const SHIMS_PER_BAG = 60;
 const HEADER_BEARING_FT = 0.5;
 
+// Stud-length labels by wall height. 8ft and 9ft walls use precut studs
+// (92-5/8" and 104-5/8" — catalogs 249258P/2410458P for 2x4 and 269258P/
+// 2610458P for 2x6). 10ft walls use standard 10ft lumber instead of a
+// precut: catalog 2410P (2 X 4 X 10) and 2610P (2 X 6 X 10) — those are
+// what the warehouse actually carries for 10ft framing.
 const PRECUT_LADDER = [
   { maxHeightFt: 8,  label: '92-5/8' },
   { maxHeightFt: 9,  label: '104-5/8' },
-  { maxHeightFt: 10, label: '116-5/8' },
+  { maxHeightFt: 10, label: '10' },
 ];
 function precutForHeight(heightFt) {
   for (const r of PRECUT_LADDER) if (heightFt <= r.maxHeightFt) return r.label;
