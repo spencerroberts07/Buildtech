@@ -733,11 +733,11 @@ test('40×50 roof, 6:12 pitch, 24" oc, 1/2 CSP plywood: ~154 sheets, 2 boxes H-c
   const sheath = rolled.find((r) => r.category === 'Sheathing' && r.name === '4 X 8 - 1/2 CSP PLYWOOD');
   assert.equal(sheath.quantity, 154);
   // H-clips: 140 × 2 × 1.05 = 294 / 250 = ceil(1.176) = 2 boxes
-  const clips = rolled.find((r) => r.name === 'H-CLIPS ROOF 250/BOX 20GA 1/2');
+  const clips = rolled.find((r) => r.name === 'CLPS,ROOF 250/BOX 20GA 1/2"');
   assert.equal(clips.quantity, 2);
   assert.equal(clips.unit, 'BX');
   // Hurricane ties: perimeter 180, spacing 2 → 90 ties
-  const ties = rolled.find((r) => r.name === 'HURRICANE TIE H2.5A');
+  const ties = rolled.find((r) => r.name === 'TIE,HURRICANE 18GA ZMAX H1Z');
   assert.equal(ties.quantity, 90);
   // Blocking: 180/12 = 15 boards
   const block = rolled.find((r) => r.name === '2 X 6 X 16 PREMIUM SPRUCE' && r.category === 'Blocking');
@@ -761,10 +761,10 @@ test('16" oc spacing yields 3 clips per sheet (more H-clips, more blocking)', ()
   });
   const rolled = sumMaterials(items);
   // 140 sheets × 3 × 1.05 = 441 / 250 = 2 boxes
-  const clips = rolled.find((r) => r.name === 'H-CLIPS ROOF 250/BOX 20GA 1/2');
+  const clips = rolled.find((r) => r.name === 'CLPS,ROOF 250/BOX 20GA 1/2"');
   assert.equal(clips.quantity, 2);
   // Hurricane ties: 180/(16/12) = 180 × 0.75 = 135 ties
-  const ties = rolled.find((r) => r.name === 'HURRICANE TIE H2.5A');
+  const ties = rolled.find((r) => r.name === 'TIE,HURRICANE 18GA ZMAX H1Z');
   assert.equal(ties.quantity, 135);
 });
 

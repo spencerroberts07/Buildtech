@@ -68,6 +68,61 @@ export function isSuspiciousPerPiece(price) {
   return n < 0.5 || n > 500;
 }
 
+// --- Sheet-goods (MSF) conversion ----------------------------------------
+//
+// Sheet stock priced in MSF (thousand square feet) — plywood, OSB, drywall —
+// also lands in the warehouse files at trading-unit pricing. Convert to
+// per-sheet using the area parsed from the description ("4 X 8" → 32 sq ft).
+
+// Parse "4 X N" sheet width/length into an area (sq ft). Only matches sheets
+// 4 ft wide (the standard) — narrower stock would need its own rule.
+// Returns null if no match, area is 0, or area > 200 (sanity ceiling).
+export function parseSheetArea(description) {
+  if (!description) return null;
+  const m = description.match(/4\s*[Xx]\s*(\d+)/);
+  if (!m) return null;
+  const length = parseInt(m[1], 10);
+  if (!Number.isFinite(length)) return null;
+  const area = 4 * length;
+  if (area === 0 || area > 200) return null;
+  return area;
+}
+
+// Returns true if this row should be treated as MSF-priced sheet stock.
+// Conservative trigger: unit must be MSF (case-insensitive). Description
+// patterns aren't used here — the MSF unit is reliable in the pricebook.
+export function needsMsfConversion(row) {
+  return (row.unit || '').toUpperCase() === 'MSF';
+}
+
+// Convert MSF (price per thousand square feet) → per-sheet for a single row.
+// Same shape as maybeConvertMbf — sets is_mbf_converted=true on success so
+// downstream lookups don't try to re-convert. (The flag name is generic
+// "already converted" by this point; renaming it is a future cleanup.)
+export function maybeConvertMsf(row, onWarn) {
+  if (!needsMsfConversion(row)) return { ...row, is_mbf_converted: false };
+  const area = parseSheetArea(row.description);
+  if (!area) return { ...row, is_mbf_converted: false };
+  const f = (msf) => msf == null ? null : (Number(msf) / 1000) * area;
+  const out = {
+    ...row,
+    cost: f(row.cost),
+    price1: f(row.price1),
+    price2: f(row.price2),
+    price3: f(row.price3),
+    price4: f(row.price4),
+    is_mbf_converted: true,
+  };
+  if (onWarn) {
+    for (const f of ['cost', 'price1', 'price2', 'price3', 'price4']) {
+      if (isSuspiciousPerPiece(out[f])) onWarn(out, f, out[f]);
+    }
+  }
+  return out;
+}
+
+// --- MBF (lumber) conversion ---------------------------------------------
+
 // Convert MBF (price per thousand board feet) → per-piece for a single row.
 // Returns a new row with cost/price1..4 converted, plus is_mbf_converted=true.
 // If dimensions can't be parsed or the row isn't lumber, returns the row with

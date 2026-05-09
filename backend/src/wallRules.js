@@ -598,10 +598,14 @@ export const ROOF_SHEATHING_NAMES = {
   osb_7_16:        '4 X 8 - 7/16 ORIENTED STRAND BOARD',
   plywood_5_8:     '4 X 8 - 5/8 PLYWOOD',
 };
-const HCLIP_NAME = 'H-CLIPS ROOF 250/BOX 20GA 1/2';
+// Material name strings are the wall-rules → sku_catalog match key. They must
+// match the warehouse description exactly so the pricing chain resolves.
+// Catalog 2110673 / item 21010026:
+const HCLIP_NAME = 'CLPS,ROOF 250/BOX 20GA 1/2"';
 const HCLIP_PER_BOX = 250;
 const HCLIP_WASTE = 0.05;
-const HURRICANE_TIE_NAME = 'HURRICANE TIE H2.5A';
+// Catalog 2682200 / item 90730801:
+const HURRICANE_TIE_NAME = 'TIE,HURRICANE 18GA ZMAX H1Z';
 const ROOF_BLOCKING_NAME = '2 X 6 X 16 PREMIUM SPRUCE';
 
 /**

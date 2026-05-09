@@ -659,6 +659,63 @@ async function seedSkuCatalog() {
       AND sc.catalog_number IS NOT NULL
       AND sc.catalog_number = scf.catalog_number
   `);
+
+  // Catalog-pinned fixups: roof plywood (12CSP), hurricane ties (2682200),
+  // and H-clips (2110673). For these the wall-rules name string and the
+  // warehouse description differ enough that description-match misses;
+  // and 2682200 + 2110673 weren't seeded in sku_catalog at all. INSERT
+  // from sku_catalog_full by catalog and on description-conflict update
+  // every field — this both creates missing rows and resyncs existing
+  // ones. wallRules.js uses the warehouse descriptions for these three
+  // so the rules-engine → sku_catalog match still resolves.
+  const pinnedSync = await pool.query(`
+    INSERT INTO sku_catalog
+      (item_number, catalog_number, description, warehouse_description,
+       cost, price1, price2, price3, price4)
+    SELECT scf.item_number, scf.catalog_number, scf.description, scf.description,
+           scf.cost, scf.price1, scf.price2, scf.price3, scf.price4
+    FROM sku_catalog_full scf
+    WHERE scf.catalog_number IN ('12CSP', '2682200', '2110673')
+    ON CONFLICT (description) DO UPDATE SET
+      item_number = EXCLUDED.item_number,
+      catalog_number = EXCLUDED.catalog_number,
+      warehouse_description = EXCLUDED.warehouse_description,
+      cost = EXCLUDED.cost,
+      price1 = EXCLUDED.price1,
+      price2 = EXCLUDED.price2,
+      price3 = EXCLUDED.price3,
+      price4 = EXCLUDED.price4
+  `);
+  if (pinnedSync.rowCount > 0) {
+    console.log(`Catalog-pinned sync: upserted ${pinnedSync.rowCount} sku_catalog rows (12CSP / 2682200 / 2110673)`);
+  }
+
+  // Cleanup: any sku_catalog row whose item_number is set but doesn't exist
+  // in sku_catalog_full was a guess that didn't match the warehouse. Log
+  // them then delete. NULL-item rows are left alone — those are manually
+  // curated entries (Silverboard, etc.) not yet matched to the warehouse.
+  const orphans = (await pool.query(`
+    SELECT item_number, catalog_number, description
+    FROM sku_catalog
+    WHERE item_number IS NOT NULL
+      AND item_number <> ''
+      AND item_number NOT IN (SELECT item_number FROM sku_catalog_full WHERE item_number IS NOT NULL)
+    ORDER BY description
+  `)).rows;
+  if (orphans.length > 0) {
+    console.log(`Removing ${orphans.length} sku_catalog rows whose item_number isn't in sku_catalog_full:`);
+    for (const r of orphans) {
+      console.log(`  ${r.item_number}  ${r.catalog_number}  ${r.description}`);
+    }
+    await pool.query(`
+      DELETE FROM sku_catalog
+      WHERE item_number IS NOT NULL
+        AND item_number <> ''
+        AND item_number NOT IN (SELECT item_number FROM sku_catalog_full WHERE item_number IS NOT NULL)
+    `);
+  } else {
+    console.log('No orphan sku_catalog rows to clean up.');
+  }
 }
 
 async function seedSystemSettings() {

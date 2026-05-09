@@ -11,7 +11,7 @@
 import fs from 'fs';
 import readline from 'readline';
 import { pool } from './db.js';
-import { parseLumberDimensions, maybeConvertMbf } from './lumberPricing.js';
+import { parseLumberDimensions, maybeConvertMbf, maybeConvertMsf } from './lumberPricing.js';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -158,21 +158,34 @@ async function parsePriceFile(path) {
 function mergeRows(costMap, priceMap) {
   // Price file is primary (it has the canonical description/unit/prices).
   // Cost file fills in cost. Items present only in cost file still get a row.
-  // MBF-priced lumber rows (unit=MBF or known lumber description patterns) are
-  // converted to per-piece pricing here.
+  // MBF-priced lumber + MSF-priced sheet stock are converted to per-piece /
+  // per-sheet here. Each row is tried against MBF first, then MSF if MBF
+  // didn't apply — both set is_mbf_converted=true on success.
   const merged = new Map();
-  let mbfConverted = 0;
-  let mbfSkipped = 0;
+  let mbfConverted = 0, mbfSkipped = 0;
+  let msfConverted = 0, msfSkipped = 0;
   const warnings = [];
   const onWarn = (row, field, price) => {
     if (warnings.length < 50) {
       warnings.push(`  ${row.item_number} ${row.description} → ${field}=$${price.toFixed(2)}`);
     }
   };
-  const considered = (raw) => {
+  const isMbfCandidate = (raw) => {
     return (raw.unit || '').toUpperCase() === 'MBF'
       || /PREMIUM SPRUCE|#\s*2\s*&\s*BTR|STD\s*&\s*BTR|SPF\s*KD|SPF\s*\(PC\)|PREMIUM SPF/i.test(raw.description || '');
   };
+  const isMsfCandidate = (raw) => (raw.unit || '').toUpperCase() === 'MSF';
+
+  const convert = (raw) => {
+    const mbfOut = maybeConvertMbf(raw, onWarn);
+    if (mbfOut.is_mbf_converted) { mbfConverted++; return mbfOut; }
+    if (isMbfCandidate(raw)) mbfSkipped++;
+    const msfOut = maybeConvertMsf(raw, onWarn);
+    if (msfOut.is_mbf_converted) { msfConverted++; return msfOut; }
+    if (isMsfCandidate(raw)) msfSkipped++;
+    return msfOut; // already has is_mbf_converted: false
+  };
+
   for (const [item, p] of priceMap) {
     const c = costMap.get(item);
     const raw = {
@@ -185,12 +198,7 @@ function mergeRows(costMap, priceMap) {
       product_group: p.product_group,
       product_section: p.product_section,
     };
-    const isCandidate = considered(raw);
-    const out = maybeConvertMbf(raw, onWarn);
-    if (isCandidate) {
-      if (out.is_mbf_converted) mbfConverted++; else mbfSkipped++;
-    }
-    merged.set(item, out);
+    merged.set(item, convert(raw));
   }
   for (const [item, c] of costMap) {
     if (merged.has(item)) continue;
@@ -204,16 +212,12 @@ function mergeRows(costMap, priceMap) {
       product_group: null,
       product_section: null,
     };
-    const isCandidate = considered(raw);
-    const out = maybeConvertMbf(raw, onWarn);
-    if (isCandidate) {
-      if (out.is_mbf_converted) mbfConverted++; else mbfSkipped++;
-    }
-    merged.set(item, out);
+    merged.set(item, convert(raw));
   }
   console.log(`MBF conversion: ${mbfConverted} converted, ${mbfSkipped} candidate rows skipped (couldn't parse dimensions)`);
+  console.log(`MSF conversion: ${msfConverted} converted, ${msfSkipped} candidate rows skipped (couldn't parse sheet area)`);
   if (warnings.length > 0) {
-    console.log(`Suspicious per-piece prices (${warnings.length} shown):`);
+    console.log(`Suspicious per-piece/sheet prices (${warnings.length} shown):`);
     for (const w of warnings) console.log(w);
   }
   return merged;
