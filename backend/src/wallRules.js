@@ -594,7 +594,9 @@ export const ROOF_PITCH_MULTIPLIER = {
   '12:12': Math.sqrt(2),
 };
 export const ROOF_SHEATHING_NAMES = {
-  plywood_1_2_csp: '4 X 8 - 1/2 CSP PLYWOOD',
+  // Warehouse description for catalog 12CSP / item 2031110 — kept exact so
+  // the rules-engine → sku_catalog → sku_catalog_full pricing chain matches.
+  plywood_1_2_csp: '4 X 8 - 1/2 STD.SPRUCE PLYWOOD',
   osb_7_16:        '4 X 8 - 7/16 ORIENTED STRAND BOARD',
   plywood_5_8:     '4 X 8 - 5/8 PLYWOOD',
 };

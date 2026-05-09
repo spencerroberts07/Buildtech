@@ -730,7 +730,7 @@ test('40×50 roof, 6:12 pitch, 24" oc, 1/2 CSP plywood: ~154 sheets, 2 boxes H-c
   const rolled = sumMaterials(items);
   // Roof area = 40 × 50 × 1.118... × 2 = ~4472 sf
   // ceil(4472/32) = 140, × 1.10 = 154 sheets
-  const sheath = rolled.find((r) => r.category === 'Sheathing' && r.name === '4 X 8 - 1/2 CSP PLYWOOD');
+  const sheath = rolled.find((r) => r.category === 'Sheathing' && r.name === '4 X 8 - 1/2 STD.SPRUCE PLYWOOD');
   assert.equal(sheath.quantity, 154);
   // H-clips: 140 × 2 × 1.05 = 294 / 250 = ceil(1.176) = 2 boxes
   const clips = rolled.find((r) => r.name === 'CLPS,ROOF 250/BOX 20GA 1/2"');
