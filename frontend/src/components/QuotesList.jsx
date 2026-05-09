@@ -17,9 +17,16 @@ const PRICE_LEVEL_LABELS = {
   4: 'Level 4 — Top Volume',
 };
 
+const CAD_FORMATTER = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' });
 function fmtMoney(v) {
   if (v == null) return '—';
-  return `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return CAD_FORMATTER.format(Number(v));
+}
+const LONG_DATE = new Intl.DateTimeFormat('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+function fmtLongDate(d) {
+  if (d == null) return '—';
+  const dt = new Date(d);
+  return Number.isNaN(dt.getTime()) ? '—' : LONG_DATE.format(dt);
 }
 function fmtPct(v) {
   if (v == null) return '—';
@@ -62,11 +69,16 @@ export default function QuotesList() {
 
   async function removeQuote(q, ev) {
     ev.stopPropagation();
-    if (!confirm(`Delete quote ${q.quote_number}? This cannot be undone.`)) return;
+    if (!confirm('Delete this quote? This cannot be undone.')) return;
+    // Optimistic: drop the row immediately. On failure, restore + show error.
+    const prev = quotes;
+    setQuotes((cur) => cur.filter((x) => x.id !== q.id));
     try {
       await api.deleteQuote(q.id);
-      await load();
-    } catch (e) { setError(e.message); }
+    } catch (e) {
+      setQuotes(prev);
+      setError(`Delete failed: ${e.message}`);
+    }
   }
 
   const summary = (() => {
@@ -120,12 +132,13 @@ export default function QuotesList() {
               <th>Project</th>
               <th>Customer</th>
               <th>Estimator</th>
-              <th>Date</th>
+              <th>Valid Until</th>
               <th>Price Level</th>
               <th>Subtotal</th>
               <th>HST</th>
               <th>Grand Total</th>
               <th>Margin %</th>
+              <th>Created</th>
               <th>Status</th>
               <th></th>
             </tr>
@@ -137,12 +150,13 @@ export default function QuotesList() {
                 <td>{q.project_name}</td>
                 <td>{q.customer_name || '—'}</td>
                 <td>{q.created_by || '—'}</td>
-                <td>{new Date(q.created_at).toLocaleDateString()}</td>
+                <td>{q.valid_until ? fmtLongDate(q.valid_until) : '—'}</td>
                 <td>{PRICE_LEVEL_LABELS[q.price_level] || `Level ${q.price_level}`}</td>
                 <td>{fmtMoney(q.subtotal)}</td>
                 <td>{fmtMoney(q.tax_amount)}</td>
                 <td style={{ fontWeight: 700, color: '#CC0000' }}>{fmtMoney(q.total)}</td>
                 <td style={{ color: marginColor(q.margin_pct), fontWeight: 600 }}>{fmtPct(q.margin_pct)}</td>
+                <td>{fmtLongDate(q.created_at)}</td>
                 <td>{q.status}</td>
                 <td>
                   <button
