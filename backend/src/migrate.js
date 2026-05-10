@@ -375,6 +375,12 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price2 NUMERIC`,
   `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price3 NUMERIC`,
   `ALTER TABLE packages ADD COLUMN IF NOT EXISTS price4 NUMERIC`,
+  // Interior doors. swing = LHI/LHO/RHI/RHO (reference/labelling only — does not
+  // affect material quantities). floor_plan_interior_wall_id lets an opening
+  // attach to a floor_plan_interior_walls row instead of a polygon edge or
+  // legacy wall.
+  `ALTER TABLE openings ADD COLUMN IF NOT EXISTS swing TEXT DEFAULT 'RHI'`,
+  `ALTER TABLE openings ADD COLUMN IF NOT EXISTS floor_plan_interior_wall_id INTEGER REFERENCES floor_plan_interior_walls(id) ON DELETE CASCADE`,
 ];
 
 const SKU_CATALOG_SEED = [

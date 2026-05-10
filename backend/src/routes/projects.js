@@ -408,9 +408,11 @@ router.delete('/:id/walls/:wid', async (req, res) => {
 
 // Openings CRUD
 const OPENING_TYPES = ['window', 'door'];
+const OPENING_SWINGS = ['LHI', 'LHO', 'RHI', 'RHO'];
 const OPENING_FIELDS = [
-  'wall_id', 'floor_plan_wall_id', 'type', 'rough_opening_width', 'rough_opening_height',
-  'label', 'position_along_wall',
+  'wall_id', 'floor_plan_wall_id', 'floor_plan_interior_wall_id',
+  'type', 'rough_opening_width', 'rough_opening_height',
+  'label', 'position_along_wall', 'swing',
 ];
 
 router.get('/:id/openings', async (req, res) => {
@@ -425,8 +427,8 @@ router.get('/:id/openings', async (req, res) => {
 router.post('/:id/openings', async (req, res) => {
   const { id } = req.params;
   const b = req.body || {};
-  if (!b.wall_id && !b.floor_plan_wall_id) {
-    return res.status(400).json({ error: 'wall_id or floor_plan_wall_id required' });
+  if (!b.wall_id && !b.floor_plan_wall_id && !b.floor_plan_interior_wall_id) {
+    return res.status(400).json({ error: 'wall_id, floor_plan_wall_id, or floor_plan_interior_wall_id required' });
   }
   if (b.rough_opening_width == null || b.rough_opening_height == null) {
     return res.status(400).json({ error: 'rough_opening_width and rough_opening_height required' });
@@ -435,8 +437,19 @@ router.post('/:id/openings', async (req, res) => {
   if (!OPENING_TYPES.includes(type)) {
     return res.status(400).json({ error: `type must be one of: ${OPENING_TYPES.join(', ')}` });
   }
+  if (b.swing != null && !OPENING_SWINGS.includes(b.swing)) {
+    return res.status(400).json({ error: `swing must be one of: ${OPENING_SWINGS.join(', ')}` });
+  }
   // Validate FK belongs to this project
-  if (b.floor_plan_wall_id) {
+  if (b.floor_plan_interior_wall_id) {
+    const r = await query(
+      `SELECT iw.id FROM floor_plan_interior_walls iw
+       JOIN floor_plans fp ON fp.id = iw.floor_plan_id
+       WHERE iw.id = $1 AND fp.project_id = $2`,
+      [b.floor_plan_interior_wall_id, id]
+    );
+    if (!r.rows[0]) return res.status(400).json({ error: 'floor_plan_interior_wall_id not found in this project' });
+  } else if (b.floor_plan_wall_id) {
     const r = await query(
       `SELECT fpw.id FROM floor_plan_walls fpw
        JOIN floor_plans fp ON fp.id = fpw.floor_plan_id
@@ -450,17 +463,20 @@ router.post('/:id/openings', async (req, res) => {
   }
   const { rows } = await query(
     `INSERT INTO openings
-       (project_id, wall_id, floor_plan_wall_id, type, rough_opening_width, rough_opening_height, label, position_along_wall)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+       (project_id, wall_id, floor_plan_wall_id, floor_plan_interior_wall_id,
+        type, rough_opening_width, rough_opening_height, label, position_along_wall, swing)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
     [
       id,
       b.wall_id ?? null,
       b.floor_plan_wall_id ?? null,
+      b.floor_plan_interior_wall_id ?? null,
       type,
       b.rough_opening_width,
       b.rough_opening_height,
       b.label || null,
       b.position_along_wall ?? 0.5,
+      b.swing || (type === 'door' && b.floor_plan_interior_wall_id ? 'RHI' : null),
     ],
   );
   await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
@@ -475,6 +491,9 @@ router.put('/:id/openings/:oid', async (req, res) => {
     if (f in b) {
       if (f === 'type' && !OPENING_TYPES.includes(b[f])) {
         return res.status(400).json({ error: 'invalid opening type' });
+      }
+      if (f === 'swing' && b[f] != null && b[f] !== '' && !OPENING_SWINGS.includes(b[f])) {
+        return res.status(400).json({ error: 'invalid opening swing' });
       }
       updates[f] = b[f] === '' ? null : b[f];
     }

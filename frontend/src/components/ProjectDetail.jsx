@@ -47,6 +47,7 @@ export default function ProjectDetail() {
   const [openings, setOpenings] = useState([]);
   const [walls, setWalls] = useState([]);
   const [floorPlanWalls, setFloorPlanWalls] = useState([]);
+  const [floorPlanInteriorWalls, setFloorPlanInteriorWalls] = useState([]);
   const [packages, setPackages] = useState([]);
   const [floor, setFloor] = useState(null);
   const [skuCatalog, setSkuCatalog] = useState([]);
@@ -94,9 +95,11 @@ export default function ProjectDetail() {
       if (fps && fps[0]) {
         const full = await api.getFloorPlan(id, fps[0].id);
         setFloorPlanWalls(full.walls || []);
+        setFloorPlanInteriorWalls(full.interior_walls || []);
         setOpenings(full.openings || ops);
       } else {
         setFloorPlanWalls([]);
+        setFloorPlanInteriorWalls([]);
       }
     } catch (e) { setError(e.message); }
   }, [id]);
@@ -447,7 +450,7 @@ export default function ProjectDetail() {
         </div>
       )}
 
-      <OpeningsTable openings={openings} walls={walls} floorPlanWalls={floorPlanWalls} />
+      <OpeningsTable openings={openings} walls={walls} floorPlanWalls={floorPlanWalls} floorPlanInteriorWalls={floorPlanInteriorWalls} />
 
       <h2>Floor</h2>
       <FloorPanel

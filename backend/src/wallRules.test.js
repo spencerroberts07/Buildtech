@@ -645,6 +645,73 @@ test('opening with floor_plan_wall_id deducts area from its edge', () => {
   assert.equal(r.quantity, 22);
 });
 
+console.log('\n=== Interior doors ===');
+const intDoorWall2x4 = {
+  id: 1, x1:0,y1:0,x2:'20',y2:0, wall_type:'interior_2x4', height:null, extra_corner_studs:0,
+};
+const intDoorWall2x6 = {
+  id: 1, x1:0,y1:0,x2:'20',y2:0, wall_type:'interior_2x6', height:null, extra_corner_studs:0,
+};
+const intDoor30 = { wall_id: 1, type: 'door', rough_opening_width: '32', rough_opening_height: '83', wall_type: 'interior_2x4' };
+const intDoor36 = { wall_id: 1, type: 'door', rough_opening_width: '38', rough_opening_height: '83', wall_type: 'interior_2x6' };
+
+test('30" interior door on 2x4 wall: header = 1 board 2x6x16 in Interior Doors section', () => {
+  const items = sumMaterials(computeProjectMaterials([intDoorWall2x4], baseSettings, [intDoor30]));
+  const r = items.find((x) => x.section === 'Interior Doors' && x.category === 'Header' && x.name === '2 X 6 X 16 PREMIUM SPRUCE');
+  assert.ok(r, 'interior door header row missing');
+  assert.equal(r.quantity, 1);
+});
+test('30" interior door on 2x4 wall: jacks = 2 of 2x4x8', () => {
+  const items = sumMaterials(computeProjectMaterials([intDoorWall2x4], baseSettings, [intDoor30]));
+  const r = items.find((x) => x.section === 'Interior Doors' && x.category === 'Jack Studs' && x.name === '2 X 4 X 8 PREMIUM SPRUCE');
+  assert.ok(r, 'interior door jack stud row missing');
+  assert.equal(r.quantity, 2);
+});
+test('30" interior door: shims = 1 bag (combined opening pool)', () => {
+  const items = sumMaterials(computeProjectMaterials([intDoorWall2x4], baseSettings, [intDoor30]));
+  const r = items.find((x) => x.name === 'SHIMS 10/10 BAG OF 60');
+  assert.ok(r, 'shims row missing');
+  assert.equal(r.quantity, 1);
+});
+test('36" interior door on 2x6 wall: jacks = 2 of 2x6x8', () => {
+  const items = sumMaterials(computeProjectMaterials([intDoorWall2x6], baseSettings, [intDoor36]));
+  const r = items.find((x) => x.section === 'Interior Doors' && x.category === 'Jack Studs' && x.name === '2 X 6 X 8 PREMIUM SPRUCE');
+  assert.ok(r, 'interior door 2x6 jack stud row missing');
+  assert.equal(r.quantity, 2);
+});
+test('Two interior doors: shim count = ceil(12/60) = 1 bag', () => {
+  const opens = [intDoor30, { ...intDoor30 }];
+  const items = sumMaterials(computeProjectMaterials([intDoorWall2x4], baseSettings, opens));
+  const r = items.find((x) => x.name === 'SHIMS 10/10 BAG OF 60');
+  assert.equal(r.quantity, 1);
+});
+test('Eleven interior doors: shim count = ceil(66/60) = 2 bags', () => {
+  const opens = Array(11).fill(0).map(() => ({ ...intDoor30 }));
+  const items = sumMaterials(computeProjectMaterials([intDoorWall2x4], baseSettings, opens));
+  const r = items.find((x) => x.name === 'SHIMS 10/10 BAG OF 60');
+  assert.equal(r.quantity, 2);
+});
+test('Drywall deduction: interior 20ft × 9ft wall with 30" door (RO 32x83) reduces drywall', () => {
+  // 20 × 9 = 180 sf each face × 2 = 360 sf, ÷36 (4x9 sheet) = 10, × 1.10 waste = 11
+  // With 32" × 83" opening (~18.44 sf): net 161.56 sf × 2 = 323.11, ÷36 = 8.975 → ceil 9, × 1.10 = 9.9 → ceil 10
+  const noOpen = sumMaterials(computeWallMaterials(intDoorWall2x4, baseSettings));
+  const withDoor = sumMaterials(computeWallMaterials(intDoorWall2x4, baseSettings, [intDoor30]));
+  const dwNo = noOpen.find((x) => x.section === SECTIONS.FINISHINGS && x.name === '4 X 9 - 1/2" DRYWALL');
+  const dwYes = withDoor.find((x) => x.section === SECTIONS.FINISHINGS && x.name === '4 X 9 - 1/2" DRYWALL');
+  assert.ok(dwNo, 'baseline drywall row missing'); assert.equal(dwNo.quantity, 11);
+  assert.ok(dwYes, 'with-door drywall row missing'); assert.equal(dwYes.quantity, 10);
+  // The 32×83 RO area is 18.44 sf — the deduction subtracts that from each face's gross area.
+});
+
+console.log('\n=== Section order: Interior Doors lands after Floor 2 — Finishings, before Roof ===');
+test('SECTION_ORDER includes Interior Doors between Floor 2 — Finishings and Roof', () => {
+  const iIntDoors = SECTION_ORDER.indexOf('Interior Doors');
+  const iF2Fin = SECTION_ORDER.indexOf('Floor 2 — Finishings');
+  const iRoof = SECTION_ORDER.indexOf('Roof');
+  assert.ok(iIntDoors > iF2Fin, `expected Interior Doors after Floor 2 — Finishings (got ${iIntDoors} vs ${iF2Fin})`);
+  assert.ok(iIntDoors < iRoof, `expected Interior Doors before Roof (got ${iIntDoors} vs ${iRoof})`);
+});
+
 console.log('\n=== Multi-storey: section labels ===');
 test('Default level is Floor 1; SECTIONS pin to Floor 1', () => {
   assert.equal(SECTIONS.EXTERIOR_WALLS, 'Floor 1 — Exterior Walls');

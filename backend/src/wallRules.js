@@ -30,12 +30,14 @@ const BASE_SECTIONS = {
 };
 const SOLO_SECTIONS = {
   EXTERIOR_INSULATION: 'Exterior Insulation',
+  INTERIOR_DOORS: 'Interior Doors',
   ROOF: 'Roof',
   PACKAGES: 'Packages',
 };
 
 export function sectionFor(baseKey, level = LEVELS.FLOOR1) {
   if (baseKey === 'EXTERIOR_INSULATION') return SOLO_SECTIONS.EXTERIOR_INSULATION;
+  if (baseKey === 'INTERIOR_DOORS') return SOLO_SECTIONS.INTERIOR_DOORS;
   if (baseKey === 'ROOF') return SOLO_SECTIONS.ROOF;
   if (baseKey === 'PACKAGES') return SOLO_SECTIONS.PACKAGES;
   const base = BASE_SECTIONS[baseKey];
@@ -74,6 +76,10 @@ function buildSectionOrder() {
       sectionFor('FLOOR', level),
     );
   }
+  // Interior Doors is a project-wide rollup that lands after all per-floor
+  // sections (so headers/jacks across all floors appear together) and before
+  // the standalone Roof / Packages buckets.
+  out.push(SOLO_SECTIONS.INTERIOR_DOORS);
   out.push(SOLO_SECTIONS.ROOF);
   out.push(SOLO_SECTIONS.PACKAGES);
   return out;
@@ -202,6 +208,13 @@ const SILL_GASKET_35_NAME = 'GASKET,SILL 3/16 WHITE 3.5X82';
 const BRACING_NAME = '2 X 4 X 16 PREMIUM SPRUCE';
 const PLATE_POLY_NAME = '12 X 300FT CLEAR POLY';
 const HEADER_LUMBER_NAME = '2 X 10 X 16 PREMIUM SPRUCE';
+// Interior doors use a doubled 2x6x16 header instead of the heavier 2x10
+// used on exterior openings, since they don't carry roof/floor loads.
+const INTERIOR_DOOR_HEADER_NAME = '2 X 6 X 16 PREMIUM SPRUCE';
+// Interior door rough opening height is 83" (~6'11"). Jacks are sold as
+// pre-cut 8ft studs (catalog 2408P / 2608P) — the framer trims to fit.
+const INTERIOR_DOOR_JACK_2X4_NAME = '2 X 4 X 8 PREMIUM SPRUCE';
+const INTERIOR_DOOR_JACK_2X6_NAME = '2 X 6 X 8 PREMIUM SPRUCE';
 const SHIMS_NAME = 'SHIMS 10/10 BAG OF 60';
 const VAPOUR_BARRIER_NAME = "VAPOUR BARRIER 6M X1500 8'6\"";
 const VAPOUR_BARRIER_ROLL_SF = 1500;
@@ -490,15 +503,35 @@ export function computeProjectMaterials(walls, settings, openings = [], level = 
   }
 
   for (const o of openings) {
-    const sec = o.type === 'door' ? doorSection : winSection;
     const widthFt = Number(o.rough_opening_width) / 12;
     const heightFt = Number(o.rough_opening_height) / 12;
+    const wt = o.wall_type;
+    const isInteriorDoor =
+      o.type === 'door' && (wt === 'interior_2x4' || wt === 'interior_2x6');
+
+    if (isInteriorDoor) {
+      // Interior doors roll up into a single project-wide "Interior Doors"
+      // section with a 2x6 doubled header and pre-cut 8ft jacks (catalog
+      // 2408P / 2608P) — never per-floor Doors/Windows.
+      const headerBoards = Math.max(1, Math.ceil((widthFt + HEADER_BEARING_FT) / 16 * 2));
+      items.push({
+        section: SOLO_SECTIONS.INTERIOR_DOORS, category: CATEGORIES.HEADER,
+        name: INTERIOR_DOOR_HEADER_NAME, unit: 'each', quantity: headerBoards,
+      });
+      items.push({
+        section: SOLO_SECTIONS.INTERIOR_DOORS, category: CATEGORIES.JACK_STUDS,
+        name: wt === 'interior_2x6' ? INTERIOR_DOOR_JACK_2X6_NAME : INTERIOR_DOOR_JACK_2X4_NAME,
+        unit: 'each', quantity: 2,
+      });
+      continue;
+    }
+
+    const sec = o.type === 'door' ? doorSection : winSection;
     const headerBoards = Math.max(1, Math.ceil((widthFt + HEADER_BEARING_FT) / 16 * 2));
     items.push({ section: sec, category: CATEGORIES.HEADER,
       name: HEADER_LUMBER_NAME, unit: 'each', quantity: headerBoards });
 
     const heightRoundedFt = Math.round(heightFt);
-    const wt = o.wall_type;
     const jackDim =
       wt === 'exterior_2x6' || wt === 'interior_2x6' ? '2 X 6'
       : wt === 'interior_2x4' ? '2 X 4'

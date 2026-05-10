@@ -57,9 +57,43 @@ export const DOOR_PRESETS = [
   { label: "6'0 x 8'0 Double", w: 72, h: 96 },
   { label: 'Custom', w: null, h: null },
 ];
-const presetsFor = (type) => (type === 'door' ? DOOR_PRESETS : WINDOW_PRESETS);
+// Interior pre-hung door presets — RO width = nominal door + 2", height = 83"
+// (catalogued by nominal opening width in inches).
+export const INTERIOR_DOOR_PRESETS = [
+  { label: '18" door', w: 20, h: 83 },
+  { label: '20" door', w: 22, h: 83 },
+  { label: '22" door', w: 24, h: 83 },
+  { label: '24" door', w: 26, h: 83 },
+  { label: '26" door', w: 28, h: 83 },
+  { label: '28" door', w: 30, h: 83 },
+  { label: '30" door', w: 32, h: 83 },
+  { label: '32" door', w: 34, h: 83 },
+  { label: '34" door', w: 36, h: 83 },
+  { label: '36" door', w: 38, h: 83 },
+  { label: 'Custom', w: null, h: null },
+];
+export const SWING_OPTIONS = [
+  { value: 'LHI', label: 'LHI — Left Hand Inswing' },
+  { value: 'LHO', label: 'LHO — Left Hand Outswing' },
+  { value: 'RHI', label: 'RHI — Right Hand Inswing' },
+  { value: 'RHO', label: 'RHO — Right Hand Outswing' },
+];
+const presetsFor = (type, isInterior = false) => {
+  if (type === 'door') return isInterior ? INTERIOR_DOOR_PRESETS : DOOR_PRESETS;
+  return WINDOW_PRESETS;
+};
 function findPresetLabel(type, w, h) {
-  const list = presetsFor(type);
+  // Doors may be matched against either preset list — interior or exterior —
+  // since the underlying RO sizes overlap (e.g. 32×83). Try interior first
+  // because it carries the more readable "30\" door" labelling.
+  if (type === 'door') {
+    const intHit = INTERIOR_DOOR_PRESETS.find((p) => p.w === Number(w) && p.h === Number(h));
+    if (intHit && intHit.label !== 'Custom') return intHit.label;
+    const extHit = DOOR_PRESETS.find((p) => p.w === Number(w) && p.h === Number(h));
+    if (extHit && extHit.label !== 'Custom') return extHit.label;
+    return 'Custom';
+  }
+  const list = WINDOW_PRESETS;
   const m = list.find((p) => p.w === Number(w) && p.h === Number(h));
   return m ? m.label : 'Custom';
 }
@@ -479,12 +513,21 @@ function PolygonSketch({
     return best ? best.idx : null;
   }
   function openingScreenMeta(opening) {
-    const wall = walls.find((w) => w.id === opening.floor_plan_wall_id);
-    if (!wall) return null;
-    const idx = Number(wall.wall_index);
-    if (idx < 0 || idx >= corners.length) return null;
-    const a = corners[idx];
-    const b = corners[(idx + 1) % corners.length];
+    let a, b, wall;
+    if (opening.floor_plan_interior_wall_id != null) {
+      const iw = interiorWalls.find((w) => w.id === opening.floor_plan_interior_wall_id);
+      if (!iw) return null;
+      a = { x: Number(iw.x1), y: Number(iw.y1) };
+      b = { x: Number(iw.x2), y: Number(iw.y2) };
+      wall = iw;
+    } else {
+      wall = walls.find((w) => w.id === opening.floor_plan_wall_id);
+      if (!wall) return null;
+      const idx = Number(wall.wall_index);
+      if (idx < 0 || idx >= corners.length) return null;
+      a = corners[idx];
+      b = corners[(idx + 1) % corners.length];
+    }
     const t = num(opening.position_along_wall) || 0.5;
     const wx = a.x + t * (b.x - a.x);
     const wy = a.y + t * (b.y - a.y);
@@ -493,7 +536,17 @@ function PolygonSketch({
     const bS = worldToScreen(b.x, b.y, viewport);
     const len = Math.hypot(bS.x - aS.x, bS.y - aS.y) || 1;
     const ux = (bS.x - aS.x) / len, uy = (bS.y - aS.y) / len;
-    return { sc, ux, uy, nx: -uy, ny: ux, wallIdx: idx };
+    // Per-opening marker dimensions: scale rough opening width to canvas pixels
+    // using the wall's pixels-per-world-unit, then convert through scaleFtPerGrid.
+    // Thickness reflects the wall's nominal stud size (3.5" / 5.5"). Both have
+    // visibility floors so they remain clickable at extreme zoom-out.
+    const wallWorldLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const pxPerWorldUnit = len / wallWorldLen;
+    const roWidthFt = (Number(opening.rough_opening_width) || 0) / 12;
+    const studInches = wall && wall.wall_type === 'interior_2x4' ? 3.5 : 5.5;
+    const halfL = Math.max(8, (roWidthFt / scaleFtPerGrid) * pxPerWorldUnit / 2);
+    const halfT = Math.max(3, (studInches / 12 / scaleFtPerGrid) * pxPerWorldUnit / 2);
+    return { sc, ux, uy, nx: -uy, ny: ux, wallIdx: wall?.wall_index, halfL, halfT, wall, a, b };
   }
   function hitTestOpening(sx, sy) {
     for (const o of openings) {
@@ -502,7 +555,7 @@ function PolygonSketch({
       const dx = sx - meta.sc.x, dy = sy - meta.sc.y;
       const along = dx * meta.ux + dy * meta.uy;
       const across = dx * meta.nx + dy * meta.ny;
-      if (Math.abs(along) <= OPENING_MARKER_HALF_LEN_PX && Math.abs(across) <= OPENING_MARKER_HALF_THICK_PX + 4) {
+      if (Math.abs(along) <= meta.halfL && Math.abs(across) <= meta.halfT + 4) {
         return o;
       }
     }
@@ -1341,13 +1394,17 @@ function PolygonSketch({
 
   async function createOpening(payload) {
     try {
-      const wall = walls.find((w) => Number(w.wall_index) === payload.wall_index);
-      if (!wall) return;
-      const created = await api.createOpening(projectId, {
-        ...payload,
-        floor_plan_wall_id: wall.id,
-        wall_id: undefined,
-      });
+      let body;
+      if (payload.interiorWallId != null) {
+        const { interiorWallId, ...rest } = payload;
+        body = { ...rest, floor_plan_interior_wall_id: interiorWallId, wall_id: undefined };
+      } else {
+        const wall = walls.find((w) => Number(w.wall_index) === payload.wall_index);
+        if (!wall) return;
+        const { wall_index, ...rest } = payload;
+        body = { ...rest, floor_plan_wall_id: wall.id, wall_id: undefined };
+      }
+      const created = await api.createOpening(projectId, body);
       setOpenings((cur) => [...cur, created]);
       onMaterialsChanged?.();
       onOpeningsChanged?.();
@@ -1374,12 +1431,14 @@ function PolygonSketch({
         pushUndo('delete opening', async () => {
           const recreated = await api.createOpening(projectId, {
             floor_plan_wall_id: orig.floor_plan_wall_id,
+            floor_plan_interior_wall_id: orig.floor_plan_interior_wall_id,
             wall_id: orig.wall_id ?? undefined,
             type: orig.type,
             rough_opening_width: orig.rough_opening_width,
             rough_opening_height: orig.rough_opening_height,
             label: orig.label,
             position_along_wall: orig.position_along_wall,
+            swing: orig.swing,
           });
           setOpenings((cur) => [...cur, recreated]);
           onMaterialsChanged?.(); onOpeningsChanged?.();
@@ -1558,6 +1617,7 @@ function PolygonSketch({
         {selectedOpening && (
           <OpeningEditor
             opening={selectedOpening}
+            isInterior={selectedOpening.floor_plan_interior_wall_id != null}
             onChange={(patch, opts) => updateOpening(selectedOpening.id, patch, opts)}
             onDelete={deleteSelectedOpening}
             onClose={() => setSelectedOpeningId(null)}
@@ -1580,9 +1640,12 @@ function PolygonSketch({
           <InteriorWallEditor
             wall={selectedInteriorWall}
             scale={scaleFtPerGrid}
+            wallOpenings={openings.filter((o) => o.floor_plan_interior_wall_id === selectedInteriorWall.id)}
             onChange={(patch, opts) => updateInteriorWallById(selectedInteriorWall.id, patch, opts)}
             onDelete={() => deleteInteriorWall(selectedInteriorWall.id)}
             onClose={() => setSelectedInteriorWallId(null)}
+            onAddOpening={(payload) => createOpening({ ...payload, interiorWallId: selectedInteriorWall.id })}
+            onSelectOpening={(oid) => { setSelectedOpeningId(oid); setSelectedInteriorWallId(null); }}
           />
         )}
         {!selectedOpening && !selectedWall && !selectedInteriorWall && selectedCorner && (
@@ -1913,9 +1976,36 @@ function interiorTypeKey(wall) {
   return wall.wall_type === 'interior_2x6' ? 'interior_2x6_plumbing' : 'interior_2x4';
 }
 
-function InteriorWallEditor({ wall, scale, onChange, onDelete, onClose }) {
+function InteriorWallEditor({ wall, scale, wallOpenings = [], onChange, onDelete, onClose, onAddOpening, onSelectOpening }) {
   const lengthFt = Math.hypot(Number(wall.x2) - Number(wall.x1), Number(wall.y2) - Number(wall.y1)) * scale;
   const currentKey = interiorTypeKey(wall);
+  const [showAdd, setShowAdd] = useState(false);
+  const [addPresetIdx, setAddPresetIdx] = useState(6); // 30" door — most common
+  const [addLabel, setAddLabel] = useState('');
+  const [addCustomW, setAddCustomW] = useState('');
+  const [addCustomH, setAddCustomH] = useState('');
+  const [addSwing, setAddSwing] = useState('RHI');
+  const presets = INTERIOR_DOOR_PRESETS;
+  const isCustom = presets[addPresetIdx]?.label === 'Custom';
+  function resetAdd() {
+    setShowAdd(false); setAddPresetIdx(6); setAddLabel('');
+    setAddCustomW(''); setAddCustomH(''); setAddSwing('RHI');
+  }
+  async function submitAdd() {
+    const preset = presets[addPresetIdx];
+    let w, h;
+    if (preset.label === 'Custom') {
+      w = Number(addCustomW); h = Number(addCustomH);
+      if (!w || !h) return;
+    } else { w = preset.w; h = preset.h; }
+    await onAddOpening({
+      type: 'door',
+      rough_opening_width: w, rough_opening_height: h,
+      label: addLabel.trim() || null,
+      swing: addSwing,
+    });
+    resetAdd();
+  }
   return (
     <div className="wall-editor card">
       <div className="row" style={{ marginBottom: '0.5rem' }}>
@@ -1963,6 +2053,55 @@ function InteriorWallEditor({ wall, scale, onChange, onDelete, onClose }) {
         Wall sits on concrete
       </label>
 
+      <hr style={{ margin: '1rem 0', border: 'none', borderTop: '1px solid #E0E0E0' }} />
+
+      <div className="row" style={{ marginBottom: '0.5rem' }}>
+        <strong style={{ flex: 1 }}>Doors ({wallOpenings.length})</strong>
+        {!showAdd && onAddOpening && (
+          <button className="primary" style={{ flex: '0 0 auto', padding: '0.3rem 0.6rem' }} onClick={() => setShowAdd(true)}>+ Add Door</button>
+        )}
+      </div>
+      {wallOpenings.length > 0 && (
+        <ul style={{ paddingLeft: '1.2rem', margin: 0 }}>
+          {wallOpenings.map((o) => {
+            const preset = findPresetLabel(o.type, o.rough_opening_width, o.rough_opening_height);
+            return (
+              <li key={o.id} style={{ fontSize: '0.85rem', marginBottom: '0.2rem' }}>
+                <a href="#" onClick={(e) => { e.preventDefault(); onSelectOpening?.(o.id); }}>
+                  🚪 {o.label || preset} {o.swing ? `(${o.swing})` : ''}
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {showAdd && (
+        <div style={{ marginTop: '0.75rem', padding: '0.75rem', background: '#FAFAFA', borderRadius: 4 }}>
+          <label>Preset size</label>
+          <select value={addPresetIdx} onChange={(e) => setAddPresetIdx(Number(e.target.value))}>
+            {presets.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
+          </select>
+          {isCustom && (
+            <div className="row">
+              <div><label>RO width (in)</label>
+                <input type="number" value={addCustomW} onChange={(e) => setAddCustomW(e.target.value)} /></div>
+              <div><label>RO height (in)</label>
+                <input type="number" value={addCustomH} onChange={(e) => setAddCustomH(e.target.value)} /></div>
+            </div>
+          )}
+          <label>Swing</label>
+          <select value={addSwing} onChange={(e) => setAddSwing(e.target.value)}>
+            {SWING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <label>Label (optional)</label>
+          <input value={addLabel} onChange={(e) => setAddLabel(e.target.value)} placeholder="e.g. Bedroom 1" />
+          <div className="row" style={{ marginTop: '0.5rem' }}>
+            <button className="primary" style={{ flex: 1 }} onClick={submitAdd}>Add</button>
+            <button className="secondary" style={{ flex: 1 }} onClick={resetAdd}>Cancel</button>
+          </div>
+        </div>
+      )}
+
       <p className="muted" style={{ marginTop: '0.75rem', marginBottom: 0, fontSize: '0.85rem' }}>
         Drag either endpoint on the canvas to move it. Press Delete or Backspace to remove this wall.
       </p>
@@ -1971,8 +2110,11 @@ function InteriorWallEditor({ wall, scale, onChange, onDelete, onClose }) {
   );
 }
 
-function OpeningEditor({ opening, onChange, onDelete, onClose }) {
-  const presets = presetsFor(opening.type);
+function OpeningEditor({ opening, isInterior = false, onChange, onDelete, onClose }) {
+  // Interior wall openings are doors only and use the interior preset list
+  // (RO width = nominal door + 2"). The Type dropdown is hidden so the user
+  // can't accidentally turn an interior door into a window.
+  const presets = presetsFor(opening.type, isInterior);
   const currentPresetIdx = presets.findIndex(
     (p) => p.w === Number(opening.rough_opening_width) && p.h === Number(opening.rough_opening_height),
   );
@@ -1988,19 +2130,25 @@ function OpeningEditor({ opening, onChange, onDelete, onClose }) {
   return (
     <div className="wall-editor card">
       <div className="row" style={{ marginBottom: '0.5rem' }}>
-        <strong style={{ flex: 1 }}>{opening.type === 'door' ? 'Door' : 'Window'} #{opening.id}</strong>
+        <strong style={{ flex: 1 }}>
+          {isInterior ? 'Interior Door' : (opening.type === 'door' ? 'Door' : 'Window')} #{opening.id}
+        </strong>
         <button className="secondary" style={{ flex: '0 0 auto', padding: '0.25rem 0.5rem' }} onClick={onClose}>×</button>
       </div>
-      <label>Type</label>
-      <select value={opening.type}
-        onChange={(e) => {
-          const newType = e.target.value;
-          const first = presetsFor(newType)[0];
-          onChange({ type: newType, rough_opening_width: first.w, rough_opening_height: first.h }, { immediate: true });
-        }}>
-        <option value="window">Window</option>
-        <option value="door">Door</option>
-      </select>
+      {!isInterior && (
+        <>
+          <label>Type</label>
+          <select value={opening.type}
+            onChange={(e) => {
+              const newType = e.target.value;
+              const first = presetsFor(newType, false)[0];
+              onChange({ type: newType, rough_opening_width: first.w, rough_opening_height: first.h }, { immediate: true });
+            }}>
+            <option value="window">Window</option>
+            <option value="door">Door</option>
+          </select>
+        </>
+      )}
       <label>Preset size</label>
       <select value={presetIdx} onChange={(e) => selectPreset(Number(e.target.value))}>
         {presets.map((p, i) => <option key={p.label} value={i}>{p.label}</option>)}
@@ -2015,9 +2163,18 @@ function OpeningEditor({ opening, onChange, onDelete, onClose }) {
               onChange={(e) => onChange({ rough_opening_height: e.target.value })} /></div>
         </div>
       )}
+      {isInterior && (
+        <>
+          <label>Swing</label>
+          <select value={opening.swing || 'RHI'}
+            onChange={(e) => onChange({ swing: e.target.value }, { immediate: true })}>
+            {SWING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </>
+      )}
       <label>Label (optional)</label>
       <input value={opening.label ?? ''}
-        onChange={(e) => onChange({ label: e.target.value || null })} placeholder="e.g. Front door" />
+        onChange={(e) => onChange({ label: e.target.value || null })} placeholder={isInterior ? 'e.g. Bedroom 1' : 'e.g. Front door'} />
       <button className="danger" style={{ marginTop: '1rem', width: '100%' }} onClick={onDelete}>Delete this opening</button>
     </div>
   );
@@ -2402,7 +2559,7 @@ function drawScene(ctx, size, vp, S) {
 
   // Openings
   for (const o of openings) {
-    drawOpening(ctx, o, walls, corners, vp, o.id === selectedOpeningId);
+    drawOpening(ctx, o, walls, interiorWalls, corners, vp, o.id === selectedOpeningId, scale);
   }
 
   // Hover marker (placing mode)
@@ -2587,13 +2744,22 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawOpening(ctx, opening, walls, corners, vp, selected) {
-  const wall = walls.find((w) => w.id === opening.floor_plan_wall_id);
-  if (!wall) return;
-  const idx = Number(wall.wall_index);
-  if (idx < 0 || idx >= corners.length) return;
-  const a = corners[idx];
-  const b = corners[(idx + 1) % corners.length];
+function drawOpening(ctx, opening, walls, interiorWalls, corners, vp, selected, scaleFtPerGrid = 1) {
+  let a, b, wall;
+  if (opening.floor_plan_interior_wall_id != null) {
+    const iw = (interiorWalls || []).find((w) => w.id === opening.floor_plan_interior_wall_id);
+    if (!iw) return;
+    a = { x: Number(iw.x1), y: Number(iw.y1) };
+    b = { x: Number(iw.x2), y: Number(iw.y2) };
+    wall = iw;
+  } else {
+    wall = walls.find((w) => w.id === opening.floor_plan_wall_id);
+    if (!wall) return;
+    const idx = Number(wall.wall_index);
+    if (idx < 0 || idx >= corners.length) return;
+    a = corners[idx];
+    b = corners[(idx + 1) % corners.length];
+  }
   const t = num(opening.position_along_wall) || 0.5;
   const wx = a.x + t * (b.x - a.x);
   const wy = a.y + t * (b.y - a.y);
@@ -2603,7 +2769,16 @@ function drawOpening(ctx, opening, walls, corners, vp, selected) {
   const len = Math.hypot(bS.x - aS.x, bS.y - aS.y) || 1;
   const ux = (bS.x - aS.x) / len, uy = (bS.y - aS.y) / len;
   const nx = -uy, ny = ux;
-  const halfL = OPENING_MARKER_HALF_LEN_PX, halfT = OPENING_MARKER_HALF_THICK_PX;
+  // Per-opening marker dimensions: rough opening width and wall stud size,
+  // both converted from real-world inches to canvas pixels via the wall's
+  // px-per-world ratio. Visibility floors keep the marker clickable at
+  // extreme zoom-out.
+  const wallWorldLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const pxPerWorldUnit = len / wallWorldLen;
+  const roWidthFt = (Number(opening.rough_opening_width) || 0) / 12;
+  const studInches = wall.wall_type === 'interior_2x4' ? 3.5 : 5.5;
+  const halfL = Math.max(8, (roWidthFt / scaleFtPerGrid) * pxPerWorldUnit / 2);
+  const halfT = Math.max(3, (studInches / 12 / scaleFtPerGrid) * pxPerWorldUnit / 2);
   const fill = opening.type === 'door' ? DOOR_COLOR : WINDOW_COLOR;
   const corners4 = [
     [sc.x - halfL * ux + halfT * nx, sc.y - halfL * uy + halfT * ny],

@@ -86,10 +86,20 @@ export async function computeProjectMaterialList(projectId, options = {}) {
         'SELECT * FROM floor_plan_interior_walls WHERE floor_plan_id = $1 ORDER BY id',
         [fp.id]
       )).rows;
+      // Interior door openings live on floor_plan_interior_walls, not
+      // floor_plan_walls. Pull them with a separate join and then key them
+      // off the synthetic `iw-${id}` wall id used below.
+      const intOpenings = (await query(
+        `SELECT o.* FROM openings o
+         JOIN floor_plan_interior_walls iw ON iw.id = o.floor_plan_interior_wall_id
+         WHERE iw.floor_plan_id = $1`,
+        [fp.id]
+      )).rows;
 
       const polyWalls = buildFloorPlanWalls(fp.corners || [], fpWalls);
       const interiorWalls = fpInteriorRows.map((r) => ({
         id: `iw-${r.id}`,
+        _interiorRowId: r.id,
         x1: Number(r.x1), y1: Number(r.y1), x2: Number(r.x2), y2: Number(r.y2),
         wall_type: r.wall_type,
         height: r.height != null ? Number(r.height) : null,
@@ -108,10 +118,23 @@ export async function computeProjectMaterialList(projectId, options = {}) {
         if (!openingsByWallId.has(key)) openingsByWallId.set(key, []);
         openingsByWallId.get(key).push(o);
       }
-      const enrichedOpenings = fpOpenings.map((o) => {
-        const w = polyWalls.find((x) => x.id === o.floor_plan_wall_id);
-        return { ...o, wall_id: o.floor_plan_wall_id, wall_type: w?.wall_type };
-      });
+      const intWallByRowId = new Map(interiorWalls.map((w) => [w._interiorRowId, w]));
+      for (const o of intOpenings) {
+        const iw = intWallByRowId.get(o.floor_plan_interior_wall_id);
+        if (!iw) continue;
+        if (!openingsByWallId.has(iw.id)) openingsByWallId.set(iw.id, []);
+        openingsByWallId.get(iw.id).push(o);
+      }
+      const enrichedOpenings = [
+        ...fpOpenings.map((o) => {
+          const w = polyWalls.find((x) => x.id === o.floor_plan_wall_id);
+          return { ...o, wall_id: o.floor_plan_wall_id, wall_type: w?.wall_type };
+        }),
+        ...intOpenings.map((o) => {
+          const iw = intWallByRowId.get(o.floor_plan_interior_wall_id);
+          return { ...o, wall_id: iw?.id, wall_type: iw?.wall_type };
+        }),
+      ];
 
       for (const w of allWalls) {
         wallItems.push(...computeWallMaterials(w, lvlSettings, openingsByWallId.get(w.id) || [], fp.level));
