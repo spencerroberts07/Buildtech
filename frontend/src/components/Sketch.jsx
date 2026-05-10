@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../api.js';
+import RoofSketch from './RoofSketch.jsx';
 
 const BASE_GRID_PX = 20;
 const MIN_ZOOM = 0.2;
@@ -252,7 +253,13 @@ export default function Sketch({
     return (
       <div>
         <LevelTabs tabs={visibleLevels} active={activeLevel} onChange={setActiveLevel} />
-        <RoofPanel projectId={projectId} onMaterialsChanged={onMaterialsChanged} />
+        <RoofSketch
+          projectId={projectId}
+          projectSettings={projectSettings}
+          onMaterialsChanged={onMaterialsChanged}
+          onProjectSettingsChange={onProjectSettingsChange}
+          refetchProjectSettings={refetchProjectSettings}
+        />
       </div>
     );
   }
@@ -1663,161 +1670,6 @@ function PolygonSketch({
           </div>
         )}
       </div>
-      {error && <p className="error">{error}</p>}
-    </div>
-  );
-}
-
-// ---------- Roof panel (rectangle drawing + form) ----------
-const PITCH_OPTIONS = ['4:12', '6:12', '8:12', '10:12', '12:12'];
-const SHEATHING_TYPE_OPTIONS = [
-  { value: 'plywood_1_2_csp', label: '1/2" CSP Plywood' },
-  { value: 'osb_7_16',        label: '7/16" OSB' },
-  { value: 'plywood_5_8',     label: '5/8" Plywood' },
-];
-const SPACING_OPTIONS = [
-  { value: '24_oc', label: '24" o.c.' },
-  { value: '16_oc', label: '16" o.c.' },
-];
-const SIDE_OPTIONS = [
-  { value: 'gable', label: 'Gable' },
-  { value: 'hip', label: 'Hip' },
-];
-
-function RoofPanel({ projectId, onMaterialsChanged }) {
-  const [roof, setRoof] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  // Draft for new roof (when none exists)
-  const [draftWidth, setDraftWidth] = useState('');
-  const [draftDepth, setDraftDepth] = useState('');
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getRoof(projectId)
-      .then((r) => { if (!cancelled) { setRoof(r); setLoading(false); } })
-      .catch((e) => { if (!cancelled) { setError(e.message); setLoading(false); } });
-    return () => { cancelled = true; };
-  }, [projectId]);
-
-  async function createRoof() {
-    if (!draftWidth || !draftDepth) return;
-    try {
-      const created = await api.createRoof(projectId, {
-        width_ft: Number(draftWidth), depth_ft: Number(draftDepth),
-        pitch: '6:12', sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc',
-      });
-      setRoof(created);
-      onMaterialsChanged?.();
-    } catch (e) { setError(e.message); }
-  }
-
-  const saveTimer = useRef(null);
-  function patchRoof(patch) {
-    setRoof((cur) => ({ ...cur, ...patch }));
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      try {
-        const updated = await api.updateRoof(projectId, patch);
-        setRoof(updated);
-        onMaterialsChanged?.();
-      } catch (e) { setError(e.message); }
-    }, 400);
-  }
-
-  async function deleteRoof() {
-    if (!confirm('Delete the roof? This removes all roof materials from the takeoff.')) return;
-    try {
-      await api.deleteRoof(projectId);
-      setRoof(null);
-      onMaterialsChanged?.();
-    } catch (e) { setError(e.message); }
-  }
-
-  if (loading) return <p className="muted">Loading roof…</p>;
-
-  if (!roof) {
-    return (
-      <div className="card">
-        <p className="muted" style={{ marginTop: 0 }}>
-          No roof yet. Enter the roof footprint dimensions below.
-        </p>
-        <div className="row">
-          <div>
-            <label>Width (ft)</label>
-            <input type="number" value={draftWidth} onChange={(e) => setDraftWidth(e.target.value)} placeholder="40" />
-          </div>
-          <div>
-            <label>Depth (ft)</label>
-            <input type="number" value={draftDepth} onChange={(e) => setDraftDepth(e.target.value)} placeholder="50" />
-          </div>
-          <div style={{ flex: '0 0 auto' }}>
-            <button className="primary" onClick={createRoof}>Create roof</button>
-          </div>
-        </div>
-        {error && <p className="error">{error}</p>}
-      </div>
-    );
-  }
-
-  return (
-    <div className="card">
-      <div className="row" style={{ marginBottom: '0.5rem' }}>
-        <strong style={{ flex: 1 }}>
-          Roof: {Number(roof.width_ft)} × {Number(roof.depth_ft)} ft, {roof.pitch} pitch · {SHEATHING_TYPE_OPTIONS.find((o) => o.value === roof.sheathing_type)?.label || roof.sheathing_type}
-        </strong>
-        <button className="danger" style={{ flex: '0 0 auto', padding: '0.3rem 0.7rem' }} onClick={deleteRoof}>Delete roof</button>
-      </div>
-      <div className="row">
-        <div>
-          <label>Width (ft)</label>
-          <input type="number" value={roof.width_ft ?? ''} onChange={(e) => patchRoof({ width_ft: e.target.value })} />
-        </div>
-        <div>
-          <label>Depth (ft)</label>
-          <input type="number" value={roof.depth_ft ?? ''} onChange={(e) => patchRoof({ depth_ft: e.target.value })} />
-        </div>
-        <div>
-          <label>Pitch</label>
-          <select value={roof.pitch} onChange={(e) => patchRoof({ pitch: e.target.value })}>
-            {PITCH_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </div>
-      </div>
-      <div className="row">
-        <div>
-          <label>Sheathing</label>
-          <select value={roof.sheathing_type} onChange={(e) => patchRoof({ sheathing_type: e.target.value })}>
-            {SHEATHING_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </div>
-        <div>
-          <label>Rafter / truss spacing</label>
-          <select value={roof.rafter_spacing} onChange={(e) => patchRoof({ rafter_spacing: e.target.value })}>
-            {SPACING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </div>
-      </div>
-      <div className="row">
-        {['north', 'south', 'east', 'west'].map((side) => (
-          <div key={side}>
-            <label>{side[0].toUpperCase() + side.slice(1)} side</label>
-            <select
-              value={roof[`${side}_side`]}
-              onChange={(e) => patchRoof({ [`${side}_side`]: e.target.value })}
-            >
-              {SIDE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-        ))}
-      </div>
-      <label>Notes</label>
-      <textarea
-        value={roof.notes ?? ''}
-        onChange={(e) => patchRoof({ notes: e.target.value })}
-        rows={2}
-        style={{ resize: 'vertical' }}
-      />
       {error && <p className="error">{error}</p>}
     </div>
   );
