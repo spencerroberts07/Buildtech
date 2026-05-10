@@ -2813,8 +2813,10 @@ function drawOpening(ctx, opening, walls, interiorWalls, corners, vp, selected, 
     const swing = opening.swing || 'RHI';
     const isLeft = swing === 'LHI' || swing === 'LHO';
     const isInswing = swing === 'LHI' || swing === 'RHI';
-    const hingeX = sc.x + (isLeft ? -halfL : halfL) * ux;
-    const hingeY = sc.y + (isLeft ? -halfL : halfL) * uy;
+    // "Left hand" puts the hinge on the +ux side of the wall direction so
+    // it reads naturally for someone facing the door from the inswing side.
+    const hingeX = sc.x + (isLeft ? halfL : -halfL) * ux;
+    const hingeY = sc.y + (isLeft ? halfL : -halfL) * uy;
     const sxv = isInswing ? nx : -nx;
     const syv = isInswing ? ny : -ny;
     const radius = halfL * 2;
@@ -2826,8 +2828,8 @@ function drawOpening(ctx, opening, walls, interiorWalls, corners, vp, selected, 
     ctx.moveTo(hingeX, hingeY);
     ctx.lineTo(hingeX + radius * sxv, hingeY + radius * syv);
     ctx.stroke();
-    const wallDirX = isLeft ? ux : -ux;
-    const wallDirY = isLeft ? uy : -uy;
+    const wallDirX = isLeft ? -ux : ux;
+    const wallDirY = isLeft ? -uy : uy;
     const startAngle = Math.atan2(wallDirY, wallDirX);
     const endAngle = Math.atan2(syv, sxv);
     let delta = endAngle - startAngle;
