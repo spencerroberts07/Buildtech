@@ -121,6 +121,17 @@ export const api = {
   deleteRoof: (projectId) =>
     request(`/projects/${projectId}/roof`, { method: 'DELETE' }),
 
+  // Polygon-based roof sections (replacing the simple width/depth roofs row).
+  listRoofSections: (projectId) => request(`/projects/${projectId}/roof-sections`),
+  createRoofSection: (projectId, data) =>
+    request(`/projects/${projectId}/roof-sections`, { method: 'POST', body: JSON.stringify(data) }),
+  updateRoofSection: (projectId, sid, data) =>
+    request(`/projects/${projectId}/roof-sections/${sid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteRoofSection: (projectId, sid) =>
+    request(`/projects/${projectId}/roof-sections/${sid}`, { method: 'DELETE' }),
+  updateRoofSectionEdge: (projectId, sid, eid, data) =>
+    request(`/projects/${projectId}/roof-sections/${sid}/edges/${eid}`, { method: 'PUT', body: JSON.stringify(data) }),
+
   listSkuCatalog: () => request('/sku-catalog'),
 
   listCustomers: () => request('/customers'),

@@ -278,6 +278,28 @@ CREATE TABLE IF NOT EXISTS quotes (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS roof_sections (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  section_name TEXT NOT NULL DEFAULT 'Main Roof',
+  corners JSONB NOT NULL DEFAULT '[]'::jsonb,
+  pitch TEXT NOT NULL DEFAULT '6:12',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS roof_sections_project_id_idx ON roof_sections(project_id);
+
+CREATE TABLE IF NOT EXISTS roof_section_edges (
+  id SERIAL PRIMARY KEY,
+  section_id INTEGER NOT NULL REFERENCES roof_sections(id) ON DELETE CASCADE,
+  edge_index INTEGER NOT NULL,
+  end_type TEXT NOT NULL DEFAULT 'gable',
+  overhang_ft NUMERIC NOT NULL DEFAULT 1.5
+);
+
+CREATE INDEX IF NOT EXISTS roof_section_edges_section_id_idx ON roof_section_edges(section_id);
+
 CREATE TABLE IF NOT EXISTS quote_line_items (
   id SERIAL PRIMARY KEY,
   quote_id INTEGER NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,

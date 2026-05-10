@@ -1028,6 +1028,196 @@ router.delete('/:id/roof', async (req, res) => {
   res.status(204).end();
 });
 
+// ---------------- Roof sections (polygon-based roof model) ----------------
+const ROOF_PITCH_VALUES = ['3:12', '4:12', '5:12', '6:12', '7:12', '8:12', '9:12', '10:12', '12:12'];
+const ROOF_END_TYPES = ['gable', 'hip'];
+
+async function loadSectionWithEdges(projectId, sectionId) {
+  const sec = (await query(
+    'SELECT * FROM roof_sections WHERE id = $1 AND project_id = $2',
+    [sectionId, projectId]
+  )).rows[0];
+  if (!sec) return null;
+  const edges = (await query(
+    'SELECT * FROM roof_section_edges WHERE section_id = $1 ORDER BY edge_index',
+    [sectionId]
+  )).rows;
+  return { ...sec, edges };
+}
+
+async function ensureEdgesForCorners(client, sectionId, corners) {
+  // Insert one default edge per corner if missing; trim if there are too many.
+  // Each corner i defines edge i (corners[i] → corners[(i+1) % len]). Existing
+  // rows are kept (so end_type / overhang_ft survive corner drags), only the
+  // count is reconciled here.
+  const cornerCount = Array.isArray(corners) ? corners.length : 0;
+  const existing = (await client.query(
+    'SELECT edge_index FROM roof_section_edges WHERE section_id = $1 ORDER BY edge_index',
+    [sectionId]
+  )).rows.map((r) => Number(r.edge_index));
+  for (let i = 0; i < cornerCount; i++) {
+    if (!existing.includes(i)) {
+      await client.query(
+        `INSERT INTO roof_section_edges (section_id, edge_index, end_type, overhang_ft)
+         VALUES ($1, $2, 'gable', 1.5)`,
+        [sectionId, i]
+      );
+    }
+  }
+  if (existing.length > cornerCount) {
+    await client.query(
+      'DELETE FROM roof_section_edges WHERE section_id = $1 AND edge_index >= $2',
+      [sectionId, cornerCount]
+    );
+  }
+}
+
+router.get('/:id/roof-sections', async (req, res) => {
+  const { id } = req.params;
+  const sections = (await query(
+    'SELECT * FROM roof_sections WHERE project_id = $1 ORDER BY id',
+    [id]
+  )).rows;
+  if (sections.length === 0) return res.json([]);
+  const allEdges = (await query(
+    `SELECT e.* FROM roof_section_edges e
+     JOIN roof_sections s ON s.id = e.section_id
+     WHERE s.project_id = $1
+     ORDER BY e.section_id, e.edge_index`,
+    [id]
+  )).rows;
+  const edgesBySection = new Map();
+  for (const e of allEdges) {
+    if (!edgesBySection.has(e.section_id)) edgesBySection.set(e.section_id, []);
+    edgesBySection.get(e.section_id).push(e);
+  }
+  res.json(sections.map((s) => ({ ...s, edges: edgesBySection.get(s.id) || [] })));
+});
+
+router.post('/:id/roof-sections', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const corners = Array.isArray(b.corners) ? b.corners : [];
+  const pitch = b.pitch || '6:12';
+  if (!ROOF_PITCH_VALUES.includes(pitch)) {
+    return res.status(400).json({ error: `pitch must be one of: ${ROOF_PITCH_VALUES.join(', ')}` });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const ins = await client.query(
+      `INSERT INTO roof_sections (project_id, section_name, corners, pitch)
+       VALUES ($1, $2, $3::jsonb, $4) RETURNING *`,
+      [id, b.section_name || 'Main Roof', JSON.stringify(corners), pitch]
+    );
+    const sec = ins.rows[0];
+    await ensureEdgesForCorners(client, sec.id, corners);
+    await client.query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    const full = await loadSectionWithEdges(id, sec.id);
+    res.status(201).json(full);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+router.put('/:id/roof-sections/:sid', async (req, res) => {
+  const { id, sid } = req.params;
+  const b = req.body || {};
+  if ('pitch' in b && !ROOF_PITCH_VALUES.includes(b.pitch)) {
+    return res.status(400).json({ error: 'invalid pitch' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = (await client.query(
+      'SELECT * FROM roof_sections WHERE id = $1 AND project_id = $2 FOR UPDATE',
+      [sid, id]
+    )).rows[0];
+    if (!cur) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'not found' });
+    }
+    const updates = [];
+    const values = [];
+    let p = 1;
+    if ('section_name' in b) { updates.push(`section_name = $${p++}`); values.push(b.section_name || 'Main Roof'); }
+    if ('pitch' in b) { updates.push(`pitch = $${p++}`); values.push(b.pitch); }
+    if ('corners' in b) { updates.push(`corners = $${p++}::jsonb`); values.push(JSON.stringify(b.corners || [])); }
+    if (updates.length > 0) {
+      values.push(sid);
+      await client.query(
+        `UPDATE roof_sections SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${p}`,
+        values
+      );
+    }
+    if ('corners' in b) {
+      await ensureEdgesForCorners(client, sid, b.corners || []);
+    }
+    await client.query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    const full = await loadSectionWithEdges(id, sid);
+    res.json(full);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete('/:id/roof-sections/:sid', async (req, res) => {
+  const { id, sid } = req.params;
+  const r = await query(
+    'DELETE FROM roof_sections WHERE id = $1 AND project_id = $2',
+    [sid, id]
+  );
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
+router.put('/:id/roof-sections/:sid/edges/:eid', async (req, res) => {
+  const { id, sid, eid } = req.params;
+  const b = req.body || {};
+  if ('end_type' in b && !ROOF_END_TYPES.includes(b.end_type)) {
+    return res.status(400).json({ error: `end_type must be one of: ${ROOF_END_TYPES.join(', ')}` });
+  }
+  if ('overhang_ft' in b) {
+    const v = Number(b.overhang_ft);
+    if (!Number.isFinite(v) || v < 0 || v > 4) {
+      return res.status(400).json({ error: 'overhang_ft must be 0–4' });
+    }
+  }
+  // Make sure the edge belongs to a section owned by this project.
+  const ownership = await query(
+    `SELECT e.id FROM roof_section_edges e
+     JOIN roof_sections s ON s.id = e.section_id
+     WHERE e.id = $1 AND s.id = $2 AND s.project_id = $3`,
+    [eid, sid, id]
+  );
+  if (!ownership.rows[0]) return res.status(404).json({ error: 'edge not found' });
+  const updates = [];
+  const values = [];
+  let p = 1;
+  if ('end_type' in b) { updates.push(`end_type = $${p++}`); values.push(b.end_type); }
+  if ('overhang_ft' in b) { updates.push(`overhang_ft = $${p++}`); values.push(Number(b.overhang_ft)); }
+  if (updates.length === 0) {
+    const { rows } = await query('SELECT * FROM roof_section_edges WHERE id = $1', [eid]);
+    return res.json(rows[0]);
+  }
+  values.push(eid);
+  const { rows } = await query(
+    `UPDATE roof_section_edges SET ${updates.join(', ')} WHERE id = $${p} RETURNING *`,
+    values
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
 // ---------------- Packages (line items quoted separately) ----------------
 const PACKAGE_FIELDS = ['name', 'package_type', 'notes', 'quantity', 'unit', 'cost', 'price1', 'price2', 'price3', 'price4'];
 
