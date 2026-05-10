@@ -159,11 +159,40 @@ export async function computeProjectMaterialList(projectId, options = {}) {
     wallItems.push(...computeProjectMaterials(walls, settings, enrichedOpenings));
   }
 
-  // Roof items
+  // Roof items: polygon-based sections drive area/ridge/hip/valley math.
+  // The old roofs row is kept around solely for project-level settings
+  // (sheathing_type, rafter_spacing). Projects predating the polygon roof
+  // will have a roofs row but no roof_sections — they show no roof items
+  // until the user redraws in the new tool.
   const roofRow = (await query(
-    'SELECT * FROM roofs WHERE project_id = $1 ORDER BY id LIMIT 1', [id]
-  )).rows[0];
-  if (roofRow) wallItems.push(...computeRoofMaterials(roofRow));
+    'SELECT sheathing_type, rafter_spacing FROM roofs WHERE project_id = $1 ORDER BY id LIMIT 1',
+    [id]
+  )).rows[0] || {};
+  const roofSections = (await query(
+    'SELECT * FROM roof_sections WHERE project_id = $1 ORDER BY id', [id]
+  )).rows;
+  if (roofSections.length > 0) {
+    const roofEdges = (await query(
+      `SELECT e.* FROM roof_section_edges e
+       JOIN roof_sections s ON s.id = e.section_id
+       WHERE s.project_id = $1
+       ORDER BY e.section_id, e.edge_index`,
+      [id]
+    )).rows;
+    const edgesBySection = new Map();
+    for (const e of roofEdges) {
+      if (!edgesBySection.has(e.section_id)) edgesBySection.set(e.section_id, []);
+      edgesBySection.get(e.section_id).push(e);
+    }
+    const sectionsWithEdges = roofSections.map((s) => ({
+      ...s,
+      edges: edgesBySection.get(s.id) || [],
+    }));
+    wallItems.push(...computeRoofMaterials(sectionsWithEdges, {
+      sheathing_type: roofRow.sheathing_type,
+      rafter_spacing: roofRow.rafter_spacing,
+    }));
+  }
 
   // Floor items (subfloor + adhesive + ceiling drywall)
   const floorRow = (await query(

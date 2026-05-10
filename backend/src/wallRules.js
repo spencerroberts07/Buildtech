@@ -624,13 +624,23 @@ export function computeFloorPlanMaterials(corners, floorPlanWalls, settings, ope
 }
 
 // ---------- roof ----------
+// Pitch multipliers map horizontal projection to slope length:
+//   sqrt(1 + (rise/run)^2). Hardcoded to spec values for readability.
 export const ROOF_PITCH_MULTIPLIER = {
-  '4:12':  Math.sqrt(1 + (4 / 12) ** 2),
-  '6:12':  Math.sqrt(1 + (6 / 12) ** 2),
-  '8:12':  Math.sqrt(1 + (8 / 12) ** 2),
-  '10:12': Math.sqrt(1 + (10 / 12) ** 2),
-  '12:12': Math.sqrt(2),
+  '3:12':  1.031,
+  '4:12':  1.054,
+  '5:12':  1.083,
+  '6:12':  1.118,
+  '7:12':  1.158,
+  '8:12':  1.202,
+  '9:12':  1.250,
+  '10:12': 1.302,
+  '12:12': 1.414,
 };
+function pitchRiseRun(pitch) {
+  const m = /^(\d+):12$/.exec(pitch || '');
+  return m ? Number(m[1]) / 12 : 0.5;
+}
 export const ROOF_SHEATHING_NAMES = {
   // Warehouse description for catalog 12CSP / item 2031110 — kept exact so
   // the rules-engine → sku_catalog → sku_catalog_full pricing chain matches.
@@ -648,51 +658,243 @@ const HCLIP_WASTE = 0.05;
 const HURRICANE_TIE_NAME = 'TIE,HURRICANE 18GA ZMAX H1Z';
 const ROOF_BLOCKING_NAME = '2 X 6 X 16 PREMIUM SPRUCE';
 
+// ---------- roof geometry helpers ----------
+
+// Shoelace area of a simple polygon (always non-negative).
+function polygonArea(corners) {
+  if (!Array.isArray(corners) || corners.length < 3) return 0;
+  let a = 0;
+  for (let i = 0; i < corners.length; i++) {
+    const p = corners[i];
+    const q = corners[(i + 1) % corners.length];
+    a += Number(p.x) * Number(q.y) - Number(q.x) * Number(p.y);
+  }
+  return Math.abs(a) / 2;
+}
+
+// Intersection of two infinite lines (each given by two points). Returns null
+// if parallel (within epsilon). Used to find the new corner where two
+// outward-offset edges meet.
+function lineIntersection(x1, y1, x2, y2, x3, y3, x4, y4) {
+  const d = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(d) < 1e-9) return null;
+  const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / d;
+  return { x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1) };
+}
+
+// Push every edge outward by its per-edge overhang and return the new corner
+// list. Outward direction is determined from polygon winding (CCW vs CW). For
+// concave shapes with large overhangs the offset edges may self-intersect; we
+// accept that as best-effort for estimating purposes — the area computation
+// downstream still uses Shoelace on whatever comes out.
+export function expandRoofPolygon(corners, edgeOverhangs) {
+  const n = Array.isArray(corners) ? corners.length : 0;
+  if (n < 3) return Array.isArray(corners) ? corners.slice() : [];
+  let signed = 0;
+  for (let i = 0; i < n; i++) {
+    const p = corners[i];
+    const q = corners[(i + 1) % n];
+    signed += Number(p.x) * Number(q.y) - Number(q.x) * Number(p.y);
+  }
+  const ccw = signed > 0;
+  const offsetLines = [];
+  for (let i = 0; i < n; i++) {
+    const a = corners[i];
+    const b = corners[(i + 1) % n];
+    const ax = Number(a.x), ay = Number(a.y);
+    const bx = Number(b.x), by = Number(b.y);
+    const dx = bx - ax, dy = by - ay;
+    const len = Math.hypot(dx, dy) || 1;
+    // For a CCW polygon, outward normal is (dy, -dx)/len; reverse for CW.
+    const nx = ccw ? dy / len : -dy / len;
+    const ny = ccw ? -dx / len : dx / len;
+    const offset = Number(edgeOverhangs?.[i] ?? 0);
+    offsetLines.push({
+      ax: ax + nx * offset, ay: ay + ny * offset,
+      bx: bx + nx * offset, by: by + ny * offset,
+    });
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const prev = offsetLines[(i - 1 + n) % n];
+    const cur = offsetLines[i];
+    const p = lineIntersection(prev.ax, prev.ay, prev.bx, prev.by, cur.ax, cur.ay, cur.bx, cur.by);
+    out.push(p || { x: corners[i].x, y: corners[i].y });
+  }
+  return out;
+}
+
+// Per-section geometry rollup: footprint area (with overhangs), surface area,
+// ridge length, hip length, eave perimeter (non-gable edges), rake perimeter
+// (gable edges), and an eave-weighted average overhang for soffit width.
+//
+// Ridge / hip math approximates the section as a rectangular bounding box of
+// its expanded polygon. For a pure gable rectangle the ridge equals the long
+// dimension; each hip end consumes half the short dimension from the ridge
+// and contributes two hip rafters. Irregular polygons inherit the same
+// approximation through their bounding box — within 2-3% per spec.
+export function roofSectionGeometry(section) {
+  const corners = (section && section.corners) || [];
+  const edges = (section && section.edges) || [];
+  const overhangs = [];
+  for (let i = 0; i < corners.length; i++) {
+    const e = edges.find((ee) => Number(ee.edge_index) === i);
+    overhangs.push(e ? Number(e.overhang_ft) : 1.5);
+  }
+  const expanded = expandRoofPolygon(corners, overhangs);
+  const footprintArea = polygonArea(expanded);
+  const pitch = section?.pitch || '6:12';
+  const mult = ROOF_PITCH_MULTIPLIER[pitch] ?? ROOF_PITCH_MULTIPLIER['6:12'];
+  const surfaceArea = footprintArea * mult;
+  if (footprintArea <= 0) {
+    return {
+      footprintArea: 0, surfaceArea: 0,
+      ridgeLength: 0, hipLength: 0,
+      eavePerimeter: 0, rakePerimeter: 0,
+      avgOverhang: 1.5,
+    };
+  }
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of expanded) {
+    minX = Math.min(minX, Number(c.x)); maxX = Math.max(maxX, Number(c.x));
+    minY = Math.min(minY, Number(c.y)); maxY = Math.max(maxY, Number(c.y));
+  }
+  const w = Math.max(0, maxX - minX);
+  const h = Math.max(0, maxY - minY);
+  const longDim = Math.max(w, h);
+  const shortDim = Math.min(w, h);
+  let hipCount = 0;
+  for (const e of edges) if (e.end_type === 'hip') hipCount++;
+  const ridgeLength = Math.max(0, longDim - hipCount * (shortDim / 2));
+  const riseRun = pitchRiseRun(pitch);
+  const ridgeHeight = (shortDim / 2) * riseRun;
+  const hipRafterLen = Math.sqrt((shortDim / 2) ** 2 + ridgeHeight ** 2);
+  const hipLength = hipCount * 2 * hipRafterLen;
+
+  let eavePerimeter = 0;
+  let rakePerimeter = 0;
+  let weightedOverhangSum = 0;
+  for (let i = 0; i < expanded.length; i++) {
+    const a = expanded[i];
+    const b = expanded[(i + 1) % expanded.length];
+    const len = Math.hypot(Number(b.x) - Number(a.x), Number(b.y) - Number(a.y));
+    const e = edges.find((ee) => Number(ee.edge_index) === i);
+    const endType = e?.end_type || 'gable';
+    if (endType === 'gable') {
+      rakePerimeter += len;
+    } else {
+      eavePerimeter += len;
+      weightedOverhangSum += len * (overhangs[i] ?? 1.5);
+    }
+  }
+  const avgOverhang = eavePerimeter > 0 ? weightedOverhangSum / eavePerimeter : 1.5;
+  return {
+    footprintArea, surfaceArea, ridgeLength, hipLength,
+    eavePerimeter, rakePerimeter, avgOverhang,
+  };
+}
+
+// Best-effort valley length between two sections. Looks for an edge of A and
+// an edge of B that are close-and-parallel (within 1ft, within ~5°) and
+// returns the shorter expanded edge length × valley factor of the steeper
+// pitch. Coarse, but adequate for an estimate. Returns 0 if no overlap found.
+function valleyBetween(secA, secB) {
+  const ea = expandRoofPolygon(secA.corners || [], (secA.edges || []).map((e, i) => Number(e.overhang_ft ?? 1.5)));
+  const eb = expandRoofPolygon(secB.corners || [], (secB.edges || []).map((e, i) => Number(e.overhang_ft ?? 1.5)));
+  if (ea.length < 3 || eb.length < 3) return 0;
+  const pitchA = pitchRiseRun(secA?.pitch || '6:12');
+  const pitchB = pitchRiseRun(secB?.pitch || '6:12');
+  const steeper = Math.max(pitchA, pitchB);
+  const valleyFactor = Math.sqrt(1 + 2 * steeper * steeper);
+  const PARALLEL_DOT = Math.cos(5 * Math.PI / 180);
+  const NEAR_FT = 1.0;
+  let total = 0;
+  for (let i = 0; i < ea.length; i++) {
+    const a1 = ea[i], a2 = ea[(i + 1) % ea.length];
+    const adx = a2.x - a1.x, ady = a2.y - a1.y;
+    const aLen = Math.hypot(adx, ady) || 1;
+    for (let j = 0; j < eb.length; j++) {
+      const b1 = eb[j], b2 = eb[(j + 1) % eb.length];
+      const bdx = b2.x - b1.x, bdy = b2.y - b1.y;
+      const bLen = Math.hypot(bdx, bdy) || 1;
+      const dot = Math.abs((adx * bdx + ady * bdy) / (aLen * bLen));
+      if (dot < PARALLEL_DOT) continue;
+      // Distance from b1 to line A.
+      const cross = ((b1.x - a1.x) * (-ady) + (b1.y - a1.y) * (adx)) / aLen;
+      if (Math.abs(cross) > NEAR_FT) continue;
+      // Roughly overlapping → take the shorter edge as the overlap length.
+      total += Math.min(aLen, bLen) * valleyFactor;
+    }
+  }
+  return total;
+}
+
 /**
- * Compute roof material rows: sheathing, H-clips, blocking, hurricane ties.
- * roofRecord: { width_ft, depth_ft, pitch, sheathing_type, rafter_spacing }
- * Per spec: roof_area = width × depth × pitch_multiplier × 2 (both sides).
+ * Compute roof material rows from a list of polygon roof sections.
+ * roofSections: [{ corners, pitch, edges: [{edge_index, end_type, overhang_ft}, ...] }, ...]
+ * projectSettings: { sheathing_type, rafter_spacing }
+ *
+ * Surface area follows footprint × pitch_multiplier (no extra ×2 — the
+ * multiplier already maps horizontal projection to total slope area).
  */
-export function computeRoofMaterials(roofRecord) {
-  if (!roofRecord) return [];
-  const w = num(roofRecord.width_ft) ?? 0;
-  const d = num(roofRecord.depth_ft) ?? 0;
-  if (w <= 0 || d <= 0) return [];
-  const pitch = roofRecord.pitch || '6:12';
-  const mult = ROOF_PITCH_MULTIPLIER[pitch];
-  if (!mult) throw new Error(`Unknown roof pitch: ${pitch}`);
-  const sheathingKey = roofRecord.sheathing_type || 'plywood_1_2_csp';
+export function computeRoofMaterials(roofSections, projectSettings = {}) {
+  const sections = Array.isArray(roofSections) ? roofSections : [];
+  if (sections.length === 0) return [];
+
+  const sheathingKey = projectSettings.sheathing_type || 'plywood_1_2_csp';
   const sheathingName = ROOF_SHEATHING_NAMES[sheathingKey];
   if (!sheathingName) throw new Error(`Unknown roof sheathing type: ${sheathingKey}`);
-  const spacing = roofRecord.rafter_spacing || '24_oc';
-  const spacingInches = spacing === '16_oc' ? 16 : 24;
+  const spacing = projectSettings.rafter_spacing || '24_oc';
+  const spacingFt = spacing === '16_oc' ? 16 / 12 : 24 / 12;
   const clipsPerSheet = spacing === '16_oc' ? 3 : 2;
 
-  const roofArea = w * d * mult * 2;
-  const sheets = Math.ceil(roofArea / 32) * (1 + SHEET_WASTE);
-  // For H-clips, compute clip count from CEIL'd sheet count (whole sheets only).
+  let totalSurface = 0;
+  let totalRidge = 0;
+  let totalHip = 0;
+  let totalEave = 0;
+  for (const sec of sections) {
+    const g = roofSectionGeometry(sec);
+    totalSurface += g.surfaceArea;
+    totalRidge += g.ridgeLength;
+    totalHip += g.hipLength;
+    totalEave += g.eavePerimeter;
+  }
+
+  let totalValley = 0;
+  for (let i = 0; i < sections.length; i++) {
+    for (let j = i + 1; j < sections.length; j++) {
+      totalValley += valleyBetween(sections[i], sections[j]);
+    }
+  }
+
+  if (totalSurface <= 0) return [];
+
+  const sheets = Math.ceil(totalSurface / 32) * (1 + SHEET_WASTE);
   const wholeSheets = Math.ceil(sheets - 1e-9);
   const hclipBoxes = Math.ceil((wholeSheets * clipsPerSheet * (1 + HCLIP_WASTE)) / HCLIP_PER_BOX);
+  const hurricaneTies = Math.ceil(totalEave / spacingFt);
 
-  // Perimeter & blocking & hurricane ties
-  const perimeter = 2 * (w + d);
-  // Blocking: one 2 X 6 X 16 board yields ~6-8 short blocks for 24" / 16" spacing → covers
-  // ~12 ft of perimeter for 24" oc, ~8 ft for 16" oc. Approximation.
-  const blockingFtPerBoard = spacing === '16_oc' ? 8 : 12;
-  const blockingBoards = Math.ceil(perimeter / blockingFtPerBoard);
-  // Hurricane ties: 1 per rafter location
-  const hurricaneTies = Math.ceil(perimeter / (spacingInches / 12));
-
-  return [
+  const items = [
     { section: SOLO_SECTIONS.ROOF, category: CATEGORIES.SHEATHING,
       name: sheathingName, unit: 'EA', quantity: sheets },
     { section: SOLO_SECTIONS.ROOF, category: 'Hardware',
       name: HCLIP_NAME, unit: 'BX', quantity: hclipBoxes },
-    { section: SOLO_SECTIONS.ROOF, category: 'Blocking',
-      name: ROOF_BLOCKING_NAME, unit: 'EA', quantity: blockingBoards },
     { section: SOLO_SECTIONS.ROOF, category: 'Hardware',
       name: HURRICANE_TIE_NAME, unit: 'EA', quantity: hurricaneTies },
   ];
+  if (totalRidge > 0) {
+    items.push({ section: SOLO_SECTIONS.ROOF, category: 'Ridge',
+      name: 'RIDGE (linear feet)', unit: 'LF', quantity: totalRidge });
+  }
+  if (totalValley > 0) {
+    items.push({ section: SOLO_SECTIONS.ROOF, category: 'Valley',
+      name: 'VALLEY FLASHING (linear feet)', unit: 'LF', quantity: totalValley });
+  }
+  if (totalHip > 0) {
+    items.push({ section: SOLO_SECTIONS.ROOF, category: 'Hip',
+      name: 'HIP FLASHING (linear feet)', unit: 'LF', quantity: totalHip });
+  }
+  return items;
 }
 
 // ---------- rollup ----------

@@ -785,54 +785,90 @@ test('Floor 1 + Floor 2 stacked rectangles produce per-level prefixes (no mergin
   assert.ok(f2Silver, 'expected silverboard in Floor 2 Exterior Walls');
 });
 
-console.log('\n=== Roof materials (Session 3) ===');
-test('Pitch multipliers match spec: 6:12 ≈ 1.118', () => {
-  assert.ok(Math.abs(ROOF_PITCH_MULTIPLIER['6:12'] - Math.sqrt(1 + 0.25)) < 1e-9);
+console.log('\n=== Roof: pitch multiplier table ===');
+test('Pitch multipliers match spec table: 6:12 = 1.118, 12:12 = 1.414', () => {
+  assert.equal(ROOF_PITCH_MULTIPLIER['6:12'], 1.118);
+  assert.equal(ROOF_PITCH_MULTIPLIER['12:12'], 1.414);
 });
-test('40×50 roof, 6:12 pitch, 24" oc, 1/2 CSP plywood: ~154 sheets, 2 boxes H-clips', () => {
-  const items = computeRoofMaterials({
-    width_ft: 40, depth_ft: 50, pitch: '6:12',
-    sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc',
-  });
-  const rolled = sumMaterials(items);
-  // Roof area = 40 × 50 × 1.118... × 2 = ~4472 sf
-  // ceil(4472/32) = 140, × 1.10 = 154 sheets
-  const sheath = rolled.find((r) => r.category === 'Sheathing' && r.name === '4 X 8 - 1/2 STD.SPRUCE PLYWOOD');
-  assert.equal(sheath.quantity, 154);
-  // H-clips: 140 × 2 × 1.05 = 294 / 250 = ceil(1.176) = 2 boxes
-  const clips = rolled.find((r) => r.name === 'CLPS,ROOF 250/BOX 20GA 1/2"');
-  assert.equal(clips.quantity, 2);
-  assert.equal(clips.unit, 'BX');
-  // Hurricane ties: perimeter 180, spacing 2 → 90 ties
-  const ties = rolled.find((r) => r.name === 'TIE,HURRICANE 18GA ZMAX H1Z');
-  assert.equal(ties.quantity, 90);
-  // Blocking: 180/12 = 15 boards
-  const block = rolled.find((r) => r.name === '2 X 6 X 16 PREMIUM SPRUCE' && r.category === 'Blocking');
-  assert.equal(block.quantity, 15);
+test('All 9 pitch entries present (3:12 through 12:12)', () => {
+  for (const k of ['3:12', '4:12', '5:12', '6:12', '7:12', '8:12', '9:12', '10:12', '12:12']) {
+    assert.ok(ROOF_PITCH_MULTIPLIER[k], `missing pitch ${k}`);
+  }
+});
+
+console.log('\n=== Roof: polygon-based computeRoofMaterials ===');
+test('Empty sections returns []', () => {
+  assert.deepEqual(computeRoofMaterials([]), []);
+  assert.deepEqual(computeRoofMaterials(null), []);
+});
+
+// 40×50 footprint, 1.5ft overhangs all sides → expanded 43×53 = 2279 sf footprint.
+// Surface = 2279 × 1.118 = 2547.922 sf. Sheets = ceil(2547.922/32) × 1.10 = 80 × 1.10 = 88.
+const rect40x50AllGable = {
+  corners: [{x:0,y:0},{x:40,y:0},{x:40,y:50},{x:0,y:50}],
+  pitch: '6:12',
+  edges: [
+    { edge_index: 0, end_type: 'gable', overhang_ft: 1.5 },
+    { edge_index: 1, end_type: 'gable', overhang_ft: 1.5 },
+    { edge_index: 2, end_type: 'gable', overhang_ft: 1.5 },
+    { edge_index: 3, end_type: 'gable', overhang_ft: 1.5 },
+  ],
+};
+test('40×50 rectangle (1.5ft overhangs, all gable, 6:12): footprint × multiplier → 88 sheets', () => {
+  const items = computeRoofMaterials([rect40x50AllGable], { sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc' });
+  const sh = items.find((r) => r.category === 'Sheathing' && r.name === '4 X 8 - 1/2 STD.SPRUCE PLYWOOD');
+  assert.ok(sh, 'sheathing row missing'); assert.equal(sh.quantity, 88);
+});
+test('All-gable rectangle has 0 eave perimeter → 0 hurricane ties', () => {
+  const items = computeRoofMaterials([rect40x50AllGable], { sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc' });
+  const ties = items.find((r) => r.name === 'TIE,HURRICANE 18GA ZMAX H1Z');
+  assert.equal(ties.quantity, 0);
 });
 test('All roof rows land in section "Roof" (no level prefix)', () => {
-  const items = computeRoofMaterials({
-    width_ft: 40, depth_ft: 50, pitch: '6:12',
-    sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc',
-  });
+  const items = computeRoofMaterials([rect40x50AllGable], { sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc' });
   for (const it of items) assert.equal(it.section, 'Roof');
 });
-test('Empty roof returns []', () => {
-  assert.deepEqual(computeRoofMaterials(null), []);
-  assert.deepEqual(computeRoofMaterials({ width_ft: 0, depth_ft: 50 }), []);
+
+// Conventional gable layout: short ends gable, long sides eave (marked hip
+// in this 2-state model so they're treated as eave-bearing).
+const rect40x50ShortGableLongEave = {
+  corners: [{x:0,y:0},{x:40,y:0},{x:40,y:50},{x:0,y:50}],
+  pitch: '6:12',
+  edges: [
+    { edge_index: 0, end_type: 'gable', overhang_ft: 1.5 }, // short
+    { edge_index: 1, end_type: 'hip',   overhang_ft: 1.5 }, // long — eave
+    { edge_index: 2, end_type: 'gable', overhang_ft: 1.5 }, // short
+    { edge_index: 3, end_type: 'hip',   overhang_ft: 1.5 }, // long — eave
+  ],
+};
+test('Conventional gable layout: hurricane ties from long-side eaves only', () => {
+  // After expansion: long edges (~53ft) × 2 = 106ft eave perimeter; spacing 2ft → 53 ties
+  const items = computeRoofMaterials([rect40x50ShortGableLongEave], { sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc' });
+  const ties = items.find((r) => r.name === 'TIE,HURRICANE 18GA ZMAX H1Z');
+  assert.ok(ties); assert.equal(ties.quantity, 53);
 });
-test('16" oc spacing yields 3 clips per sheet (more H-clips, more blocking)', () => {
-  const items = computeRoofMaterials({
-    width_ft: 40, depth_ft: 50, pitch: '6:12',
-    sheathing_type: 'osb_7_16', rafter_spacing: '16_oc',
-  });
-  const rolled = sumMaterials(items);
-  // 140 sheets × 3 × 1.05 = 441 / 250 = 2 boxes
-  const clips = rolled.find((r) => r.name === 'CLPS,ROOF 250/BOX 20GA 1/2"');
+
+const rect40x50HipShortGableLong = {
+  corners: [{x:0,y:0},{x:40,y:0},{x:40,y:50},{x:0,y:50}],
+  pitch: '6:12',
+  edges: [
+    { edge_index: 0, end_type: 'hip',   overhang_ft: 1.5 }, // short → hip
+    { edge_index: 1, end_type: 'gable', overhang_ft: 1.5 }, // long
+    { edge_index: 2, end_type: 'hip',   overhang_ft: 1.5 }, // short → hip
+    { edge_index: 3, end_type: 'gable', overhang_ft: 1.5 }, // long
+  ],
+};
+test('Hip on short ends: ridge length = longDim - shortDim ≈ 10ft (53 - 43)', () => {
+  const items = computeRoofMaterials([rect40x50HipShortGableLong], { sheathing_type: 'plywood_1_2_csp', rafter_spacing: '24_oc' });
+  const ridge = items.find((r) => r.category === 'Ridge');
+  assert.ok(ridge, 'ridge row missing');
+  assert.ok(Math.abs(ridge.quantity - 10) < 0.5, `expected ridge ≈ 10, got ${ridge.quantity}`);
+});
+
+test('16" oc spacing: 3 clips per sheet (88 × 3 × 1.05 = 277.2 → 2 boxes)', () => {
+  const items = computeRoofMaterials([rect40x50AllGable], { sheathing_type: 'osb_7_16', rafter_spacing: '16_oc' });
+  const clips = items.find((r) => r.name === 'CLPS,ROOF 250/BOX 20GA 1/2"');
   assert.equal(clips.quantity, 2);
-  // Hurricane ties: 180/(16/12) = 180 × 0.75 = 135 ties
-  const ties = rolled.find((r) => r.name === 'TIE,HURRICANE 18GA ZMAX H1Z');
-  assert.equal(ties.quantity, 135);
 });
 
 console.log(`\nResult: ${passed} passed, ${failed} failed.`);
