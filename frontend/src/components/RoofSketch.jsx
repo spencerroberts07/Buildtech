@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../api.js';
 
-// Polygon-based roof sketch tool. Each section is a polygon (corners +
-// per-edge overhang + per-edge end_type). Reuses the same world/screen model
-// as Sketch.jsx so coordinates stay consistent across the app.
+// Polygon-based roof sketch tool. Each section is a polygon (wall corners +
+// per-edge overhang + per-edge end_type). Shares the world/screen model with
+// Sketch.jsx so coordinates stay consistent across the app.
 
 const BASE_GRID_PX = 20;
 const MIN_ZOOM = 0.2;
@@ -12,7 +12,9 @@ const CANVAS_HEIGHT = 600;
 const CORNER_HIT_PX = 10;
 const EDGE_HIT_PX = 8;
 const OVERHANG_HANDLE_PX = 9;
-const OVERHANG_HANDLE_OFFSET_PX = 18; // pixels outside polygon edge for the handle
+const OVERHANG_HANDLE_OFFSET_PX = 14;
+const SNAP_FT = 2;            // snap radius while drawing a new section
+const CONNECT_FT = 0.05;      // tolerance for treating two corners as "the same"
 
 const PITCH_OPTIONS = ['3:12', '4:12', '5:12', '6:12', '7:12', '8:12', '10:12', '12:12'];
 const SHEATHING_TYPE_OPTIONS = [
@@ -24,7 +26,6 @@ const SPACING_OPTIONS = [
   { value: '24_oc', label: '24" o.c.' },
   { value: '16_oc', label: '16" o.c.' },
 ];
-
 const PITCH_MULT = {
   '3:12': 1.031, '4:12': 1.054, '5:12': 1.083,
   '6:12': 1.118, '7:12': 1.158, '8:12': 1.202,
@@ -44,10 +45,11 @@ function snapQuarter(v) { return Math.round(v * 4) / 4; }
 function distPointToSegment(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
   const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+  if (lenSq === 0) return { d: Math.hypot(px - x1, py - y1), t: 0 };
   let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
   t = Math.max(0, Math.min(1, t));
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  const cx = x1 + t * dx, cy = y1 + t * dy;
+  return { d: Math.hypot(px - cx, py - cy), t, cx, cy };
 }
 function polygonArea(corners) {
   if (!corners || corners.length < 3) return 0;
@@ -64,7 +66,6 @@ function polygonCentroid(corners) {
   for (const c of corners) { sx += Number(c.x); sy += Number(c.y); }
   return { x: sx / corners.length, y: sy / corners.length };
 }
-// CCW winding sign — used to know which side of an edge is "outside".
 function isCCW(corners) {
   let s = 0;
   for (let i = 0; i < corners.length; i++) {
@@ -105,8 +106,27 @@ function expandPolygon(corners, overhangs) {
   }
   return out;
 }
+function pointInPolygon(x, y, corners) {
+  let inside = false;
+  for (let i = 0, j = corners.length - 1; i < corners.length; j = i++) {
+    const xi = Number(corners[i].x), yi = Number(corners[i].y);
+    const xj = Number(corners[j].x), yj = Number(corners[j].y);
+    const intersect = ((yi > y) !== (yj > y)) &&
+      (x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-9) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function edgeOutwardNormal(corners, i, ccw) {
+  const a = corners[i], b = corners[(i + 1) % corners.length];
+  const dx = Number(b.x) - Number(a.x), dy = Number(b.y) - Number(a.y);
+  const len = Math.hypot(dx, dy) || 1;
+  return ccw ? { nx: dy / len, ny: -dx / len } : { nx: -dy / len, ny: dx / len };
+}
 
-// Build per-section quick-access geometry for canvas rendering / hit-test.
+// Per-section quick-access geometry. Note `corners` are the wall corners and
+// `expanded` is the roof outline including overhangs — the polygon body fills
+// `expanded` and the wall line is rendered as a dashed inset using `corners`.
 function sectionGeom(section, scale) {
   const corners = (section.corners || []).map((c) => ({ x: Number(c.x), y: Number(c.y) }));
   const edges = section.edges || [];
@@ -121,26 +141,87 @@ function sectionGeom(section, scale) {
   return { corners, edges, overhangs, ccw, expanded, footprintArea, surfaceArea };
 }
 
-// Outward unit normal for edge i (in world coords, accounting for winding).
-function edgeOutwardNormal(corners, i, ccw) {
-  const a = corners[i], b = corners[(i + 1) % corners.length];
-  const dx = Number(b.x) - Number(a.x), dy = Number(b.y) - Number(a.y);
-  const len = Math.hypot(dx, dy) || 1;
-  return ccw ? { nx: dy / len, ny: -dx / len } : { nx: -dy / len, ny: dx / len };
+// Bounding box + ridge axis derivation. Ridge runs along the bounding box's
+// long axis through the centroid. Endpoints get shortened by shortDim/2 at
+// any "end edge" whose end_type is 'hip'. End edges are detected as those
+// whose direction is roughly perpendicular to the ridge axis (within 30°).
+function computeRidgeAndHips(section, scale) {
+  const { corners, edges, expanded } = sectionGeom(section, scale);
+  if (expanded.length < 3) return null;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of expanded) {
+    minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+    minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+  }
+  const w = maxX - minX, h = maxY - minY;
+  const horizontal = w >= h;
+  const longDim = Math.max(w, h);
+  const shortDim = Math.min(w, h);
+  if (longDim <= 0) return null;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  // Ridge unit vector + perpendicular. The "low" end is the one toward
+  // smaller world coord (left for horizontal, top for vertical).
+  const ridgeDir = horizontal ? { x: 1, y: 0 } : { x: 0, y: 1 };
+  // Determine hip reductions per end. We classify each edge as "end" if its
+  // normalized direction's dot with ridgeDir is small (perpendicular ±30°).
+  // Then split end edges into "low" vs "high" by the centroid of the edge.
+  let lowHip = false, highHip = false;
+  for (let i = 0; i < expanded.length; i++) {
+    const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const dot = Math.abs(dx * ridgeDir.x + dy * ridgeDir.y) / len;
+    if (dot >= Math.cos(60 * Math.PI / 180)) continue; // not an end edge
+    const e = edges.find((ee) => Number(ee.edge_index) === i);
+    if (e?.end_type !== 'hip') continue;
+    const midProj = horizontal
+      ? ((a.x + b.x) / 2)
+      : ((a.y + b.y) / 2);
+    const center = horizontal ? cx : cy;
+    if (midProj < center) lowHip = true; else highHip = true;
+  }
+  const lowReduce = lowHip ? shortDim / 2 : 0;
+  const highReduce = highHip ? shortDim / 2 : 0;
+  const ridgeStart = horizontal
+    ? { x: cx - longDim / 2 + lowReduce, y: cy }
+    : { x: cx, y: cy - longDim / 2 + lowReduce };
+  const ridgeEnd = horizontal
+    ? { x: cx + longDim / 2 - highReduce, y: cy }
+    : { x: cx, y: cy + longDim / 2 - highReduce };
+  // Hip rafter lines: each hip end emits two lines from its two corners up to
+  // the matching ridge endpoint.
+  const hipLines = [];
+  for (let i = 0; i < expanded.length; i++) {
+    const e = edges.find((ee) => Number(ee.edge_index) === i);
+    if (e?.end_type !== 'hip') continue;
+    const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+    const midProj = horizontal ? ((a.x + b.x) / 2) : ((a.y + b.y) / 2);
+    const center = horizontal ? cx : cy;
+    const target = midProj < center ? ridgeStart : ridgeEnd;
+    hipLines.push({ a: { x: a.x, y: a.y }, b: target });
+    hipLines.push({ a: { x: b.x, y: b.y }, b: target });
+  }
+  return {
+    ridgeStart, ridgeEnd, ridgeDir, horizontal, longDim, shortDim,
+    bbox: { minX, maxX, minY, maxY }, hipLines,
+  };
 }
 
 // ---------- main component ----------
 export default function RoofSketch({
-  projectId, projectSettings, onMaterialsChanged, onProjectSettingsChange, refetchProjectSettings,
+  projectId, projectSettings, onMaterialsChanged, onProjectSettingsChange,
 }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
 
   const scaleFtPerGrid = num(projectSettings?.scale_ft_per_grid) || 1;
   const [sections, setSections] = useState([]);
-  const [legacyRoof, setLegacyRoof] = useState(null); // for sheathing_type / rafter_spacing
+  const [legacyRoof, setLegacyRoof] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [autoCopyTried, setAutoCopyTried] = useState(false);
+  const [hasFloorPlan, setHasFloorPlan] = useState(false);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   function showToast(msg) {
@@ -149,17 +230,20 @@ export default function RoofSketch({
     toastTimer.current = setTimeout(() => setToast(null), 4500);
   }
 
-  // Selection state. Only one of these is non-null at a time.
   const [selectedSectionId, setSelectedSectionId] = useState(null);
-  const [selectedCornerKey, setSelectedCornerKey] = useState(null); // `${sid}:${idx}`
-  const [selectedEdgeKey, setSelectedEdgeKey] = useState(null);     // `${sid}:${idx}`
+  const [selectedCornerKey, setSelectedCornerKey] = useState(null);
+  const [selectedEdgeKey, setSelectedEdgeKey] = useState(null);
 
-  // Add-section drawing state
-  const [adding, setAdding] = useState(false);
+  // Tool: 'select' | 'pan' | 'draw_section'. Default select.
+  const [tool, setTool] = useState('select');
   const [draftCorners, setDraftCorners] = useState([]);
+  const [snappedHover, setSnappedHover] = useState(null); // { x, y } when snap is active
+  const [fullscreen, setFullscreen] = useState(false);
 
-  // Drag state
   const dragState = useRef({ active: false, type: null });
+  const spaceDown = useRef(false);
+  const ctrlDown = useRef(false);
+  const panState = useRef({ active: false, startX: 0, startY: 0, basePan: null });
 
   const [viewport, setViewport] = useState(() => ({
     panX: num(projectSettings?.viewport_pan_x),
@@ -168,6 +252,7 @@ export default function RoofSketch({
   }));
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: CANVAS_HEIGHT });
   const [hoverWorld, setHoverWorld] = useState(null);
+  const [overhangDragLabel, setOverhangDragLabel] = useState(null); // {sx, sy, oh}
 
   // ---- load + auto-copy ----
   const loadAll = useCallback(async () => {
@@ -179,26 +264,23 @@ export default function RoofSketch({
       setSections(secs || []);
       setLegacyRoof(roof || null);
       setLoading(false);
-      // Auto-copy top floor on first open if no sections yet.
-      if ((secs || []).length === 0) {
-        await tryAutoCopyTopFloor();
-      }
+      if ((secs || []).length === 0) await tryAutoCopyTopFloor();
     } catch (e) { setError(e.message); setLoading(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
   useEffect(() => { loadAll(); }, [loadAll]);
 
   async function tryAutoCopyTopFloor() {
+    setAutoCopyTried(true);
     try {
       const fps = await api.listFloorPlans(projectId);
-      // Prefer Floor 2, then Floor 1.
-      let candidate = (fps || []).find((p) => p.level === 'floor2');
-      if (!candidate || !Array.isArray(candidate.corners) || candidate.corners.length < 3) {
-        candidate = (fps || []).find((p) => p.level === 'floor1');
+      const anyHasCorners = (fps || []).some((p) => Array.isArray(p.corners) && p.corners.length >= 3);
+      setHasFloorPlan(anyHasCorners);
+      let candidate = (fps || []).find((p) => p.level === 'floor2' && Array.isArray(p.corners) && p.corners.length >= 3);
+      if (!candidate) {
+        candidate = (fps || []).find((p) => p.level === 'floor1' && Array.isArray(p.corners) && p.corners.length >= 3);
       }
-      if (!candidate || !Array.isArray(candidate.corners) || candidate.corners.length < 3) {
-        return; // no source polygon → empty state UI handles it
-      }
+      if (!candidate) return;
       const src = candidate.level === 'floor2' ? 'Floor 2' : 'Floor 1';
       const created = await api.createRoofSection(projectId, {
         section_name: 'Main Roof',
@@ -228,12 +310,12 @@ export default function RoofSketch({
 
   useEffect(() => {
     function measure() {
-      if (wrapRef.current) setCanvasSize({ w: wrapRef.current.clientWidth, h: CANVAS_HEIGHT });
+      if (wrapRef.current) setCanvasSize({ w: wrapRef.current.clientWidth, h: fullscreen ? window.innerHeight - 80 : CANVAS_HEIGHT });
     }
     measure();
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
-  }, []);
+  }, [fullscreen]);
 
   // ---- API helpers ----
   async function patchSection(sid, patch) {
@@ -281,11 +363,8 @@ export default function RoofSketch({
   }
   async function patchLegacyRoof(patch) {
     try {
-      // The legacy roofs row only carries sheathing_type / rafter_spacing now.
-      // Auto-create one if it doesn't exist yet.
-      let existing = legacyRoof;
-      if (!existing) {
-        existing = await api.createRoof(projectId, {
+      if (!legacyRoof) {
+        await api.createRoof(projectId, {
           width_ft: 0, depth_ft: 0,
           pitch: '6:12',
           sheathing_type: patch.sheathing_type || 'plywood_1_2_csp',
@@ -297,6 +376,292 @@ export default function RoofSketch({
       onMaterialsChanged?.();
     } catch (e) { setError(e.message); }
   }
+
+  // ---- snap during drawing ----
+  // Find closest corner / edge point on existing sections within SNAP_FT.
+  // Returns { x, y } in world coords, or null.
+  function findSnapPoint(world) {
+    let best = null;
+    for (const s of sections) {
+      const corners = (s.corners || []).map((c) => ({ x: Number(c.x), y: Number(c.y) }));
+      // corner snap
+      for (const c of corners) {
+        const d = Math.hypot(world.x - c.x, world.y - c.y);
+        if (d <= SNAP_FT && (best == null || d < best.d)) best = { d, x: c.x, y: c.y };
+      }
+      // edge snap (perpendicular foot)
+      for (let i = 0; i < corners.length; i++) {
+        const a = corners[i], b = corners[(i + 1) % corners.length];
+        const r = distPointToSegment(world.x, world.y, a.x, a.y, b.x, b.y);
+        if (r.d <= SNAP_FT && (best == null || r.d < best.d)) best = { d: r.d, x: r.cx, y: r.cy };
+      }
+    }
+    return best ? { x: best.x, y: best.y } : null;
+  }
+
+  // ---- connected-corner mapping ----
+  // Build a map sid → [{ idx, links: [{ sid, idx }] }] of corners that
+  // coincide (within CONNECT_FT) with corners in OTHER sections. Used during
+  // corner drag to move shared corners together so valleys stay aligned.
+  function findConnectedCorners(sid, idx) {
+    const sec = sections.find((s) => s.id === sid);
+    if (!sec) return [];
+    const c = sec.corners?.[idx];
+    if (!c) return [];
+    const links = [];
+    for (const other of sections) {
+      if (other.id === sid) continue;
+      (other.corners || []).forEach((oc, oi) => {
+        if (Math.hypot(Number(oc.x) - Number(c.x), Number(oc.y) - Number(c.y)) <= CONNECT_FT) {
+          links.push({ sid: other.id, idx: oi });
+        }
+      });
+    }
+    return links;
+  }
+
+  // ---- mouse helpers ----
+  function getMouse(e) {
+    const r = canvasRef.current.getBoundingClientRect();
+    return { sx: e.clientX - r.left, sy: e.clientY - r.top };
+  }
+  function snappedWorld(sx, sy) {
+    const w = screenToWorld(sx, sy, viewport);
+    return { x: snapHalf(w.x), y: snapHalf(w.y) };
+  }
+  function hitTest(sx, sy) {
+    for (const s of sections) {
+      const { corners, ccw, expanded } = sectionGeom(s, scaleFtPerGrid);
+      // corners (wall corners are draggable)
+      for (let i = 0; i < corners.length; i++) {
+        const cs = worldToScreen(corners[i].x, corners[i].y, viewport);
+        if (Math.hypot(cs.x - sx, cs.y - sy) <= CORNER_HIT_PX) {
+          return { kind: 'corner', sid: s.id, idx: i };
+        }
+      }
+      // overhang handles at expanded edge midpoints
+      for (let i = 0; i < expanded.length; i++) {
+        const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const { nx, ny } = edgeOutwardNormal(expanded, i, ccw);
+        const ms = worldToScreen(mid.x, mid.y, viewport);
+        const hx = ms.x + nx * OVERHANG_HANDLE_OFFSET_PX;
+        const hy = ms.y + ny * OVERHANG_HANDLE_OFFSET_PX;
+        if (Math.hypot(hx - sx, hy - sy) <= OVERHANG_HANDLE_PX) {
+          return { kind: 'overhang', sid: s.id, idx: i };
+        }
+      }
+      // expanded edges (clickable for Gable/Hip popup)
+      for (let i = 0; i < expanded.length; i++) {
+        const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+        const aS = worldToScreen(a.x, a.y, viewport);
+        const bS = worldToScreen(b.x, b.y, viewport);
+        const r = distPointToSegment(sx, sy, aS.x, aS.y, bS.x, bS.y);
+        if (r.d <= EDGE_HIT_PX) {
+          return { kind: 'edge', sid: s.id, idx: i };
+        }
+      }
+    }
+    for (const s of sections) {
+      const { expanded } = sectionGeom(s, scaleFtPerGrid);
+      const w = screenToWorld(sx, sy, viewport);
+      if (pointInPolygon(w.x, w.y, expanded)) {
+        return { kind: 'body', sid: s.id };
+      }
+    }
+    return null;
+  }
+
+  function shouldStartPan(e) {
+    // Pan tool active OR space held OR middle-click OR (ctrl + empty canvas).
+    if (tool === 'pan') return true;
+    if (spaceDown.current) return true;
+    if (e.button === 1) return true;
+    if (e.button === 0 && ctrlDown.current) return true;
+    return false;
+  }
+
+  function onMouseDown(e) {
+    const { sx, sy } = getMouse(e);
+    if (shouldStartPan(e)) {
+      e.preventDefault();
+      panState.current = { active: true, startX: e.clientX, startY: e.clientY, basePan: { x: viewport.panX, y: viewport.panY } };
+      return;
+    }
+    if (e.button !== 0) return;
+    if (tool === 'draw_section') {
+      // Use snap point if active, otherwise grid-snapped world.
+      const w = screenToWorld(sx, sy, viewport);
+      const snap = findSnapPoint(w);
+      const placed = snap || { x: snapHalf(w.x), y: snapHalf(w.y) };
+      setDraftCorners((cur) => [...cur, placed]);
+      return;
+    }
+    const hit = hitTest(sx, sy);
+    if (!hit) {
+      setSelectedSectionId(null);
+      setSelectedCornerKey(null);
+      setSelectedEdgeKey(null);
+      return;
+    }
+    if (hit.kind === 'corner') {
+      setSelectedSectionId(hit.sid);
+      setSelectedCornerKey(`${hit.sid}:${hit.idx}`);
+      setSelectedEdgeKey(null);
+      const links = findConnectedCorners(hit.sid, hit.idx);
+      dragState.current = { active: true, type: 'corner', sid: hit.sid, idx: hit.idx, links, moved: false };
+    } else if (hit.kind === 'overhang') {
+      setSelectedSectionId(hit.sid);
+      setSelectedEdgeKey(`${hit.sid}:${hit.idx}`);
+      setSelectedCornerKey(null);
+      dragState.current = { active: true, type: 'overhang', sid: hit.sid, idx: hit.idx, moved: false };
+    } else if (hit.kind === 'edge') {
+      setSelectedSectionId(hit.sid);
+      setSelectedEdgeKey(`${hit.sid}:${hit.idx}`);
+      setSelectedCornerKey(null);
+    } else {
+      setSelectedSectionId(hit.sid);
+      setSelectedCornerKey(null);
+      setSelectedEdgeKey(null);
+    }
+  }
+
+  function onMouseMove(e) {
+    const { sx, sy } = getMouse(e);
+    if (panState.current.active) {
+      setViewport((vp) => ({
+        ...vp,
+        panX: panState.current.basePan.x + (e.clientX - panState.current.startX),
+        panY: panState.current.basePan.y + (e.clientY - panState.current.startY),
+      }));
+      return;
+    }
+    const w = screenToWorld(sx, sy, viewport);
+    setHoverWorld(w);
+    if (tool === 'draw_section') {
+      const snap = findSnapPoint(w);
+      setSnappedHover(snap);
+    } else if (snappedHover) {
+      setSnappedHover(null);
+    }
+    const ds = dragState.current;
+    if (!ds.active) return;
+    if (ds.type === 'corner') {
+      const placed = (() => {
+        const snap = findSnapPoint(w);
+        return snap || { x: snapHalf(w.x), y: snapHalf(w.y) };
+      })();
+      setSections((cur) => cur.map((s) => {
+        if (s.id === ds.sid) {
+          const corners = (s.corners || []).map((c, i) =>
+            i === ds.idx ? { x: placed.x, y: placed.y } : { x: Number(c.x), y: Number(c.y) }
+          );
+          return { ...s, corners };
+        }
+        // Connected corners get moved in sync to keep valleys aligned.
+        const link = ds.links?.find((l) => l.sid === s.id);
+        if (link) {
+          const corners = (s.corners || []).map((c, i) =>
+            i === link.idx ? { x: placed.x, y: placed.y } : { x: Number(c.x), y: Number(c.y) }
+          );
+          return { ...s, corners };
+        }
+        return s;
+      }));
+      ds.moved = true;
+    } else if (ds.type === 'overhang') {
+      const sec = sections.find((s) => s.id === ds.sid);
+      if (!sec) return;
+      const { corners, ccw, expanded } = sectionGeom(sec, scaleFtPerGrid);
+      // Drag is interpreted in expanded-polygon space (handle sits there).
+      const a = expanded[ds.idx], b = expanded[(ds.idx + 1) % expanded.length];
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const { nx, ny } = edgeOutwardNormal(corners, ds.idx, ccw);
+      // Existing overhang for this edge plus the projected delta in world units.
+      const e = sec.edges.find((ee) => Number(ee.edge_index) === ds.idx);
+      const cur = Number(e?.overhang_ft ?? 1.5);
+      const project = (w.x - mid.x) * nx + (w.y - mid.y) * ny;
+      const oh = Math.max(0, Math.min(4, snapQuarter((cur + project) * scaleFtPerGrid)));
+      setSections((curSecs) => curSecs.map((s) => {
+        if (s.id !== ds.sid) return s;
+        return {
+          ...s,
+          edges: (s.edges || []).map((ee) =>
+            Number(ee.edge_index) === ds.idx ? { ...ee, overhang_ft: oh } : ee
+          ),
+        };
+      }));
+      ds.lastOverhang = oh;
+      ds.moved = true;
+      setOverhangDragLabel({ sx, sy, oh });
+    }
+  }
+
+  function onMouseUp() {
+    if (panState.current.active) {
+      panState.current.active = false;
+      return;
+    }
+    const ds = dragState.current;
+    if (!ds.active) return;
+    if (ds.type === 'corner' && ds.moved) {
+      // Save the dragged section AND every linked section.
+      const affectedIds = new Set([ds.sid, ...((ds.links || []).map((l) => l.sid))]);
+      for (const sid of affectedIds) {
+        const sec = sections.find((s) => s.id === sid);
+        if (sec) patchSection(sid, { corners: sec.corners });
+      }
+    } else if (ds.type === 'overhang' && ds.moved) {
+      const sec = sections.find((s) => s.id === ds.sid);
+      const edge = sec?.edges?.find((e) => Number(e.edge_index) === ds.idx);
+      if (edge) patchEdge(ds.sid, edge.id, { overhang_ft: ds.lastOverhang ?? 1.5 });
+      setOverhangDragLabel(null);
+    }
+    dragState.current = { active: false, type: null };
+  }
+
+  function onWheel(e) {
+    // Plain scroll is allowed to scroll the page. Only Ctrl/Meta zooms.
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const { sx, sy } = getMouse(e);
+    const oldZoom = viewport.zoom;
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, oldZoom * factor));
+    if (newZoom === oldZoom) return;
+    const w = screenToWorld(sx, sy, viewport);
+    const newPanX = sx - w.x * BASE_GRID_PX * newZoom;
+    const newPanY = sy - w.y * BASE_GRID_PX * newZoom;
+    setViewport({ panX: newPanX, panY: newPanY, zoom: newZoom });
+  }
+
+  // ---- keyboard ----
+  useEffect(() => {
+    function onKey(e) {
+      if (e.type === 'keydown') {
+        if (e.key === ' ' || e.code === 'Space') spaceDown.current = true;
+        if (e.key === 'Control' || e.key === 'Meta') ctrlDown.current = true;
+        if (tool === 'draw_section') {
+          if (e.key === 'Enter') {
+            if (draftCorners.length >= 3) createSectionFromCorners(draftCorners);
+            setDraftCorners([]); setTool('select');
+          } else if (e.key === 'Escape') {
+            setDraftCorners([]); setTool('select');
+          } else if (e.key === 'Backspace') {
+            setDraftCorners((cur) => cur.slice(0, -1));
+          }
+        }
+        if (e.key === 'Escape' && fullscreen) setFullscreen(false);
+      } else {
+        if (e.key === ' ' || e.code === 'Space') spaceDown.current = false;
+        if (e.key === 'Control' || e.key === 'Meta') ctrlDown.current = false;
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKey);
+    return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('keyup', onKey); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, draftCorners, fullscreen]);
 
   // ---- drawing ----
   useEffect(() => {
@@ -311,186 +676,10 @@ export default function RoofSketch({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     drawScene(ctx, canvasSize, viewport, {
       sections, selectedSectionId, selectedCornerKey, selectedEdgeKey,
-      adding, draftCorners, hoverWorld, scale: scaleFtPerGrid,
+      tool, draftCorners, hoverWorld, snappedHover, scale: scaleFtPerGrid,
+      rafterSpacing: legacyRoof?.rafter_spacing || '24_oc',
     });
-  }, [canvasSize, viewport, sections, selectedSectionId, selectedCornerKey, selectedEdgeKey, adding, draftCorners, hoverWorld, scaleFtPerGrid]);
-
-  // ---- mouse handlers ----
-  function getMouse(e) {
-    const r = canvasRef.current.getBoundingClientRect();
-    return { sx: e.clientX - r.left, sy: e.clientY - r.top };
-  }
-  function snappedWorld(sx, sy) {
-    const w = screenToWorld(sx, sy, viewport);
-    return { x: snapHalf(w.x), y: snapHalf(w.y) };
-  }
-
-  // Hit-test: corner > overhang handle > edge > polygon body. Returns a hit
-  // descriptor or null.
-  function hitTest(sx, sy) {
-    for (const s of sections) {
-      const { corners, ccw } = sectionGeom(s, scaleFtPerGrid);
-      // corners
-      for (let i = 0; i < corners.length; i++) {
-        const cs = worldToScreen(corners[i].x, corners[i].y, viewport);
-        if (Math.hypot(cs.x - sx, cs.y - sy) <= CORNER_HIT_PX) {
-          return { kind: 'corner', sid: s.id, idx: i };
-        }
-      }
-      // overhang handles (placed midpoint + outward normal × OFFSET)
-      for (let i = 0; i < corners.length; i++) {
-        const a = corners[i], b = corners[(i + 1) % corners.length];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        const { nx, ny } = edgeOutwardNormal(corners, i, ccw);
-        const ms = worldToScreen(mid.x, mid.y, viewport);
-        const hx = ms.x + nx * OVERHANG_HANDLE_OFFSET_PX;
-        const hy = ms.y + ny * OVERHANG_HANDLE_OFFSET_PX;
-        if (Math.hypot(hx - sx, hy - sy) <= OVERHANG_HANDLE_PX) {
-          return { kind: 'overhang', sid: s.id, idx: i };
-        }
-      }
-      // edges
-      for (let i = 0; i < corners.length; i++) {
-        const a = corners[i], b = corners[(i + 1) % corners.length];
-        const aS = worldToScreen(a.x, a.y, viewport);
-        const bS = worldToScreen(b.x, b.y, viewport);
-        if (distPointToSegment(sx, sy, aS.x, aS.y, bS.x, bS.y) <= EDGE_HIT_PX) {
-          return { kind: 'edge', sid: s.id, idx: i };
-        }
-      }
-    }
-    // polygon body (interior)
-    for (const s of sections) {
-      const { corners } = sectionGeom(s, scaleFtPerGrid);
-      const w = screenToWorld(sx, sy, viewport);
-      if (pointInPolygon(w.x, w.y, corners)) {
-        return { kind: 'body', sid: s.id };
-      }
-    }
-    return null;
-  }
-
-  function onMouseDown(e) {
-    if (e.button !== 0) return; // left click only
-    const { sx, sy } = getMouse(e);
-    if (adding) {
-      // Add a corner (snapped). Double-click or Enter closes.
-      const w = snappedWorld(sx, sy);
-      setDraftCorners((cur) => [...cur, w]);
-      return;
-    }
-    const hit = hitTest(sx, sy);
-    if (!hit) {
-      setSelectedSectionId(null);
-      setSelectedCornerKey(null);
-      setSelectedEdgeKey(null);
-      return;
-    }
-    if (hit.kind === 'corner') {
-      setSelectedSectionId(hit.sid);
-      setSelectedCornerKey(`${hit.sid}:${hit.idx}`);
-      setSelectedEdgeKey(null);
-      dragState.current = { active: true, type: 'corner', sid: hit.sid, idx: hit.idx, moved: false };
-    } else if (hit.kind === 'overhang') {
-      setSelectedSectionId(hit.sid);
-      setSelectedEdgeKey(`${hit.sid}:${hit.idx}`);
-      setSelectedCornerKey(null);
-      dragState.current = { active: true, type: 'overhang', sid: hit.sid, idx: hit.idx, moved: false };
-    } else if (hit.kind === 'edge') {
-      setSelectedSectionId(hit.sid);
-      setSelectedEdgeKey(`${hit.sid}:${hit.idx}`);
-      setSelectedCornerKey(null);
-    } else if (hit.kind === 'body') {
-      setSelectedSectionId(hit.sid);
-      setSelectedCornerKey(null);
-      setSelectedEdgeKey(null);
-    }
-  }
-  function onMouseMove(e) {
-    const { sx, sy } = getMouse(e);
-    setHoverWorld(screenToWorld(sx, sy, viewport));
-    const ds = dragState.current;
-    if (!ds.active) return;
-    if (ds.type === 'corner') {
-      const w = snappedWorld(sx, sy);
-      setSections((cur) => cur.map((s) => {
-        if (s.id !== ds.sid) return s;
-        const corners = (s.corners || []).map((c, i) =>
-          i === ds.idx ? { x: w.x, y: w.y } : { x: Number(c.x), y: Number(c.y) }
-        );
-        return { ...s, corners };
-      }));
-      ds.moved = true;
-    } else if (ds.type === 'overhang') {
-      // Drag perpendicular to edge → set overhang_ft based on distance from edge midpoint.
-      const sec = sections.find((s) => s.id === ds.sid);
-      if (!sec) return;
-      const { corners, ccw } = sectionGeom(sec, scaleFtPerGrid);
-      const a = corners[ds.idx], b = corners[(ds.idx + 1) % corners.length];
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      const w = screenToWorld(sx, sy, viewport);
-      const { nx, ny } = edgeOutwardNormal(corners, ds.idx, ccw);
-      const project = (w.x - mid.x) * nx + (w.y - mid.y) * ny; // world units along outward normal
-      const oh = Math.max(0, Math.min(4, snapQuarter(project * scaleFtPerGrid)));
-      setSections((cur) => cur.map((s) => {
-        if (s.id !== ds.sid) return s;
-        return {
-          ...s,
-          edges: (s.edges || []).map((e) =>
-            Number(e.edge_index) === ds.idx ? { ...e, overhang_ft: oh } : e
-          ),
-        };
-      }));
-      ds.lastOverhang = oh;
-      ds.moved = true;
-    }
-  }
-  function onMouseUp() {
-    const ds = dragState.current;
-    if (!ds.active) return;
-    if (ds.type === 'corner' && ds.moved) {
-      const sec = sections.find((s) => s.id === ds.sid);
-      if (sec) patchSection(ds.sid, { corners: sec.corners });
-    } else if (ds.type === 'overhang' && ds.moved) {
-      const sec = sections.find((s) => s.id === ds.sid);
-      const edge = sec?.edges?.find((e) => Number(e.edge_index) === ds.idx);
-      if (edge) patchEdge(ds.sid, edge.id, { overhang_ft: ds.lastOverhang ?? 1.5 });
-    }
-    dragState.current = { active: false, type: null };
-  }
-  function onWheel(e) {
-    e.preventDefault();
-    const { sx, sy } = getMouse(e);
-    const oldZoom = viewport.zoom;
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, oldZoom * factor));
-    if (newZoom === oldZoom) return;
-    // Zoom toward cursor point.
-    const w = screenToWorld(sx, sy, viewport);
-    const newPanX = sx - w.x * BASE_GRID_PX * newZoom;
-    const newPanY = sy - w.y * BASE_GRID_PX * newZoom;
-    setViewport({ panX: newPanX, panY: newPanY, zoom: newZoom });
-  }
-
-  // Add-section keyboard
-  useEffect(() => {
-    function onKey(e) {
-      if (!adding) return;
-      if (e.key === 'Enter') {
-        if (draftCorners.length >= 3) {
-          createSectionFromCorners(draftCorners);
-        }
-        setAdding(false); setDraftCorners([]);
-      } else if (e.key === 'Escape') {
-        setAdding(false); setDraftCorners([]);
-      } else if (e.key === 'Backspace') {
-        setDraftCorners((cur) => cur.slice(0, -1));
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adding, draftCorners]);
+  }, [canvasSize, viewport, sections, selectedSectionId, selectedCornerKey, selectedEdgeKey, tool, draftCorners, hoverWorld, snappedHover, scaleFtPerGrid, legacyRoof]);
 
   // ---- selected derived ----
   const selectedSection = sections.find((s) => s.id === selectedSectionId) || null;
@@ -501,41 +690,40 @@ export default function RoofSketch({
     if (!sec) return null;
     return (sec.edges || []).find((e) => Number(e.edge_index) === Number(idx)) || null;
   })();
-
-  // Edge popup screen position (only when edge is selected and not dragging)
   const edgePopupPos = (() => {
     if (!selectedEdge || !selectedSection) return null;
-    const { corners } = sectionGeom(selectedSection, scaleFtPerGrid);
+    const { expanded } = sectionGeom(selectedSection, scaleFtPerGrid);
     const i = Number(selectedEdge.edge_index);
-    if (i < 0 || i >= corners.length) return null;
-    const a = corners[i], b = corners[(i + 1) % corners.length];
+    if (i < 0 || i >= expanded.length) return null;
+    const a = expanded[i], b = expanded[(i + 1) % expanded.length];
     const mid = worldToScreen((a.x + b.x) / 2, (a.y + b.y) / 2, viewport);
     return { x: mid.x, y: mid.y };
   })();
 
   if (loading) return <p className="muted">Loading roof…</p>;
 
+  const cursor = tool === 'pan' ? 'grab'
+    : tool === 'draw_section' ? 'crosshair'
+    : (panState.current.active ? 'grabbing' : 'default');
+  const wrapperStyle = fullscreen
+    ? { position: 'fixed', inset: 0, zIndex: 1000, background: 'white', padding: '0.5rem' }
+    : {};
+
   return (
-    <div>
-      <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.4rem', flexWrap: 'wrap' }}>
-        <button
-          className={adding ? 'primary' : 'secondary'}
-          onClick={() => { setAdding((v) => !v); setDraftCorners([]); }}
-        >{adding ? 'Cancel drawing' : '+ Add Section'}</button>
-        {sections.length === 0 && !adding && (
-          <button className="primary" onClick={() => setAdding(true)}>Draw Roof Section</button>
-        )}
-        <span className="muted" style={{ alignSelf: 'center' }}>
-          {sections.length} section{sections.length === 1 ? '' : 's'}
-          {adding && ` · click to place corner${draftCorners.length > 0 ? `s (${draftCorners.length})` : ''}, Enter to close, Esc to cancel`}
-        </span>
-      </div>
+    <div style={wrapperStyle}>
+      <RoofToolbar
+        tool={tool} setTool={(t) => { setTool(t); setDraftCorners([]); }}
+        fullscreen={fullscreen} toggleFullscreen={() => setFullscreen((f) => !f)}
+        sectionsCount={sections.length}
+        drafting={tool === 'draw_section'}
+        draftLen={draftCorners.length}
+      />
 
       <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
         <div ref={wrapRef} style={{ flex: 1, position: 'relative', border: '1px solid #E0E0E0', borderRadius: 4, overflow: 'hidden', background: '#FAFAFA' }}>
           <canvas
             ref={canvasRef}
-            style={{ display: 'block', cursor: adding ? 'crosshair' : 'default' }}
+            style={{ display: 'block', cursor }}
             onMouseDown={onMouseDown}
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}
@@ -546,16 +734,10 @@ export default function RoofSketch({
           {edgePopupPos && selectedEdge && (
             <div style={{
               position: 'absolute',
-              left: edgePopupPos.x + 12,
-              top: edgePopupPos.y - 14,
-              background: 'white',
-              border: '1px solid #E0E0E0',
-              borderRadius: 6,
-              padding: '4px 6px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-              fontSize: '0.85rem',
-              display: 'flex',
-              gap: 4,
+              left: edgePopupPos.x + 12, top: edgePopupPos.y - 14,
+              background: 'white', border: '1px solid #E0E0E0', borderRadius: 6,
+              padding: '4px 6px', boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
+              fontSize: '0.85rem', display: 'flex', gap: 4,
             }}>
               {['gable', 'hip'].map((t) => (
                 <button
@@ -567,21 +749,28 @@ export default function RoofSketch({
               ))}
             </div>
           )}
+          {overhangDragLabel && (
+            <div style={{
+              position: 'absolute', left: overhangDragLabel.sx + 14, top: overhangDragLabel.sy - 10,
+              padding: '2px 6px', background: 'rgba(10,10,10,0.92)', color: 'white',
+              fontSize: 11, fontWeight: 600, borderRadius: 4, pointerEvents: 'none',
+            }}>Overhang: {overhangDragLabel.oh.toFixed(2)}ft</div>
+          )}
           {toast && (
             <div style={{
               position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)',
               padding: '0.5rem 1rem',
               background: 'rgba(10,10,10,0.92)', color: 'white',
-              fontSize: '13px', borderRadius: 6,
-              pointerEvents: 'none',
-              boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
-              maxWidth: '80%',
+              fontSize: 13, borderRadius: 6, pointerEvents: 'none',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.2)', maxWidth: '80%',
             }}>{toast}</div>
           )}
         </div>
 
         <div style={{ flex: '0 0 320px' }}>
-          {selectedSection ? (
+          {sections.length === 0 && autoCopyTried && !hasFloorPlan ? (
+            <EmptyStatePanel onDraw={() => setTool('draw_section')} onRetry={loadAll} />
+          ) : selectedSection ? (
             <SectionPanel
               section={selectedSection}
               scale={scaleFtPerGrid}
@@ -591,10 +780,7 @@ export default function RoofSketch({
               onClose={() => { setSelectedSectionId(null); setSelectedCornerKey(null); setSelectedEdgeKey(null); }}
             />
           ) : (
-            <ProjectRoofSettingsPanel
-              roof={legacyRoof}
-              onPatch={patchLegacyRoof}
-            />
+            <ProjectRoofSettingsPanel roof={legacyRoof} onPatch={patchLegacyRoof} />
           )}
         </div>
       </div>
@@ -603,6 +789,82 @@ export default function RoofSketch({
     </div>
   );
 }
+
+// ---------- toolbar ----------
+function RoofToolbar({ tool, setTool, fullscreen, toggleFullscreen, sectionsCount, drafting, draftLen }) {
+  const tools = [
+    { key: 'select',       label: 'Select',       icon: ICONS.cursor, tooltip: 'Select & drag (default)' },
+    { key: 'pan',          label: 'Pan',          icon: ICONS.hand,   tooltip: 'Click and drag to pan the view' },
+    { key: 'draw_section', label: 'Draw Section', icon: ICONS.pencil, tooltip: 'Click corners then Enter to close' },
+  ];
+  return (
+    <div className="card" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', padding: '0.4rem', marginBottom: '0.4rem' }}>
+      {tools.map((t) => {
+        const active = tool === t.key;
+        return (
+          <button
+            key={t.key}
+            type="button"
+            title={t.tooltip}
+            onClick={() => setTool(t.key)}
+            style={{
+              flex: '0 0 auto',
+              display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+              padding: '0.4rem 0.7rem',
+              background: active ? '#CC0000' : 'white',
+              color: active ? 'white' : '#1A1A1A',
+              border: active ? '1px solid #CC0000' : '1px solid #E0E0E0',
+              cursor: 'pointer',
+              borderRadius: 4,
+            }}
+          >
+            <Icon path={t.icon} stroke={active ? 'white' : '#1A1A1A'} />
+            <span style={{ fontSize: '0.85rem' }}>{t.label}</span>
+          </button>
+        );
+      })}
+      <span className="muted" style={{ marginLeft: '0.5rem', fontSize: '0.85rem' }}>
+        {sectionsCount} section{sectionsCount === 1 ? '' : 's'}
+        {drafting && ` · ${draftLen} corner${draftLen === 1 ? '' : 's'} placed — Enter to close, Esc to cancel, Backspace to undo`}
+      </span>
+      <span style={{ flex: 1 }} />
+      <button
+        type="button"
+        title={fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+        onClick={toggleFullscreen}
+        style={{
+          flex: '0 0 auto',
+          display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+          padding: '0.4rem 0.7rem',
+          background: fullscreen ? '#CC0000' : 'white',
+          color: fullscreen ? 'white' : '#1A1A1A',
+          border: fullscreen ? '1px solid #CC0000' : '1px solid #E0E0E0',
+          borderRadius: 4,
+          cursor: 'pointer',
+        }}
+      >
+        <Icon path={ICONS.expand} stroke={fullscreen ? 'white' : '#1A1A1A'} />
+        <span style={{ fontSize: '0.85rem' }}>{fullscreen ? 'Exit' : 'Fullscreen'}</span>
+      </button>
+    </div>
+  );
+}
+
+function Icon({ path, stroke = '#1A1A1A', size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none"
+      stroke={stroke} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+      style={{ display: 'block' }}>
+      <path d={path} />
+    </svg>
+  );
+}
+const ICONS = {
+  cursor: 'M4 3 L4 17 L9 13 L12 19 L14.5 17.5 L11.5 11.5 L17 11 Z',
+  hand:   'M7 11 V6 a1.5 1.5 0 0 1 3 0 V11 M10 11 V4 a1.5 1.5 0 0 1 3 0 V11 M13 11 V5 a1.5 1.5 0 0 1 3 0 V13 M16 13 V8 a1.5 1.5 0 0 1 3 0 V14 a6 6 0 0 1 -6 6 H11 a4 4 0 0 1 -3.5 -2 L4 12 a1.7 1.7 0 0 1 3 -1.5 L8 12',
+  pencil: 'M4 20 L4 16 L16 4 L20 8 L8 20 Z M14 6 L18 10',
+  expand: 'M4 9 V4 H9 M20 9 V4 H15 M4 15 V20 H9 M20 15 V20 H15',
+};
 
 // ---------- side panels ----------
 function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose }) {
@@ -619,26 +881,19 @@ function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose 
         onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== section.section_name) onPatch({ section_name: v }); }}
       />
       <label>Pitch</label>
-      <select
-        value={section.pitch}
-        onChange={(e) => onPatch({ pitch: e.target.value })}
-      >
+      <select value={section.pitch} onChange={(e) => onPatch({ pitch: e.target.value })}>
         {PITCH_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
       </select>
-
       <p className="muted" style={{ marginTop: '0.75rem', marginBottom: 0 }}>
         Footprint: <strong>{g.footprintArea.toLocaleString(undefined, { maximumFractionDigits: 0 })} sf</strong>
         {' · '}
         Surface: <strong>{g.surfaceArea.toLocaleString(undefined, { maximumFractionDigits: 0 })} sf</strong>
       </p>
-
       <p className="muted" style={{ marginTop: '0.75rem', marginBottom: '0.25rem', fontSize: '0.85rem' }}>
         Edges (click an edge on the canvas for Gable/Hip)
       </p>
       <table style={{ fontSize: '0.85rem' }}>
-        <thead>
-          <tr><th>#</th><th>End</th><th>Overhang (ft)</th></tr>
-        </thead>
+        <thead><tr><th>#</th><th>End</th><th>Overhang (ft)</th></tr></thead>
         <tbody>
           {(section.edges || []).slice().sort((a, b) => Number(a.edge_index) - Number(b.edge_index)).map((e) => (
             <tr key={e.id}>
@@ -664,8 +919,27 @@ function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose 
           ))}
         </tbody>
       </table>
-
       <button className="danger" style={{ marginTop: '0.75rem', width: '100%' }} onClick={onDelete}>Delete this section</button>
+    </div>
+  );
+}
+
+function EmptyStatePanel({ onDraw, onRetry }) {
+  return (
+    <div className="card">
+      <strong>No roof yet</strong>
+      <p className="muted" style={{ marginTop: '0.5rem', fontSize: '0.9rem' }}>
+        Roof sections normally auto-copy from your top floor's polygon. Draw your
+        Floor 1 polygon first, then come back to the Roof tab — it'll create a
+        "Main Roof" section with 18″ overhangs automatically.
+      </p>
+      <p className="muted" style={{ marginTop: '0.75rem', fontSize: '0.9rem' }}>
+        Or skip the auto-copy and start from scratch.
+      </p>
+      <div className="row" style={{ marginTop: '0.75rem', gap: '0.5rem' }}>
+        <button className="primary" onClick={onDraw}>Draw Section manually</button>
+        <button className="secondary" onClick={onRetry}>Re-check floor plans</button>
+      </div>
     </div>
   );
 }
@@ -674,23 +948,17 @@ function ProjectRoofSettingsPanel({ roof, onPatch }) {
   return (
     <div className="card">
       <strong>Roof project settings</strong>
-      <p className="muted" style={{ marginTop: '0.4rem', fontSize: '0.85rem' }}>
-        Applied across all sections.
-      </p>
+      <p className="muted" style={{ marginTop: '0.4rem', fontSize: '0.85rem' }}>Applied across all sections.</p>
       <label>Sheathing</label>
       <select
         value={roof?.sheathing_type || 'plywood_1_2_csp'}
         onChange={(e) => onPatch({ sheathing_type: e.target.value })}
-      >
-        {SHEATHING_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
+      >{SHEATHING_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
       <label>Rafter / truss spacing</label>
       <select
         value={roof?.rafter_spacing || '24_oc'}
         onChange={(e) => onPatch({ rafter_spacing: e.target.value })}
-      >
-        {SPACING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
+      >{SPACING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
       <p className="muted" style={{ marginTop: '0.75rem', fontSize: '0.85rem', marginBottom: 0 }}>
         Click a section on the canvas to edit its name, pitch, and per-edge overhangs / end type.
       </p>
@@ -699,20 +967,11 @@ function ProjectRoofSettingsPanel({ roof, onPatch }) {
 }
 
 // ---------- canvas ----------
-function pointInPolygon(x, y, corners) {
-  let inside = false;
-  for (let i = 0, j = corners.length - 1; i < corners.length; j = i++) {
-    const xi = Number(corners[i].x), yi = Number(corners[i].y);
-    const xj = Number(corners[j].x), yj = Number(corners[j].y);
-    const intersect = ((yi > y) !== (yj > y)) &&
-      (x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-9) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
 function drawScene(ctx, size, vp, S) {
-  const { sections, selectedSectionId, selectedCornerKey, selectedEdgeKey, adding, draftCorners, hoverWorld, scale } = S;
+  const {
+    sections, selectedSectionId, selectedCornerKey, selectedEdgeKey,
+    tool, draftCorners, hoverWorld, snappedHover, scale, rafterSpacing,
+  } = S;
   ctx.fillStyle = '#FAFAFA';
   ctx.fillRect(0, 0, size.w, size.h);
   // grid
@@ -725,119 +984,281 @@ function drawScene(ctx, size, vp, S) {
   for (let y = startY; y < size.h; y += step) { ctx.moveTo(0, y + 0.5); ctx.lineTo(size.w, y + 0.5); }
   ctx.stroke();
 
-  // sections
   for (const s of sections) {
-    const { corners, edges, ccw, expanded } = sectionGeom(s, scale);
-    if (corners.length < 3) continue;
-    const selected = s.id === selectedSectionId;
-    // Filled body
-    ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
+    drawSection(ctx, s, vp, scale, rafterSpacing,
+      s.id === selectedSectionId, selectedCornerKey, selectedEdgeKey);
+  }
+
+  // Valley / ridge overlay between sections (solid now per spec).
+  drawSharedEdges(ctx, sections, vp, scale);
+
+  // Draft polygon (when adding a new section)
+  if (tool === 'draw_section' && draftCorners.length > 0) {
+    ctx.strokeStyle = '#CC0000'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
     ctx.beginPath();
-    for (let i = 0; i < corners.length; i++) {
-      const c = worldToScreen(corners[i].x, corners[i].y, vp);
+    for (let i = 0; i < draftCorners.length; i++) {
+      const c = worldToScreen(draftCorners[i].x, draftCorners[i].y, vp);
       if (i === 0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
     }
+    if (hoverWorld) {
+      const hp = snappedHover || hoverWorld;
+      const hc = worldToScreen(hp.x, hp.y, vp);
+      ctx.lineTo(hc.x, hc.y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const dc of draftCorners) {
+      const c = worldToScreen(dc.x, dc.y, vp);
+      ctx.fillStyle = '#CC0000';
+      ctx.beginPath(); ctx.arc(c.x, c.y, 5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  // Snap indicator (yellow ring) when drawing and a snap point is active.
+  if (tool === 'draw_section' && snappedHover) {
+    const ss = worldToScreen(snappedHover.x, snappedHover.y, vp);
+    ctx.strokeStyle = '#F59E0B'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(ss.x, ss.y, 9, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.3)';
+    ctx.beginPath(); ctx.arc(ss.x, ss.y, 5, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawSection(ctx, section, vp, scale, rafterSpacing, selected, selectedCornerKey, selectedEdgeKey) {
+  const { corners, edges, ccw, expanded } = sectionGeom(section, scale);
+  if (corners.length < 3 || expanded.length < 3) return;
+
+  // Build screen-space paths for both polygons.
+  const expScreen = expanded.map((c) => worldToScreen(c.x, c.y, vp));
+  const wallScreen = corners.map((c) => worldToScreen(c.x, c.y, vp));
+
+  // Polygon body (roof outline w/ overhangs).
+  ctx.fillStyle = 'rgba(59, 130, 246, 0.10)';
+  ctx.beginPath();
+  for (let i = 0; i < expScreen.length; i++) {
+    const p = expScreen[i];
+    if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  // Per-edge stroke on the OUTER (overhang) polygon — gable solid, hip dashed.
+  for (let i = 0; i < expScreen.length; i++) {
+    const a = expScreen[i], b = expScreen[(i + 1) % expScreen.length];
+    const e = edges.find((ee) => Number(ee.edge_index) === i);
+    const isHip = e?.end_type === 'hip';
+    const edgeKey = `${section.id}:${i}`;
+    const edgeSelected = edgeKey === selectedEdgeKey;
+    ctx.strokeStyle = selected ? '#CC0000' : '#1D4ED8';
+    ctx.lineWidth = edgeSelected ? 3 : (selected ? 2.5 : 2);
+    ctx.setLineDash(isHip ? [6, 4] : []);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Eave dashed line: the wall corners — inset within the polygon.
+  ctx.strokeStyle = '#6B7280';
+  ctx.lineWidth = 0.75;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  for (let i = 0; i < wallScreen.length; i++) {
+    const p = wallScreen[i];
+    if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ----- Roof structural lines (clip to expanded polygon for rafters) -----
+  const ridge = computeRidgeAndHips(section, scale);
+
+  // Rafter / truss lines: 6 evenly spaced lines perpendicular to ridge,
+  // clipped to the expanded polygon.
+  if (ridge) {
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i < expScreen.length; i++) {
+      const p = expScreen[i];
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
     ctx.closePath();
-    ctx.fill();
-
-    // Per-edge stroke (gable solid, hip dashed)
-    for (let i = 0; i < corners.length; i++) {
-      const a = worldToScreen(corners[i].x, corners[i].y, vp);
-      const b = worldToScreen(corners[(i + 1) % corners.length].x, corners[(i + 1) % corners.length].y, vp);
-      const e = edges.find((ee) => Number(ee.edge_index) === i);
-      const isHip = e?.end_type === 'hip';
-      const edgeKey = `${s.id}:${i}`;
-      const edgeSelected = edgeKey === selectedEdgeKey;
-      ctx.strokeStyle = selected ? '#CC0000' : '#1D4ED8';
-      ctx.lineWidth = edgeSelected ? 3 : (selected ? 2.5 : 2);
-      ctx.setLineDash(isHip ? [6, 4] : []);
+    ctx.clip();
+    ctx.strokeStyle = '#9CA3AF';
+    ctx.lineWidth = 0.75;
+    const { bbox, horizontal } = ridge;
+    const N = 6;
+    for (let k = 1; k <= N; k++) {
+      const t = k / (N + 1);
       ctx.beginPath();
-      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-
-    // Overhang dashed lines (from polygon edge to expanded edge)
-    ctx.strokeStyle = '#7C7C7C';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    for (let i = 0; i < corners.length; i++) {
-      const a = corners[i], b = corners[(i + 1) % corners.length];
-      const ea = expanded[i], eb = expanded[(i + 1) % expanded.length];
-      const aS = worldToScreen(a.x, a.y, vp);
-      const bS = worldToScreen(b.x, b.y, vp);
-      const eaS = worldToScreen(ea.x, ea.y, vp);
-      const ebS = worldToScreen(eb.x, eb.y, vp);
-      ctx.beginPath();
-      ctx.moveTo(aS.x, aS.y); ctx.lineTo(eaS.x, eaS.y);
-      ctx.moveTo(bS.x, bS.y); ctx.lineTo(ebS.x, ebS.y);
-      ctx.moveTo(eaS.x, eaS.y); ctx.lineTo(ebS.x, ebS.y);
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-
-    // Section name label (centroid)
-    const cen = polygonCentroid(corners);
-    const cs = worldToScreen(cen.x, cen.y, vp);
-    ctx.font = '600 12px "Segoe UI", -apple-system, sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    const label = s.section_name || 'Roof Section';
-    const m = ctx.measureText(label);
-    ctx.fillRect(cs.x - m.width / 2 - 4, cs.y - 10, m.width + 8, 18);
-    ctx.fillStyle = '#1D4ED8';
-    ctx.fillText(label, cs.x, cs.y);
-
-    // Corners
-    for (let i = 0; i < corners.length; i++) {
-      const c = worldToScreen(corners[i].x, corners[i].y, vp);
-      const cKey = `${s.id}:${i}`;
-      const isSel = cKey === selectedCornerKey;
-      ctx.fillStyle = isSel ? '#CC0000' : '#1D4ED8';
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, isSel ? 6 : 4, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Overhang handles (small circles outside each edge midpoint)
-    for (let i = 0; i < corners.length; i++) {
-      const a = corners[i], b = corners[(i + 1) % corners.length];
-      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      const { nx, ny } = edgeOutwardNormal(corners, i, ccw);
-      const ms = worldToScreen(mid.x, mid.y, vp);
-      const hx = ms.x + nx * OVERHANG_HANDLE_OFFSET_PX;
-      const hy = ms.y + ny * OVERHANG_HANDLE_OFFSET_PX;
-      ctx.fillStyle = 'white';
-      ctx.strokeStyle = '#1D4ED8';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(hx, hy, OVERHANG_HANDLE_PX, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-      // tiny double-arrow glyph
-      ctx.strokeStyle = '#1D4ED8';
-      ctx.beginPath();
-      ctx.moveTo(hx - 4, hy); ctx.lineTo(hx + 4, hy);
-      ctx.moveTo(hx - 4, hy); ctx.lineTo(hx - 2, hy - 2);
-      ctx.moveTo(hx - 4, hy); ctx.lineTo(hx - 2, hy + 2);
-      ctx.moveTo(hx + 4, hy); ctx.lineTo(hx + 2, hy - 2);
-      ctx.moveTo(hx + 4, hy); ctx.lineTo(hx + 2, hy + 2);
-      ctx.stroke();
-      // overhang label
-      const e = edges.find((ee) => Number(ee.edge_index) === i);
-      if (e && Number(e.overhang_ft) > 0) {
-        ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        ctx.fillStyle = '#1D4ED8';
-        ctx.fillText(`${Number(e.overhang_ft).toFixed(2)}ft`, hx + nx * 14, hy + ny * 14);
+      if (horizontal) {
+        const x = bbox.minX + (bbox.maxX - bbox.minX) * t;
+        const a = worldToScreen(x, bbox.minY - 1, vp);
+        const b = worldToScreen(x, bbox.maxY + 1, vp);
+        ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      } else {
+        const y = bbox.minY + (bbox.maxY - bbox.minY) * t;
+        const a = worldToScreen(bbox.minX - 1, y, vp);
+        const b = worldToScreen(bbox.maxX + 1, y, vp);
+        ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
       }
+      ctx.stroke();
+    }
+    ctx.restore();
+    // Rafter spacing label near one of the rafters.
+    const lbl = rafterSpacing === '16_oc' ? '@ 16" o.c.' : '@ 24" o.c.';
+    ctx.font = '500 9px "Segoe UI", -apple-system, sans-serif';
+    ctx.fillStyle = '#6B7280';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    const labelAnchor = horizontal
+      ? worldToScreen(bbox.minX + (bbox.maxX - bbox.minX) / (6 + 1), bbox.minY, vp)
+      : worldToScreen(bbox.minX, bbox.minY + (bbox.maxY - bbox.minY) / (6 + 1), vp);
+    ctx.fillText(lbl, labelAnchor.x + 4, labelAnchor.y + 4);
+  }
+
+  // Hip lines (orange).
+  if (ridge && ridge.hipLines.length > 0) {
+    ctx.strokeStyle = '#D97706';
+    ctx.lineWidth = 1.5;
+    for (const h of ridge.hipLines) {
+      const a = worldToScreen(h.a.x, h.a.y, vp);
+      const b = worldToScreen(h.b.x, h.b.y, vp);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
   }
 
-  // Valley / ridge overlay between sections. Heuristic: any two edges from
-  // different sections that are within 1ft and parallel within ~5° are
-  // treated as a shared edge. Same pitch → valley (purple); different
-  // pitches → ridge (orange). The overlay is for visual reference only —
-  // the rules engine does the matching length computation.
+  // Ridge line (red, bold).
+  if (ridge && (ridge.ridgeStart.x !== ridge.ridgeEnd.x || ridge.ridgeStart.y !== ridge.ridgeEnd.y)) {
+    const ra = worldToScreen(ridge.ridgeStart.x, ridge.ridgeStart.y, vp);
+    const rb = worldToScreen(ridge.ridgeEnd.x, ridge.ridgeEnd.y, vp);
+    ctx.strokeStyle = '#CC0000';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(ra.x, ra.y); ctx.lineTo(rb.x, rb.y); ctx.stroke();
+    // Pitch label at midpoint.
+    const mx = (ra.x + rb.x) / 2;
+    const my = (ra.y + rb.y) / 2;
+    ctx.font = '600 10px "Segoe UI", -apple-system, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    const pitchTxt = section.pitch || '6:12';
+    const pm = ctx.measureText(pitchTxt);
+    ctx.fillRect(mx - pm.width / 2 - 3, my - 14, pm.width + 6, 14);
+    ctx.fillStyle = '#CC0000';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(pitchTxt, mx, my - 2);
+  }
+
+  // Gable end indicators: small filled triangles at the two corners of each
+  // gable end edge, pointing toward the polygon interior (centroid).
+  const expCentroid = polygonCentroid(expanded);
+  ctx.fillStyle = 'rgba(29, 78, 216, 0.6)';
+  for (let i = 0; i < expanded.length; i++) {
+    const e = edges.find((ee) => Number(ee.edge_index) === i);
+    if (e?.end_type !== 'gable') continue;
+    const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+    const ends = [a, b];
+    for (const corner of ends) {
+      const cs = worldToScreen(corner.x, corner.y, vp);
+      const towardCentroid = { x: expCentroid.x - corner.x, y: expCentroid.y - corner.y };
+      const tlen = Math.hypot(towardCentroid.x, towardCentroid.y) || 1;
+      const tx = towardCentroid.x / tlen, ty = towardCentroid.y / tlen;
+      const px = -ty, py = tx; // perpendicular
+      const tipS = { x: cs.x + tx * 10, y: cs.y + ty * 10 };
+      const baseAS = { x: cs.x + tx * 0 + px * 4, y: cs.y + ty * 0 + py * 4 };
+      const baseBS = { x: cs.x + tx * 0 - px * 4, y: cs.y + ty * 0 - py * 4 };
+      ctx.beginPath();
+      ctx.moveTo(tipS.x, tipS.y);
+      ctx.lineTo(baseAS.x, baseAS.y);
+      ctx.lineTo(baseBS.x, baseBS.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  // Edge length dimension labels OUTSIDE each edge (expanded perimeter).
+  ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (let i = 0; i < expanded.length; i++) {
+    const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+    const lenFt = Math.hypot(b.x - a.x, b.y - a.y) * scale;
+    if (lenFt < 0.5) continue;
+    const midW = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const { nx, ny } = edgeOutwardNormal(expanded, i, ccw);
+    const labelW = { x: midW.x + nx * 1.0 / scale, y: midW.y + ny * 1.0 / scale };
+    const ls = worldToScreen(labelW.x, labelW.y, vp);
+    const txt = `${lenFt.toFixed(1)}'`;
+    const tm = ctx.measureText(txt);
+    ctx.fillStyle = 'white';
+    ctx.fillRect(ls.x - tm.width / 2 - 2, ls.y - 7, tm.width + 4, 14);
+    ctx.fillStyle = '#1A1A1A';
+    ctx.fillText(txt, ls.x, ls.y);
+  }
+
+  // Section name + area + pitch labels at the centroid (of expanded perimeter).
+  {
+    const cs = worldToScreen(expCentroid.x, expCentroid.y, vp);
+    const footprint = polygonArea(expanded) * (scale * scale);
+    const surface = footprint * (PITCH_MULT[section.pitch] || PITCH_MULT['6:12']);
+    const name = section.section_name || 'Roof Section';
+    const areaTxt = `${Math.round(surface).toLocaleString()} sf`;
+    const pitchTxt = `${section.pitch} pitch`;
+
+    ctx.font = '600 12px "Segoe UI", -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    const nameW = ctx.measureText(name).width;
+    ctx.font = '500 11px "Segoe UI", -apple-system, sans-serif';
+    const areaW = ctx.measureText(areaTxt).width;
+    ctx.font = '500 9px "Segoe UI", -apple-system, sans-serif';
+    const pitchW = ctx.measureText(pitchTxt).width;
+    const maxW = Math.max(nameW, areaW, pitchW);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillRect(cs.x - maxW / 2 - 5, cs.y - 24, maxW + 10, 50);
+
+    ctx.font = '600 12px "Segoe UI", -apple-system, sans-serif';
+    ctx.fillStyle = '#1D4ED8';
+    ctx.textBaseline = 'top';
+    ctx.fillText(name, cs.x, cs.y - 22);
+    ctx.font = '500 11px "Segoe UI", -apple-system, sans-serif';
+    ctx.fillText(areaTxt, cs.x, cs.y - 6);
+    ctx.font = '500 9px "Segoe UI", -apple-system, sans-serif';
+    ctx.fillStyle = '#6B7280';
+    ctx.fillText(pitchTxt, cs.x, cs.y + 10);
+  }
+
+  // Wall corner handles (the draggable corners). Drawn ON TOP so they remain
+  // visible over the rafters and the eave dashed line.
+  for (let i = 0; i < wallScreen.length; i++) {
+    const p = wallScreen[i];
+    const cKey = `${section.id}:${i}`;
+    const isSel = cKey === selectedCornerKey;
+    ctx.fillStyle = isSel ? '#CC0000' : '#1D4ED8';
+    ctx.beginPath(); ctx.arc(p.x, p.y, isSel ? 6 : 4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Overhang handles at expanded edge midpoints (outward).
+  for (let i = 0; i < expanded.length; i++) {
+    const a = expanded[i], b = expanded[(i + 1) % expanded.length];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const { nx, ny } = edgeOutwardNormal(expanded, i, ccw);
+    const ms = worldToScreen(mid.x, mid.y, vp);
+    const hx = ms.x + nx * OVERHANG_HANDLE_OFFSET_PX;
+    const hy = ms.y + ny * OVERHANG_HANDLE_OFFSET_PX;
+    ctx.fillStyle = 'white';
+    ctx.strokeStyle = '#1D4ED8';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(hx, hy, OVERHANG_HANDLE_PX, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(hx - 4, hy); ctx.lineTo(hx + 4, hy);
+    ctx.moveTo(hx - 4, hy); ctx.lineTo(hx - 2, hy - 2);
+    ctx.moveTo(hx - 4, hy); ctx.lineTo(hx - 2, hy + 2);
+    ctx.moveTo(hx + 4, hy); ctx.lineTo(hx + 2, hy - 2);
+    ctx.moveTo(hx + 4, hy); ctx.lineTo(hx + 2, hy + 2);
+    ctx.stroke();
+  }
+}
+
+function drawSharedEdges(ctx, sections, vp, scale) {
+  if (sections.length < 2) return;
   const PARALLEL_DOT = Math.cos(5 * Math.PI / 180);
   const NEAR_FT = 1.0;
   const drawn = new Set();
@@ -847,6 +1268,9 @@ function drawScene(ctx, size, vp, S) {
       const b = sectionGeom(sections[sj], scale);
       if (a.expanded.length < 3 || b.expanded.length < 3) continue;
       const sameP = sections[si].pitch === sections[sj].pitch;
+      const pitchA = pitchRiseRun(sections[si].pitch);
+      const pitchB = pitchRiseRun(sections[sj].pitch);
+      const valleyFactor = Math.sqrt(1 + 2 * Math.max(pitchA, pitchB) ** 2);
       for (let i = 0; i < a.expanded.length; i++) {
         const ax1 = a.expanded[i], ax2 = a.expanded[(i + 1) % a.expanded.length];
         const adx = ax2.x - ax1.x, ady = ax2.y - ax1.y;
@@ -862,44 +1286,33 @@ function drawScene(ctx, size, vp, S) {
           const key = `${si}:${i}:${sj}:${j}`;
           if (drawn.has(key)) continue;
           drawn.add(key);
-          // Use the shorter edge for the overlay run.
           const useA = aLen <= bLen ? [ax1, ax2] : [bx1, bx2];
+          const lenFt = Math.min(aLen, bLen) * scale;
+          const valleyLf = lenFt * valleyFactor;
           const p1 = worldToScreen(useA[0].x, useA[0].y, vp);
           const p2 = worldToScreen(useA[1].x, useA[1].y, vp);
           ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
           ctx.lineWidth = 2;
-          ctx.setLineDash([6, 4]);
-          ctx.beginPath();
-          ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
+          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+          // Length label (only for valleys — same pitch)
+          if (sameP) {
+            const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+            const txt = `V: ${valleyLf.toFixed(1)}'`;
+            ctx.font = '500 9px "Segoe UI", -apple-system, sans-serif';
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
+            const tm = ctx.measureText(txt);
+            ctx.fillRect(mx - tm.width / 2 - 2, my - 14, tm.width + 4, 12);
+            ctx.fillStyle = '#7C3AED';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+            ctx.fillText(txt, mx, my - 3);
+          }
         }
       }
     }
   }
+}
 
-  // Draft polygon (when adding a new section)
-  if (adding && draftCorners.length > 0) {
-    ctx.strokeStyle = '#CC0000';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    for (let i = 0; i < draftCorners.length; i++) {
-      const c = worldToScreen(draftCorners[i].x, draftCorners[i].y, vp);
-      if (i === 0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
-    }
-    if (hoverWorld) {
-      const hc = worldToScreen(hoverWorld.x, hoverWorld.y, vp);
-      ctx.lineTo(hc.x, hc.y);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-    for (const dc of draftCorners) {
-      const c = worldToScreen(dc.x, dc.y, vp);
-      ctx.fillStyle = '#CC0000';
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
+function pitchRiseRun(pitch) {
+  const m = /^(\d+):12$/.exec(pitch || '');
+  return m ? Number(m[1]) / 12 : 0.5;
 }
