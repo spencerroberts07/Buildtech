@@ -408,6 +408,10 @@ export default function RoofSketch({
       setSelectedSectionId(created.id);
       onMaterialsChanged?.();
       showToast(`Roof copied from ${src} — adjust overhangs and add sections as needed`);
+      // Run the same L-shape / complex-shape detection as manual draw.
+      // Copying from an L-shaped floor plan should also surface the split
+      // prompt so the user gets clean rectangular sections by default.
+      if (isComplexShape(created.corners)) setSplitPrompt(created);
     } catch (e) { setError(e.message); }
   }
 
@@ -903,7 +907,7 @@ export default function RoofSketch({
               position: 'absolute', left: overhangDragLabel.sx + 14, top: overhangDragLabel.sy - 10,
               padding: '2px 6px', background: 'rgba(10,10,10,0.92)', color: 'white',
               fontSize: 11, fontWeight: 600, borderRadius: 4, pointerEvents: 'none',
-            }}>Overhang: {overhangDragLabel.oh.toFixed(2)}ft</div>
+            }}>Overhang: {Math.round(overhangDragLabel.oh * 12)}"</div>
           )}
           {toast && (
             <div style={{
@@ -927,6 +931,7 @@ export default function RoofSketch({
               onPatchEdge={(eid, patch) => patchEdge(selectedSection.id, eid, patch)}
               onDelete={() => deleteSection(selectedSection.id)}
               onClose={() => { setSelectedSectionId(null); setSelectedCornerKey(null); setSelectedEdgeKey(null); }}
+              onSplit={() => setSplitPrompt(selectedSection)}
             />
           ) : (
             <ProjectRoofSettingsPanel roof={legacyRoof} onPatch={patchLegacyRoof} />
@@ -1036,8 +1041,9 @@ const ICONS = {
 };
 
 // ---------- side panels ----------
-function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose }) {
+function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose, onSplit }) {
   const g = sectionGeom(section, scale);
+  const complex = isComplexShape(section.corners);
   return (
     <div className="card">
       <div className="row" style={{ marginBottom: '0.5rem' }}>
@@ -1077,7 +1083,7 @@ function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose 
         Edges (click an edge on the canvas for Gable/Hip)
       </p>
       <table style={{ fontSize: '0.85rem' }}>
-        <thead><tr><th>#</th><th>End</th><th>Overhang (ft)</th></tr></thead>
+        <thead><tr><th>#</th><th>End</th><th>Overhang (in)</th></tr></thead>
         <tbody>
           {(section.edges || []).slice().sort((a, b) => Number(a.edge_index) - Number(b.edge_index)).map((e) => (
             <tr key={e.id}>
@@ -1090,12 +1096,13 @@ function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose 
               </td>
               <td>
                 <input
-                  type="number" step="0.25" min="0" max="4"
+                  type="number" step="3" min="0" max="48"
                   style={{ width: '4rem' }}
-                  defaultValue={Number(e.overhang_ft)}
+                  defaultValue={Math.round(Number(e.overhang_ft) * 12)}
                   onBlur={(ev) => {
-                    const v = Math.max(0, Math.min(4, Number(ev.target.value) || 0));
-                    if (v !== Number(e.overhang_ft)) onPatchEdge(e.id, { overhang_ft: v });
+                    const inches = Math.max(0, Math.min(48, Number(ev.target.value) || 0));
+                    const ft = inches / 12;
+                    if (Math.abs(ft - Number(e.overhang_ft)) > 1e-6) onPatchEdge(e.id, { overhang_ft: ft });
                   }}
                 />
               </td>
@@ -1103,7 +1110,15 @@ function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose 
           ))}
         </tbody>
       </table>
-      <button className="danger" style={{ marginTop: '0.75rem', width: '100%' }} onClick={onDelete}>Delete this section</button>
+      {complex && onSplit && (
+        <button
+          className="secondary"
+          style={{ marginTop: '0.75rem', width: '100%', borderColor: '#FFB800', color: '#92400E' }}
+          onClick={onSplit}
+          title="Split into two rectangular sections joined at a valley"
+        >Split section…</button>
+      )}
+      <button className="danger" style={{ marginTop: '0.5rem', width: '100%' }} onClick={onDelete}>Delete this section</button>
     </div>
   );
 }
