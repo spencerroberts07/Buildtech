@@ -152,6 +152,16 @@ function isComplexShape(corners) {
   return findReflexCorner(corners) != null;
 }
 
+// True when the polygon's axis-aligned bbox is wider than tall (or square).
+function bboxIsWiderThanTall(corners) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, Number(c.x)); maxX = Math.max(maxX, Number(c.x));
+    minY = Math.min(minY, Number(c.y)); maxY = Math.max(maxY, Number(c.y));
+  }
+  return (maxX - minX) >= (maxY - minY);
+}
+
 // Bounding-box aspect ratio (long / short) — used to compare candidate splits.
 function bboxAspectRatio(corners) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -207,7 +217,15 @@ function computeCutAndSplit(corners, k, dir) {
     polyB.push({ x: Number(corners[i2].x), y: Number(corners[i2].y) });
     i2 = (i2 + 1) % n;
   }
-  return { polyA, polyB };
+  // sharedA = the reflex corner (interior corner of the original L);
+  // sharedB = the point where the cut line exits the polygon. The shared
+  // edge between the two new sections is the segment between them, and
+  // its direction tells us which way the Wing's ridge should run.
+  return {
+    polyA, polyB,
+    sharedA: { x: Number(cur.x), y: Number(cur.y) },
+    sharedB: { x: P.x, y: P.y },
+  };
 }
 
 // Pick the L-shape split that produces the two most square-like pieces. Tries
@@ -492,16 +510,31 @@ export default function RoofSketch({
       setSplitPrompt(null);
       return;
     }
+    // Decide which piece is Main vs Wing by area. The larger piece is the
+    // Main Roof and its ridge runs along its own long axis. The Wing Roof's
+    // ridge is perpendicular to the shared edge so the two ridges actually
+    // intersect — which is what the valley line needs to terminate at.
+    const areaA = polygonArea(split.polyA);
+    const areaB = polygonArea(split.polyB);
+    const mainCorners = areaA >= areaB ? split.polyA : split.polyB;
+    const wingCorners = areaA >= areaB ? split.polyB : split.polyA;
+    const mainDir = bboxIsWiderThanTall(mainCorners) ? 'horizontal' : 'vertical';
+    const sdx = split.sharedB.x - split.sharedA.x;
+    const sdy = split.sharedB.y - split.sharedA.y;
+    const sharedIsHorizontal = Math.abs(sdx) >= Math.abs(sdy);
+    const wingDir = sharedIsHorizontal ? 'vertical' : 'horizontal';
     try {
       const a = await api.createRoofSection(projectId, {
         section_name: 'Main Roof',
-        corners: split.polyA,
+        corners: mainCorners,
         pitch: original.pitch,
+        ridge_direction: mainDir,
       });
       const b = await api.createRoofSection(projectId, {
         section_name: 'Wing Roof',
-        corners: split.polyB,
+        corners: wingCorners,
         pitch: original.pitch,
+        ridge_direction: wingDir,
       });
       await api.deleteRoofSection(projectId, original.id);
       setSections((cur) => {
@@ -1517,9 +1550,13 @@ function drawSharedEdges(ctx, sections, vp, scale) {
       const b = sectionGeom(sections[sj], scale);
       if (a.expanded.length < 3 || b.expanded.length < 3) continue;
       const sameP = sections[si].pitch === sections[sj].pitch;
-      const pitchA = pitchRiseRun(sections[si].pitch);
-      const pitchB = pitchRiseRun(sections[sj].pitch);
-      const valleyFactor = Math.sqrt(1 + 2 * Math.max(pitchA, pitchB) ** 2);
+      // Valley length factor: pitch multiplier of either side when they
+      // match, geometric mean of the two multipliers when they differ.
+      // (Pitch multiplier = sqrt(1 + (rise/run)^2). Plan distance × this
+      // factor approximates the actual valley rafter length.)
+      const multA = PITCH_MULT[sections[si].pitch] || PITCH_MULT['6:12'];
+      const multB = PITCH_MULT[sections[sj].pitch] || PITCH_MULT['6:12'];
+      const valleyFactor = sameP ? multA : Math.sqrt(multA * multB);
       for (let i = 0; i < a.expanded.length; i++) {
         const ax1 = a.expanded[i], ax2 = a.expanded[(i + 1) % a.expanded.length];
         const adx = ax2.x - ax1.x, ady = ax2.y - ax1.y;
@@ -1565,18 +1602,32 @@ function drawSharedEdges(ctx, sections, vp, scale) {
             valleyLfWorld = Math.min(aLen, bLen) * scale * valleyFactor;
           }
           ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
-          ctx.lineWidth = 2;
+          ctx.lineWidth = sameP ? 2.5 : 2;
           ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
           if (sameP) {
-            const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+            // Chevron at p2 (the ridge end / high point of the valley).
+            const dx = p2.x - p1.x, dy = p2.y - p1.y;
+            const seg = Math.hypot(dx, dy) || 1;
+            const ux = dx / seg, uy = dy / seg;
+            const px = -uy, py = ux;
+            const back = 8;
+            ctx.beginPath();
+            ctx.moveTo(p2.x - ux * back + px * (back * 0.55), p2.y - uy * back + py * (back * 0.55));
+            ctx.lineTo(p2.x, p2.y);
+            ctx.lineTo(p2.x - ux * back - px * (back * 0.55), p2.y - uy * back - py * (back * 0.55));
+            ctx.stroke();
+            // Length label offset perpendicular to the valley so it sits
+            // beside the line rather than on top of it.
+            const mx = (p1.x + p2.x) / 2 + px * 12;
+            const my = (p1.y + p2.y) / 2 + py * 12;
             const txt = `V: ${valleyLfWorld.toFixed(1)}'`;
-            ctx.font = '500 9px "Segoe UI", -apple-system, sans-serif';
+            ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
             ctx.fillStyle = 'rgba(255,255,255,0.85)';
             const tm = ctx.measureText(txt);
-            ctx.fillRect(mx - tm.width / 2 - 2, my - 14, tm.width + 4, 12);
+            ctx.fillRect(mx - tm.width / 2 - 2, my - 7, tm.width + 4, 14);
             ctx.fillStyle = '#7C3AED';
-            ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-            ctx.fillText(txt, mx, my - 3);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(txt, mx, my);
           }
         }
       }
