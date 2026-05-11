@@ -124,6 +124,115 @@ function edgeOutwardNormal(corners, i, ccw) {
   return ccw ? { nx: dy / len, ny: -dx / len } : { nx: -dy / len, ny: dx / len };
 }
 
+// Find the first reflex (re-entrant) corner — a corner whose interior angle
+// exceeds 180°. Such a corner sticks INTO the polygon. Returns null for
+// purely convex polygons.
+function findReflexCorner(corners) {
+  const n = corners.length;
+  if (n < 4) return null;
+  const ccw = isCCW(corners);
+  for (let i = 0; i < n; i++) {
+    const prev = corners[(i - 1 + n) % n];
+    const cur = corners[i];
+    const next = corners[(i + 1) % n];
+    const v1x = Number(cur.x) - Number(prev.x), v1y = Number(cur.y) - Number(prev.y);
+    const v2x = Number(next.x) - Number(cur.x), v2y = Number(next.y) - Number(cur.y);
+    const cross = v1x * v2y - v1y * v2x;
+    if (ccw && cross < 0) return i;
+    if (!ccw && cross > 0) return i;
+  }
+  return null;
+}
+
+// "Complex shape" triggers the split prompt — anything that isn't a simple
+// convex quadrilateral.
+function isComplexShape(corners) {
+  if (!Array.isArray(corners) || corners.length < 3) return false;
+  if (corners.length > 4) return true;
+  return findReflexCorner(corners) != null;
+}
+
+// Bounding-box aspect ratio (long / short) — used to compare candidate splits.
+function bboxAspectRatio(corners) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, Number(c.x)); maxX = Math.max(maxX, Number(c.x));
+    minY = Math.min(minY, Number(c.y)); maxY = Math.max(maxY, Number(c.y));
+  }
+  const w = maxX - minX, h = maxY - minY;
+  if (w <= 0 || h <= 0) return Infinity;
+  return Math.max(w, h) / Math.min(w, h);
+}
+
+// Extend a ray from the reflex corner along `dir`, find the first non-adjacent
+// edge it hits, then build the two resulting polygons. Returns { polyA, polyB }
+// or null if no valid cut is found.
+function computeCutAndSplit(corners, k, dir) {
+  const n = corners.length;
+  const cur = corners[k];
+  const len = Math.hypot(dir.x, dir.y) || 1;
+  const ux = dir.x / len, uy = dir.y / len;
+  let best = null;
+  for (let j = 0; j < n; j++) {
+    if (j === k || j === (k - 1 + n) % n) continue;
+    const a = corners[j], b = corners[(j + 1) % n];
+    const dx = Number(b.x) - Number(a.x), dy = Number(b.y) - Number(a.y);
+    // Ray: cur + t*(ux,uy); Edge: a + s*(dx,dy). Solve for t,s.
+    const denom = ux * dy - uy * dx;
+    if (Math.abs(denom) < 1e-9) continue;
+    const ax = Number(a.x) - Number(cur.x);
+    const ay = Number(a.y) - Number(cur.y);
+    const t = (ax * dy - ay * dx) / denom;
+    const s = (ax * uy - ay * ux) / denom;
+    if (t <= 1e-6) continue;
+    if (s < -1e-9 || s > 1 + 1e-9) continue;
+    if (best == null || t < best.t) {
+      best = { t, s, j, P: { x: Number(cur.x) + t * ux, y: Number(cur.y) + t * uy } };
+    }
+  }
+  if (!best) return null;
+  const { P, j } = best;
+  // polyA: from k forward through k+1, k+2, ..., j, then close via P
+  const polyA = [{ x: Number(cur.x), y: Number(cur.y) }];
+  let i = (k + 1) % n;
+  while (i !== (j + 1) % n) {
+    polyA.push({ x: Number(corners[i].x), y: Number(corners[i].y) });
+    i = (i + 1) % n;
+  }
+  polyA.push({ x: P.x, y: P.y });
+  // polyB: from k via P, then j+1, j+2, ..., k-1
+  const polyB = [{ x: Number(cur.x), y: Number(cur.y) }, { x: P.x, y: P.y }];
+  let i2 = (j + 1) % n;
+  while (i2 !== k) {
+    polyB.push({ x: Number(corners[i2].x), y: Number(corners[i2].y) });
+    i2 = (i2 + 1) % n;
+  }
+  return { polyA, polyB };
+}
+
+// Pick the L-shape split that produces the two most square-like pieces. Tries
+// both cut directions (along the incoming edge and along the reverse of the
+// outgoing edge) and minimizes max(aspectRatioA, aspectRatioB).
+function computeAutoSplit(corners) {
+  const k = findReflexCorner(corners);
+  if (k == null) return null;
+  const n = corners.length;
+  const prev = corners[(k - 1 + n) % n];
+  const cur = corners[k];
+  const next = corners[(k + 1) % n];
+  const dir1 = { x: Number(cur.x) - Number(prev.x), y: Number(cur.y) - Number(prev.y) };
+  const dir2 = { x: Number(cur.x) - Number(next.x), y: Number(cur.y) - Number(next.y) };
+  const cutA = computeCutAndSplit(corners, k, dir1);
+  const cutB = computeCutAndSplit(corners, k, dir2);
+  function maxAspect(pair) {
+    if (!pair) return Infinity;
+    return Math.max(bboxAspectRatio(pair.polyA), bboxAspectRatio(pair.polyB));
+  }
+  const ma = maxAspect(cutA), mb = maxAspect(cutB);
+  if (ma === Infinity && mb === Infinity) return null;
+  return ma <= mb ? cutA : cutB;
+}
+
 // Per-section quick-access geometry. Note `corners` are the wall corners and
 // `expanded` is the roof outline including overhangs — the polygon body fills
 // `expanded` and the wall line is rendered as a dashed inset using `corners`.
@@ -154,9 +263,16 @@ function computeRidgeAndHips(section, scale) {
     minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
   }
   const w = maxX - minX, h = maxY - minY;
-  const horizontal = w >= h;
-  const longDim = Math.max(w, h);
-  const shortDim = Math.min(w, h);
+  // Ridge direction: 'auto' picks the long axis; 'horizontal' / 'vertical'
+  // are manual overrides. With a manual override the ridge runs in the
+  // chosen direction regardless of which bbox dim is larger, which is what
+  // the user expects when they're correcting an auto-detect mismatch.
+  const ridgeOverride = section?.ridge_direction || 'auto';
+  const horizontal = ridgeOverride === 'horizontal' ? true
+    : ridgeOverride === 'vertical' ? false
+    : (w >= h);
+  const longDim = horizontal ? w : h;
+  const shortDim = horizontal ? h : w;
   if (longDim <= 0) return null;
   const cx = (minX + maxX) / 2;
   const cy = (minY + maxY) / 2;
@@ -222,6 +338,7 @@ export default function RoofSketch({
   const [error, setError] = useState('');
   const [autoCopyTried, setAutoCopyTried] = useState(false);
   const [hasFloorPlan, setHasFloorPlan] = useState(false);
+  const [splitPrompt, setSplitPrompt] = useState(null); // section pending split decision
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   function showToast(msg) {
@@ -359,7 +476,39 @@ export default function RoofSketch({
       setSections((cur) => [...cur, created]);
       setSelectedSectionId(created.id);
       onMaterialsChanged?.();
+      // L-shape / complex shape: offer to auto-split into two rectangles.
+      if (isComplexShape(corners)) setSplitPrompt(created);
     } catch (e) { setError(e.message); }
+  }
+
+  async function applyAutoSplit(original) {
+    const split = computeAutoSplit(original.corners || []);
+    if (!split) {
+      showToast('Could not determine a clean split for this shape.');
+      setSplitPrompt(null);
+      return;
+    }
+    try {
+      const a = await api.createRoofSection(projectId, {
+        section_name: 'Main Roof',
+        corners: split.polyA,
+        pitch: original.pitch,
+      });
+      const b = await api.createRoofSection(projectId, {
+        section_name: 'Wing Roof',
+        corners: split.polyB,
+        pitch: original.pitch,
+      });
+      await api.deleteRoofSection(projectId, original.id);
+      setSections((cur) => {
+        const filtered = cur.filter((s) => s.id !== original.id);
+        return [...filtered, a, b];
+      });
+      setSelectedSectionId(a.id);
+      setSplitPrompt(null);
+      showToast('Split into 2 sections — valley detected automatically');
+      onMaterialsChanged?.();
+    } catch (e) { setError(e.message); setSplitPrompt(null); }
   }
   async function patchLegacyRoof(patch) {
     try {
@@ -785,6 +934,26 @@ export default function RoofSketch({
         </div>
       </div>
 
+      {splitPrompt && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100,
+        }}>
+          <div className="card" style={{ maxWidth: 480, padding: '1.25rem' }}>
+            <strong style={{ fontSize: '1.05rem' }}>Complex roof shape detected</strong>
+            <p style={{ marginTop: '0.5rem' }}>
+              This roof section has a complex shape. For an L-shaped or T-shaped house,
+              you'll get better results by drawing two separate rectangular sections that
+              meet at a valley. Would you like to split this into two sections automatically?
+            </p>
+            <div className="row" style={{ marginTop: '1rem' }}>
+              <button className="primary" onClick={() => applyAutoSplit(splitPrompt)}>Split automatically</button>
+              <button className="secondary" onClick={() => setSplitPrompt(null)}>Keep as one</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && <p className="error">{error}</p>}
     </div>
   );
@@ -884,6 +1053,21 @@ function SectionPanel({ section, scale, onPatch, onPatchEdge, onDelete, onClose 
       <select value={section.pitch} onChange={(e) => onPatch({ pitch: e.target.value })}>
         {PITCH_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
       </select>
+      <label>Ridge direction</label>
+      <div className="row" style={{ gap: '0.25rem', marginTop: '0.2rem' }}>
+        {[
+          { v: 'auto', label: 'Auto' },
+          { v: 'horizontal', label: '↔ Horizontal' },
+          { v: 'vertical', label: '↕ Vertical' },
+        ].map((o) => (
+          <button
+            key={o.v}
+            className={(section.ridge_direction || 'auto') === o.v ? 'primary' : 'secondary'}
+            style={{ flex: 1, padding: '0.3rem', fontSize: '0.8rem' }}
+            onClick={() => onPatch({ ridge_direction: o.v })}
+          >{o.label}</button>
+        ))}
+      </div>
       <p className="muted" style={{ marginTop: '0.75rem', marginBottom: 0 }}>
         Footprint: <strong>{g.footprintArea.toLocaleString(undefined, { maximumFractionDigits: 0 })} sf</strong>
         {' · '}
@@ -1174,23 +1358,28 @@ function drawSection(ctx, section, vp, scale, rafterSpacing, selected, selectedC
     }
   }
 
-  // Edge length dimension labels OUTSIDE each edge (expanded perimeter).
+  // Edge length dimension labels OUTSIDE each edge. Placed in fixed SCREEN
+  // pixels beyond the overhang handle so the two never overlap regardless
+  // of zoom level (handle center is 14px out + 9px radius = 23px → put the
+  // label centerline another ~15px past that).
   ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const LABEL_OFFSET_PX = OVERHANG_HANDLE_OFFSET_PX + OVERHANG_HANDLE_PX + 14;
   for (let i = 0; i < expanded.length; i++) {
     const a = expanded[i], b = expanded[(i + 1) % expanded.length];
     const lenFt = Math.hypot(b.x - a.x, b.y - a.y) * scale;
     if (lenFt < 0.5) continue;
     const midW = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     const { nx, ny } = edgeOutwardNormal(expanded, i, ccw);
-    const labelW = { x: midW.x + nx * 1.0 / scale, y: midW.y + ny * 1.0 / scale };
-    const ls = worldToScreen(labelW.x, labelW.y, vp);
+    const midS = worldToScreen(midW.x, midW.y, vp);
+    const lsx = midS.x + nx * LABEL_OFFSET_PX;
+    const lsy = midS.y + ny * LABEL_OFFSET_PX;
     const txt = `${lenFt.toFixed(1)}'`;
     const tm = ctx.measureText(txt);
     ctx.fillStyle = 'white';
-    ctx.fillRect(ls.x - tm.width / 2 - 2, ls.y - 7, tm.width + 4, 14);
+    ctx.fillRect(lsx - tm.width / 2 - 2, lsy - 7, tm.width + 4, 14);
     ctx.fillStyle = '#1A1A1A';
-    ctx.fillText(txt, ls.x, ls.y);
+    ctx.fillText(txt, lsx, lsy);
   }
 
   // Section name + area + pitch labels at the centroid (of expanded perimeter).
@@ -1257,6 +1446,51 @@ function drawSection(ctx, section, vp, scale, rafterSpacing, selected, selectedC
   }
 }
 
+// Find the "interior corner" of an L: the shared-edge endpoint that lies
+// strictly inside the union bounding box of the two sections (not on its
+// boundary). Returns null for cases where both endpoints are on the union
+// boundary — those fall back to the along-edge valley.
+function findInteriorCorner(sharedEndpoints, allCorners) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of allCorners) {
+    minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+    minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+  }
+  const EPS = 0.1;
+  for (const p of sharedEndpoints) {
+    const onLeft = Math.abs(p.x - minX) < EPS;
+    const onRight = Math.abs(p.x - maxX) < EPS;
+    const onTop = Math.abs(p.y - minY) < EPS;
+    const onBot = Math.abs(p.y - maxY) < EPS;
+    if (!onLeft && !onRight && !onTop && !onBot) return p;
+  }
+  return null;
+}
+
+// Build the ridge segment as an extendable infinite line (point + direction).
+function ridgeLine(section, scale) {
+  const r = computeRidgeAndHips(section, scale);
+  if (!r) return null;
+  const dx = r.ridgeEnd.x - r.ridgeStart.x;
+  const dy = r.ridgeEnd.y - r.ridgeStart.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return {
+    p: { x: (r.ridgeStart.x + r.ridgeEnd.x) / 2, y: (r.ridgeStart.y + r.ridgeEnd.y) / 2 },
+    dir: { x: dx / len, y: dy / len },
+    horizontal: r.horizontal,
+  };
+}
+
+// Intersection of two infinite lines (point+direction form). Returns null when
+// the lines are parallel.
+function lineLineIntersect(l1, l2) {
+  const a = l1.p, b = l1.dir, c = l2.p, d = l2.dir;
+  const denom = b.x * d.y - b.y * d.x;
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = ((c.x - a.x) * d.y - (c.y - a.y) * d.x) / denom;
+  return { x: a.x + t * b.x, y: a.y + t * b.y };
+}
+
 function drawSharedEdges(ctx, sections, vp, scale) {
   if (sections.length < 2) return;
   const PARALLEL_DOT = Math.cos(5 * Math.PI / 180);
@@ -1286,18 +1520,41 @@ function drawSharedEdges(ctx, sections, vp, scale) {
           const key = `${si}:${i}:${sj}:${j}`;
           if (drawn.has(key)) continue;
           drawn.add(key);
+          // Identify shared-edge endpoints (use the shorter edge's vertices,
+          // already approximately coincident with the other section's edge).
           const useA = aLen <= bLen ? [ax1, ax2] : [bx1, bx2];
-          const lenFt = Math.min(aLen, bLen) * scale;
-          const valleyLf = lenFt * valleyFactor;
-          const p1 = worldToScreen(useA[0].x, useA[0].y, vp);
-          const p2 = worldToScreen(useA[1].x, useA[1].y, vp);
+          // Pick the interior corner if one of the endpoints sits inside the
+          // union of the two sections' bboxes. For L-shapes the shared edge
+          // has one endpoint that's the inner corner of the L.
+          const allCorners = [...a.expanded, ...b.expanded];
+          const interior = findInteriorCorner(useA, allCorners);
+          // Try to find where the two ridges intersect — that's the high
+          // point above the inner corner.
+          const r1 = ridgeLine(sections[si], scale);
+          const r2 = ridgeLine(sections[sj], scale);
+          let valleyEnd = null;
+          if (r1 && r2) {
+            valleyEnd = lineLineIntersect(r1, r2);
+          }
+          let p1, p2, valleyLfWorld;
+          if (sameP && interior && valleyEnd) {
+            // Purple valley line from inner corner up to ridge intersection.
+            p1 = worldToScreen(interior.x, interior.y, vp);
+            p2 = worldToScreen(valleyEnd.x, valleyEnd.y, vp);
+            const planLen = Math.hypot(valleyEnd.x - interior.x, valleyEnd.y - interior.y);
+            valleyLfWorld = planLen * scale * valleyFactor;
+          } else {
+            // Fallback: along the shared edge (original behavior).
+            p1 = worldToScreen(useA[0].x, useA[0].y, vp);
+            p2 = worldToScreen(useA[1].x, useA[1].y, vp);
+            valleyLfWorld = Math.min(aLen, bLen) * scale * valleyFactor;
+          }
           ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
           ctx.lineWidth = 2;
           ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-          // Length label (only for valleys — same pitch)
           if (sameP) {
             const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
-            const txt = `V: ${valleyLf.toFixed(1)}'`;
+            const txt = `V: ${valleyLfWorld.toFixed(1)}'`;
             ctx.font = '500 9px "Segoe UI", -apple-system, sans-serif';
             ctx.fillStyle = 'rgba(255,255,255,0.85)';
             const tm = ctx.measureText(txt);

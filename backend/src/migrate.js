@@ -403,6 +403,9 @@ const PROJECT_COLUMN_ALTERS = [
   // legacy wall.
   `ALTER TABLE openings ADD COLUMN IF NOT EXISTS swing TEXT DEFAULT 'RHI'`,
   `ALTER TABLE openings ADD COLUMN IF NOT EXISTS floor_plan_interior_wall_id INTEGER REFERENCES floor_plan_interior_walls(id) ON DELETE CASCADE`,
+  // Per-section ridge direction override. 'auto' (default) picks the long
+  // axis of the bounding box; 'horizontal' / 'vertical' force the ridge.
+  `ALTER TABLE roof_sections ADD COLUMN IF NOT EXISTS ridge_direction TEXT DEFAULT 'auto'`,
 ];
 
 const SKU_CATALOG_SEED = [

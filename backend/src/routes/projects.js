@@ -1031,6 +1031,7 @@ router.delete('/:id/roof', async (req, res) => {
 // ---------------- Roof sections (polygon-based roof model) ----------------
 const ROOF_PITCH_VALUES = ['3:12', '4:12', '5:12', '6:12', '7:12', '8:12', '9:12', '10:12', '12:12'];
 const ROOF_END_TYPES = ['gable', 'hip'];
+const ROOF_RIDGE_DIRECTIONS = ['auto', 'horizontal', 'vertical'];
 
 async function loadSectionWithEdges(projectId, sectionId) {
   const sec = (await query(
@@ -1102,13 +1103,17 @@ router.post('/:id/roof-sections', async (req, res) => {
   if (!ROOF_PITCH_VALUES.includes(pitch)) {
     return res.status(400).json({ error: `pitch must be one of: ${ROOF_PITCH_VALUES.join(', ')}` });
   }
+  const ridgeDir = b.ridge_direction || 'auto';
+  if (!ROOF_RIDGE_DIRECTIONS.includes(ridgeDir)) {
+    return res.status(400).json({ error: `ridge_direction must be one of: ${ROOF_RIDGE_DIRECTIONS.join(', ')}` });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const ins = await client.query(
-      `INSERT INTO roof_sections (project_id, section_name, corners, pitch)
-       VALUES ($1, $2, $3::jsonb, $4) RETURNING *`,
-      [id, b.section_name || 'Main Roof', JSON.stringify(corners), pitch]
+      `INSERT INTO roof_sections (project_id, section_name, corners, pitch, ridge_direction)
+       VALUES ($1, $2, $3::jsonb, $4, $5) RETURNING *`,
+      [id, b.section_name || 'Main Roof', JSON.stringify(corners), pitch, ridgeDir]
     );
     const sec = ins.rows[0];
     await ensureEdgesForCorners(client, sec.id, corners);
@@ -1130,6 +1135,9 @@ router.put('/:id/roof-sections/:sid', async (req, res) => {
   if ('pitch' in b && !ROOF_PITCH_VALUES.includes(b.pitch)) {
     return res.status(400).json({ error: 'invalid pitch' });
   }
+  if ('ridge_direction' in b && !ROOF_RIDGE_DIRECTIONS.includes(b.ridge_direction)) {
+    return res.status(400).json({ error: 'invalid ridge_direction' });
+  }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1147,6 +1155,7 @@ router.put('/:id/roof-sections/:sid', async (req, res) => {
     if ('section_name' in b) { updates.push(`section_name = $${p++}`); values.push(b.section_name || 'Main Roof'); }
     if ('pitch' in b) { updates.push(`pitch = $${p++}`); values.push(b.pitch); }
     if ('corners' in b) { updates.push(`corners = $${p++}::jsonb`); values.push(JSON.stringify(b.corners || [])); }
+    if ('ridge_direction' in b) { updates.push(`ridge_direction = $${p++}`); values.push(b.ridge_direction); }
     if (updates.length > 0) {
       values.push(sid);
       await client.query(
