@@ -162,6 +162,20 @@ function bboxIsWiderThanTall(corners) {
   return (maxX - minX) >= (maxY - minY);
 }
 
+// Ridge direction from a section's own bbox. Width-dominant → horizontal;
+// height-dominant → vertical. Square pieces are an explicit tie that the
+// caller resolves (typically by setting the Wing perpendicular to Main).
+function preferredRidgeDir(corners, tieBreakFallback) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, Number(c.x)); maxX = Math.max(maxX, Number(c.x));
+    minY = Math.min(minY, Number(c.y)); maxY = Math.max(maxY, Number(c.y));
+  }
+  const w = maxX - minX, h = maxY - minY;
+  if (Math.abs(w - h) < 1e-6) return tieBreakFallback;
+  return w > h ? 'horizontal' : 'vertical';
+}
+
 // Bounding-box aspect ratio (long / short) — used to compare candidate splits.
 function bboxAspectRatio(corners) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -518,11 +532,13 @@ export default function RoofSketch({
     const areaB = polygonArea(split.polyB);
     const mainCorners = areaA >= areaB ? split.polyA : split.polyB;
     const wingCorners = areaA >= areaB ? split.polyB : split.polyA;
-    const mainDir = bboxIsWiderThanTall(mainCorners) ? 'horizontal' : 'vertical';
-    const sdx = split.sharedB.x - split.sharedA.x;
-    const sdy = split.sharedB.y - split.sharedA.y;
-    const sharedIsHorizontal = Math.abs(sdx) >= Math.abs(sdy);
-    const wingDir = sharedIsHorizontal ? 'vertical' : 'horizontal';
+    // Ridge direction = long axis of EACH section's own bounding box. For a
+    // tall narrow piece the ridge runs vertical; for a wide short piece it
+    // runs horizontal. Square pieces (a rare tie after a clean L-split) get
+    // tie-broken perpendicular to Main so the two ridges actually cross —
+    // otherwise the valley would degenerate to "along the shared edge".
+    const mainDir = preferredRidgeDir(mainCorners, 'horizontal');
+    const wingDir = preferredRidgeDir(wingCorners, mainDir === 'horizontal' ? 'vertical' : 'horizontal');
     try {
       const a = await api.createRoofSection(projectId, {
         section_name: 'Main Roof',
@@ -1494,27 +1510,6 @@ function drawSection(ctx, section, vp, scale, rafterSpacing, selected, selectedC
   }
 }
 
-// Find the "interior corner" of an L: the shared-edge endpoint that lies
-// strictly inside the union bounding box of the two sections (not on its
-// boundary). Returns null for cases where both endpoints are on the union
-// boundary — those fall back to the along-edge valley.
-function findInteriorCorner(sharedEndpoints, allCorners) {
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const c of allCorners) {
-    minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
-    minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
-  }
-  const EPS = 0.1;
-  for (const p of sharedEndpoints) {
-    const onLeft = Math.abs(p.x - minX) < EPS;
-    const onRight = Math.abs(p.x - maxX) < EPS;
-    const onTop = Math.abs(p.y - minY) < EPS;
-    const onBot = Math.abs(p.y - maxY) < EPS;
-    if (!onLeft && !onRight && !onTop && !onBot) return p;
-  }
-  return null;
-}
-
 // Build the ridge segment as an extendable infinite line (point + direction).
 function ridgeLine(section, scale) {
   const r = computeRidgeAndHips(section, scale);
@@ -1541,95 +1536,97 @@ function lineLineIntersect(l1, l2) {
 
 function drawSharedEdges(ctx, sections, vp, scale) {
   if (sections.length < 2) return;
-  const PARALLEL_DOT = Math.cos(5 * Math.PI / 180);
-  const NEAR_FT = 1.0;
-  const drawn = new Set();
+  const SHARE_TOL = 0.5;  // wall-corner snap tolerance (ft)
+  const BBOX_EPS = 0.5;   // tolerance for "on the combined bbox boundary"
   for (let si = 0; si < sections.length; si++) {
     for (let sj = si + 1; sj < sections.length; sj++) {
       const a = sectionGeom(sections[si], scale);
       const b = sectionGeom(sections[sj], scale);
-      if (a.expanded.length < 3 || b.expanded.length < 3) continue;
-      const sameP = sections[si].pitch === sections[sj].pitch;
-      // Valley length factor: pitch multiplier of either side when they
-      // match, geometric mean of the two multipliers when they differ.
-      // (Pitch multiplier = sqrt(1 + (rise/run)^2). Plan distance × this
-      // factor approximates the actual valley rafter length.)
-      const multA = PITCH_MULT[sections[si].pitch] || PITCH_MULT['6:12'];
-      const multB = PITCH_MULT[sections[sj].pitch] || PITCH_MULT['6:12'];
-      const valleyFactor = sameP ? multA : Math.sqrt(multA * multB);
-      for (let i = 0; i < a.expanded.length; i++) {
-        const ax1 = a.expanded[i], ax2 = a.expanded[(i + 1) % a.expanded.length];
-        const adx = ax2.x - ax1.x, ady = ax2.y - ax1.y;
-        const aLen = Math.hypot(adx, ady) || 1;
-        for (let j = 0; j < b.expanded.length; j++) {
-          const bx1 = b.expanded[j], bx2 = b.expanded[(j + 1) % b.expanded.length];
-          const bdx = bx2.x - bx1.x, bdy = bx2.y - bx1.y;
-          const bLen = Math.hypot(bdx, bdy) || 1;
-          const dot = Math.abs((adx * bdx + ady * bdy) / (aLen * bLen));
-          if (dot < PARALLEL_DOT) continue;
-          const cross = ((bx1.x - ax1.x) * (-ady) + (bx1.y - ax1.y) * (adx)) / aLen;
-          if (Math.abs(cross) > NEAR_FT) continue;
-          const key = `${si}:${i}:${sj}:${j}`;
-          if (drawn.has(key)) continue;
-          drawn.add(key);
-          // Identify shared-edge endpoints (use the shorter edge's vertices,
-          // already approximately coincident with the other section's edge).
-          const useA = aLen <= bLen ? [ax1, ax2] : [bx1, bx2];
-          // Pick the interior corner if one of the endpoints sits inside the
-          // union of the two sections' bboxes. For L-shapes the shared edge
-          // has one endpoint that's the inner corner of the L.
-          const allCorners = [...a.expanded, ...b.expanded];
-          const interior = findInteriorCorner(useA, allCorners);
-          // Try to find where the two ridges intersect — that's the high
-          // point above the inner corner.
-          const r1 = ridgeLine(sections[si], scale);
-          const r2 = ridgeLine(sections[sj], scale);
-          let valleyEnd = null;
-          if (r1 && r2) {
-            valleyEnd = lineLineIntersect(r1, r2);
-          }
-          let p1, p2, valleyLfWorld;
-          if (sameP && interior && valleyEnd) {
-            // Purple valley line from inner corner up to ridge intersection.
-            p1 = worldToScreen(interior.x, interior.y, vp);
-            p2 = worldToScreen(valleyEnd.x, valleyEnd.y, vp);
-            const planLen = Math.hypot(valleyEnd.x - interior.x, valleyEnd.y - interior.y);
-            valleyLfWorld = planLen * scale * valleyFactor;
-          } else {
-            // Fallback: along the shared edge (original behavior).
-            p1 = worldToScreen(useA[0].x, useA[0].y, vp);
-            p2 = worldToScreen(useA[1].x, useA[1].y, vp);
-            valleyLfWorld = Math.min(aLen, bLen) * scale * valleyFactor;
-          }
-          ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
-          ctx.lineWidth = sameP ? 2.5 : 2;
-          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-          if (sameP) {
-            // Chevron at p2 (the ridge end / high point of the valley).
-            const dx = p2.x - p1.x, dy = p2.y - p1.y;
-            const seg = Math.hypot(dx, dy) || 1;
-            const ux = dx / seg, uy = dy / seg;
-            const px = -uy, py = ux;
-            const back = 8;
-            ctx.beginPath();
-            ctx.moveTo(p2.x - ux * back + px * (back * 0.55), p2.y - uy * back + py * (back * 0.55));
-            ctx.lineTo(p2.x, p2.y);
-            ctx.lineTo(p2.x - ux * back - px * (back * 0.55), p2.y - uy * back - py * (back * 0.55));
-            ctx.stroke();
-            // Length label offset perpendicular to the valley so it sits
-            // beside the line rather than on top of it.
-            const mx = (p1.x + p2.x) / 2 + px * 12;
-            const my = (p1.y + p2.y) / 2 + py * 12;
-            const txt = `V: ${valleyLfWorld.toFixed(1)}'`;
-            ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
-            ctx.fillStyle = 'rgba(255,255,255,0.85)';
-            const tm = ctx.measureText(txt);
-            ctx.fillRect(mx - tm.width / 2 - 2, my - 7, tm.width + 4, 14);
-            ctx.fillStyle = '#7C3AED';
-            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-            ctx.fillText(txt, mx, my);
+      if (a.corners.length < 3 || b.corners.length < 3) continue;
+
+      // Match WALL corners across the two sections — the corners the user
+      // actually manipulates. After an auto-split the two new sections share
+      // exactly the cut endpoints as wall corners; manual rectangles snapped
+      // together share them too.
+      const sharedCorners = [];
+      for (const ac of a.corners) {
+        for (const bc of b.corners) {
+          if (Math.hypot(ac.x - bc.x, ac.y - bc.y) < SHARE_TOL) {
+            sharedCorners.push({ x: ac.x, y: ac.y });
+            break;
           }
         }
+      }
+      if (sharedCorners.length === 0) continue;
+
+      const sameP = sections[si].pitch === sections[sj].pitch;
+      const multA = PITCH_MULT[sections[si].pitch] || PITCH_MULT['6:12'];
+      const multB = PITCH_MULT[sections[sj].pitch] || PITCH_MULT['6:12'];
+      const factor = sameP ? multA : Math.sqrt(multA * multB);
+
+      // Interior corner = the shared corner that sits INSIDE the combined
+      // wall bounding box, not on its boundary. For an L-split this is the
+      // reflex corner of the original polygon.
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const c of [...a.corners, ...b.corners]) {
+        minX = Math.min(minX, c.x); maxX = Math.max(maxX, c.x);
+        minY = Math.min(minY, c.y); maxY = Math.max(maxY, c.y);
+      }
+      const interior = sharedCorners.find((p) =>
+        Math.abs(p.x - minX) > BBOX_EPS && Math.abs(p.x - maxX) > BBOX_EPS &&
+        Math.abs(p.y - minY) > BBOX_EPS && Math.abs(p.y - maxY) > BBOX_EPS
+      );
+
+      const r1 = ridgeLine(sections[si], scale);
+      const r2 = ridgeLine(sections[sj], scale);
+      const ridgeIntersect = (r1 && r2) ? lineLineIntersect(r1, r2) : null;
+
+      let p1, p2, planLen;
+      if (interior && ridgeIntersect) {
+        // Diagonal valley: inner corner of the L → ridge intersection.
+        p1 = worldToScreen(interior.x, interior.y, vp);
+        p2 = worldToScreen(ridgeIntersect.x, ridgeIntersect.y, vp);
+        planLen = Math.hypot(ridgeIntersect.x - interior.x, ridgeIntersect.y - interior.y);
+      } else if (sharedCorners.length >= 2) {
+        // Fallback when ridges are parallel or no interior corner exists:
+        // draw along the shared edge using the first two shared corners.
+        p1 = worldToScreen(sharedCorners[0].x, sharedCorners[0].y, vp);
+        p2 = worldToScreen(sharedCorners[1].x, sharedCorners[1].y, vp);
+        planLen = Math.hypot(
+          sharedCorners[1].x - sharedCorners[0].x,
+          sharedCorners[1].y - sharedCorners[0].y
+        );
+      } else {
+        continue;
+      }
+      const valleyLfWorld = planLen * scale * factor;
+
+      ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
+      ctx.lineWidth = sameP ? 2.5 : 2;
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+
+      if (sameP) {
+        // Chevron at p2 (the high end — toward the ridge intersection).
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+        const seg = Math.hypot(dx, dy) || 1;
+        const ux = dx / seg, uy = dy / seg;
+        const px = -uy, py = ux;
+        const back = 8;
+        ctx.beginPath();
+        ctx.moveTo(p2.x - ux * back + px * (back * 0.55), p2.y - uy * back + py * (back * 0.55));
+        ctx.lineTo(p2.x, p2.y);
+        ctx.lineTo(p2.x - ux * back - px * (back * 0.55), p2.y - uy * back - py * (back * 0.55));
+        ctx.stroke();
+        const mx = (p1.x + p2.x) / 2 + px * 12;
+        const my = (p1.y + p2.y) / 2 + py * 12;
+        const txt = `V: ${valleyLfWorld.toFixed(1)}'`;
+        ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        const tm = ctx.measureText(txt);
+        ctx.fillRect(mx - tm.width / 2 - 2, my - 7, tm.width + 4, 14);
+        ctx.fillStyle = '#7C3AED';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(txt, mx, my);
       }
     }
   }
