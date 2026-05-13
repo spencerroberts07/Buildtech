@@ -3,8 +3,9 @@
 // <style> block below and use the `lp-*` class prefix so nothing here can
 // leak into or be affected by the app's styles.css.
 //
-// The login flow itself is untouched: "Log In" / "Get Started" both link to
-// /login, which renders the existing Login component.
+// The login flow itself is untouched: "Log In" links to /login. "Get
+// Started" scrolls to the Contact section so prospective dealers can
+// reach out before being asked to sign in.
 
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -80,7 +81,7 @@ function Hero() {
             Built specifically for lumber yards and building supply dealers.
           </p>
           <div className="lp-hero-ctas">
-            <Link to="/login" className="lp-btn lp-btn-primary">Get Started</Link>
+            <a href="#contact" className="lp-btn lp-btn-primary">Get Started</a>
             <Link to="/login" className="lp-btn lp-btn-outline">Log In</Link>
           </div>
           <div className="lp-hero-proof">Used by building supply dealers across Ontario</div>
