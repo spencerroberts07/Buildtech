@@ -1,6 +1,7 @@
 import React from 'react';
 import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import Login from './components/Login.jsx';
+import LandingPage from './components/LandingPage.jsx';
 import Projects from './components/Projects.jsx';
 import ProjectDetail from './components/ProjectDetail.jsx';
 import Assemblies from './components/Assemblies.jsx';
@@ -104,8 +105,9 @@ export default function App() {
   if (!auth.token) {
     return (
       <Routes>
+        <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<Login onLogin={(t, u) => { auth.login(t, u); navigate('/projects'); }} />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     );
   }
