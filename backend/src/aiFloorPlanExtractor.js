@@ -13,6 +13,10 @@ import { r2, BUCKET } from './r2.js';
 
 const MODEL = 'claude-sonnet-4-6';
 const TIMEOUT_MS = 60_000; // floor plans are 4-8x larger than roof-only
+// 4096 was running into truncation on real plan sets — a 2-storey house
+// with ~12 interior walls + ~14 openings doubled to absolute+fraction
+// coords easily crosses 5K output tokens. 8192 gives generous headroom.
+const MAX_TOKENS = 8192;
 
 export function aiConfigured() {
   return !!process.env.ANTHROPIC_API_KEY;
@@ -208,22 +212,117 @@ async function fetchR2Object(key) {
   return Buffer.concat(chunks);
 }
 
+// Parse the model's text response, tolerating common wrapping issues:
+// - markdown code fences (```json ... ```)
+// - leading prose like "Here's the extracted data:"
+// - trailing prose
+// Returns { data, parseError } so callers can log what went wrong.
 function parseExtractionJson(rawText) {
-  if (!rawText) return null;
+  if (!rawText) return { data: null, parseError: 'Empty response from model' };
   let text = String(rawText).trim();
-  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenceMatch) text = fenceMatch[1].trim();
+  // Strip surrounding code fences. Handle both ```json...``` and bare ```...```.
+  text = text
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```\s*$/i, '')
+    .trim();
+  // If there's prose before the JSON, slice from the first { to the last }.
   const first = text.indexOf('{');
   const last = text.lastIndexOf('}');
-  if (first >= 0 && last > first) text = text.slice(first, last + 1);
-  try { return JSON.parse(text); } catch { return null; }
+  if (first < 0) {
+    return { data: null, parseError: `Response contained no '{' — likely truncated or non-JSON: ${text.slice(0, 200)}` };
+  }
+  if (last <= first) {
+    return { data: null, parseError: `Response had no closing '}' — likely truncated at ${text.length} chars: ${text.slice(0, 200)}` };
+  }
+  text = text.slice(first, last + 1);
+  try {
+    return { data: JSON.parse(text), parseError: null };
+  } catch (e) {
+    return { data: null, parseError: `${e.message} (response was ${text.length} chars)` };
+  }
+}
+
+// Wrap a flat (non-multi-floor) response in a floors[] array so callers can
+// treat both shapes uniformly. Idempotent — if floors[] is already present
+// returns the input unchanged.
+export function normalizeExtraction(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  if (Array.isArray(parsed.floors) && parsed.floors.length > 0) return parsed;
+  return {
+    ...parsed,
+    floors_detected: parsed.floors_detected || [{
+      floor_level: 'floor1', page_number: null, label: 'Ground Floor Plan',
+    }],
+    floors: [{
+      floor_level: 'floor1',
+      page_number: null,
+      exterior_polygon: parsed.exterior_polygon || [],
+      interior_walls:   parsed.interior_walls   || [],
+      exterior_doors:   parsed.exterior_doors   || [],
+      interior_doors:   parsed.interior_doors   || [],
+      windows:          parsed.windows          || [],
+    }],
+  };
+}
+
+// Simpler, single-floor prompt used as a fallback when the full multi-floor
+// extraction fails to parse (typically due to max-tokens truncation on a
+// large plan set). The response shape is the OLD flat structure — the
+// caller normalizes it back to the floors[] wrapper.
+const SIMPLIFIED_USER_MESSAGE = `Extract the ground floor plan data from this architectural drawing. Return ONLY this JSON structure with no markdown:
+{
+  "building": { "total_width_ft": number, "total_depth_ft": number, "wall_type": "2x4"|"2x6", "wall_height_ft": number, "num_storeys": 1|2, "floor_area_sqft": number|null },
+  "exterior_polygon": [{ "x_ft": number, "y_ft": number, "x_fraction": number, "y_fraction": number }],
+  "interior_walls": [{ "start_x_ft": number, "start_y_ft": number, "end_x_ft": number, "end_y_ft": number, "start_x_fraction": number, "start_y_fraction": number, "end_x_fraction": number, "end_y_fraction": number, "wall_type": "interior_2x4"|"interior_2x6", "is_load_bearing": boolean }],
+  "exterior_doors": [{ "label": string, "width_inches": number, "height_inches": number, "ro_width_inches": number, "ro_height_inches": number, "type": string, "quantity": number, "wall_side": "front"|"back"|"left"|"right"|null, "position_fraction": number|null }],
+  "interior_doors": [{ "label": string, "width_inches": number, "height_inches": number, "ro_width_inches": number, "ro_height_inches": number, "quantity": number, "interior_wall_hint": string|null }],
+  "windows": [{ "label": string, "width_inches": number, "height_inches": number, "ro_width_inches": number, "ro_height_inches": number, "type": string, "quantity": number, "wall_side": "front"|"back"|"left"|"right"|null, "position_fraction": number|null }],
+  "roof": { "pitch": string|null, "truss_spacing_inches": number|null },
+  "confidence": "high"|"medium"|"low",
+  "notes": string,
+  "warnings": [string]
+}
+
+Rules:
+- Exterior polygon: trace ONLY the conditioned heated space. Exclude decks, porches, covered entries, garages.
+- Interior walls: default to interior_2x4. Only mark interior_2x6 + is_load_bearing=true when the drawing explicitly says "2x6 LOAD BEARING".
+- Interior doors: any door NOT labeled EXT./EXTERIOR/SLIDER/PATIO in the schedule.
+- Exterior doors: doors labeled EXT., EXTERIOR, SLIDER, PATIO DOOR, or GLASS PANEL.
+- Use null for any value you cannot determine. Do not guess.`;
+
+async function callClaude(client, content, userMessage) {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
+  try {
+    const message = await client.messages.create(
+      {
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: [...content, { type: 'text', text: userMessage }] }],
+      },
+      { signal: abort.signal }
+    );
+    const textBlock = (message.content || []).find((b) => b.type === 'text');
+    return {
+      raw: textBlock?.text || '',
+      stop_reason: message.stop_reason,
+      input_tokens: message.usage?.input_tokens,
+      output_tokens: message.usage?.output_tokens,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
  * Run the floor-plan extraction. Pass the R2 keys of the PDFs to include.
  * At least one is required.
  *
- * Returns { data, raw }. `data` is parsed JSON or null if parse failed.
+ * Returns { data, raw, parseError, attempts }. `data` is the normalized
+ * parsed JSON (always with a floors[] array) or null if parse failed even
+ * after the simplified-prompt retry.
  */
 export async function extractFloorPlan({ architecturalKey, trussKey }) {
   if (!aiConfigured()) {
@@ -241,40 +340,56 @@ export async function extractFloorPlan({ architecturalKey, trussKey }) {
   }
 
   const buffers = await Promise.all(keys.map((k) => fetchR2Object(k.key)));
-  const content = [];
-  for (let i = 0; i < buffers.length; i++) {
-    content.push({
-      type: 'document',
-      source: {
-        type: 'base64',
-        media_type: 'application/pdf',
-        data: buffers[i].toString('base64'),
-      },
-      title: keys[i].label,
-    });
-  }
-  content.push({ type: 'text', text: USER_MESSAGE });
+  const documentBlocks = buffers.map((buf, i) => ({
+    type: 'document',
+    source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') },
+    title: keys[i].label,
+  }));
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
-  let response;
-  try {
-    response = await client.messages.create(
-      {
-        model: MODEL,
-        max_tokens: 4096,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content }],
-      },
-      { signal: abort.signal }
-    );
-  } finally {
-    clearTimeout(timer);
+  const attempts = [];
+
+  // First attempt: full multi-floor prompt.
+  const a1 = await callClaude(client, documentBlocks, USER_MESSAGE);
+  const p1 = parseExtractionJson(a1.raw);
+  attempts.push({
+    prompt: 'multi-floor',
+    stop_reason: a1.stop_reason,
+    output_tokens: a1.output_tokens,
+    parse_error: p1.parseError,
+    raw_length: a1.raw.length,
+  });
+  if (p1.data) {
+    return { data: normalizeExtraction(p1.data), raw: a1.raw, parseError: null, attempts };
   }
 
-  const textBlock = (response.content || []).find((b) => b.type === 'text');
-  const raw = textBlock?.text || '';
-  const data = parseExtractionJson(raw);
-  return { data, raw };
+  // Truncation diagnostic: log conspicuously when the model hit max_tokens.
+  if (a1.stop_reason === 'max_tokens') {
+    console.error(`[floor-plan-extractor] First attempt hit max_tokens (${a1.output_tokens} output tokens). Retrying with simplified prompt.`);
+  } else {
+    console.error(`[floor-plan-extractor] First attempt parse failed: ${p1.parseError}. Retrying with simplified prompt.`);
+  }
+
+  // Second attempt: simplified single-floor prompt.
+  const a2 = await callClaude(client, documentBlocks, SIMPLIFIED_USER_MESSAGE);
+  const p2 = parseExtractionJson(a2.raw);
+  attempts.push({
+    prompt: 'simplified',
+    stop_reason: a2.stop_reason,
+    output_tokens: a2.output_tokens,
+    parse_error: p2.parseError,
+    raw_length: a2.raw.length,
+  });
+  if (p2.data) {
+    return { data: normalizeExtraction(p2.data), raw: a2.raw, parseError: null, attempts };
+  }
+
+  // Both failed — return raw from the first attempt and the most useful
+  // error message we have.
+  return {
+    data: null,
+    raw: a1.raw,
+    parseError: p1.parseError || p2.parseError,
+    attempts,
+  };
 }

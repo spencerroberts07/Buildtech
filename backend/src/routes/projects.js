@@ -1707,12 +1707,22 @@ router.post('/:id/extract-floor-plan', async (req, res) => {
     return res.status(400).json({ error: 'No PDF uploaded to this project' });
   }
   try {
-    const { data, raw } = await extractFloorPlan({
+    const { data, raw, parseError, attempts } = await extractFloorPlan({
       architecturalKey: pdf_filename,
       trussKey: truss_pdf_filename || null,
     });
     if (!data) {
-      return res.json({ ok: true, data: null, error: 'Could not parse floor plan data from this PDF', raw });
+      // Verbose diagnostic logging — temporary. Remove once we've identified
+      // the failure mode from real Render logs.
+      console.error('[floor-plan-extractor] Both attempts failed to parse.');
+      console.error('[floor-plan-extractor] attempts:', JSON.stringify(attempts, null, 2));
+      console.error('[floor-plan-extractor] parseError:', parseError);
+      console.error('[floor-plan-extractor] raw response (first 4000 chars):', String(raw || '').slice(0, 4000));
+      return res.json({
+        ok: true, data: null,
+        error: 'Could not parse floor plan data from this PDF',
+        raw, parseError, attempts,
+      });
     }
     res.json({
       ok: true,
@@ -1721,6 +1731,7 @@ router.post('/:id/extract-floor-plan', async (req, res) => {
         architectural: !!pdf_filename,
         truss: !!truss_pdf_filename,
       },
+      attempts, // surface attempt diagnostics to the client too while debugging
     });
   } catch (e) {
     if (e.code === 'AI_NOT_CONFIGURED') return res.status(503).json({ error: 'AI extraction not available' });
