@@ -463,6 +463,14 @@ export default function RoofSketch({
   const [hoverWorld, setHoverWorld] = useState(null);
   const [overhangDragLabel, setOverhangDragLabel] = useState(null); // {sx, sy, oh}
 
+  // In-memory undo stack (max 20). Each entry: { label, fn }. fn() reverts
+  // the action — typically a single section/edge patch or a section
+  // create/delete. Cleared on full data refetch and on bulk operations
+  // (auto-split, U-shape split, AI extraction apply) since those rewrite
+  // section IDs and would leave stale references.
+  const undoStack = useRef([]);
+  const [undoCount, setUndoCount] = useState(0); // for UI re-render
+
   // ---- load + auto-copy ----
   const loadAll = useCallback(async () => {
     try {
@@ -473,6 +481,9 @@ export default function RoofSketch({
       setSections(secs || []);
       setLegacyRoof(roof || null);
       setLoading(false);
+      // Fresh data invalidates any pending undo references.
+      undoStack.current = [];
+      setUndoCount(0);
       if ((secs || []).length === 0) await tryAutoCopyTopFloor();
     } catch (e) { setError(e.message); setLoading(false); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -542,36 +553,113 @@ export default function RoofSketch({
     return () => window.removeEventListener('resize', measure);
   }, [fullscreen]);
 
-  // ---- API helpers ----
-  async function patchSection(sid, patch) {
-    setSections((cur) => cur.map((s) => s.id === sid ? { ...s, ...patch } : s));
-    try {
-      const updated = await api.updateRoofSection(projectId, sid, patch);
-      setSections((cur) => cur.map((s) => s.id === sid ? updated : s));
-      onMaterialsChanged?.();
-    } catch (e) { setError(e.message); }
+  // ---- undo stack helpers ----
+  function pushUndo(label, fn) {
+    undoStack.current.push({ label, fn });
+    if (undoStack.current.length > 20) undoStack.current.shift();
+    setUndoCount(undoStack.current.length);
   }
-  async function patchEdge(sid, eid, patch) {
+  function clearUndo() {
+    undoStack.current = [];
+    setUndoCount(0);
+  }
+  async function popUndo() {
+    const entry = undoStack.current.pop();
+    setUndoCount(undoStack.current.length);
+    if (!entry) return;
+    try { await entry.fn(); } catch (e) { setError(e.message); }
+  }
+
+  // ---- API helpers ----
+  // Low-level mutations (no undo push) used by both the public mutation
+  // functions and undo handlers themselves.
+  async function patchSectionRaw(sid, patch) {
+    setSections((cur) => cur.map((s) => s.id === sid ? { ...s, ...patch } : s));
+    const updated = await api.updateRoofSection(projectId, sid, patch);
+    setSections((cur) => cur.map((s) => s.id === sid ? updated : s));
+    onMaterialsChanged?.();
+  }
+  async function patchEdgeRaw(sid, eid, patch) {
     setSections((cur) => cur.map((s) => s.id === sid ? {
       ...s,
       edges: (s.edges || []).map((e) => e.id === eid ? { ...e, ...patch } : e),
     } : s));
-    try {
-      const updated = await api.updateRoofSectionEdge(projectId, sid, eid, patch);
-      setSections((cur) => cur.map((s) => s.id === sid ? {
-        ...s,
-        edges: (s.edges || []).map((e) => e.id === eid ? updated : e),
-      } : s));
-      onMaterialsChanged?.();
-    } catch (e) { setError(e.message); }
+    const updated = await api.updateRoofSectionEdge(projectId, sid, eid, patch);
+    setSections((cur) => cur.map((s) => s.id === sid ? {
+      ...s,
+      edges: (s.edges || []).map((e) => e.id === eid ? updated : e),
+    } : s));
+    onMaterialsChanged?.();
+  }
+
+  async function patchSection(sid, patch) {
+    // Capture the BEFORE values for every key in `patch` so undo can
+    // restore exactly those fields without disturbing anything else the
+    // user touched in between.
+    const before = sections.find((s) => s.id === sid);
+    if (before) {
+      const inverse = {};
+      for (const k of Object.keys(patch)) inverse[k] = before[k];
+      pushUndo(`section ${sid} ${Object.keys(patch).join(',')}`,
+        () => patchSectionRaw(sid, inverse));
+    }
+    try { await patchSectionRaw(sid, patch); }
+    catch (e) { setError(e.message); }
+  }
+  async function patchEdge(sid, eid, patch) {
+    const sec = sections.find((s) => s.id === sid);
+    const beforeEdge = sec?.edges?.find((e) => e.id === eid);
+    if (beforeEdge) {
+      const inverse = {};
+      for (const k of Object.keys(patch)) inverse[k] = beforeEdge[k];
+      pushUndo(`edge ${eid} ${Object.keys(patch).join(',')}`,
+        () => patchEdgeRaw(sid, eid, inverse));
+    }
+    try { await patchEdgeRaw(sid, eid, patch); }
+    catch (e) { setError(e.message); }
   }
   async function deleteSection(sid) {
     if (!confirm('Delete this roof section?')) return;
+    // Snapshot the full section + its edges so undo can recreate them.
+    // The recreated section gets a NEW id; older undo entries that
+    // reference the deleted id are gone from the stack (LIFO ordering
+    // means the next pop is the one ABOVE this delete, not below).
+    const snapshot = sections.find((s) => s.id === sid);
+    if (!snapshot) return;
+    const savedEdges = (snapshot.edges || []).map((e) => ({
+      edge_index: e.edge_index, end_type: e.end_type, overhang_ft: e.overhang_ft,
+    }));
     try {
       await api.deleteRoofSection(projectId, sid);
       setSections((cur) => cur.filter((s) => s.id !== sid));
       if (selectedSectionId === sid) setSelectedSectionId(null);
       onMaterialsChanged?.();
+      pushUndo(`delete section ${sid}`, async () => {
+        const created = await api.createRoofSection(projectId, {
+          section_name: snapshot.section_name,
+          corners: snapshot.corners,
+          pitch: snapshot.pitch,
+          ridge_direction: snapshot.ridge_direction || 'auto',
+        });
+        // Restore edge end_type / overhang values (new section starts with
+        // default edges; patch each one whose index matches).
+        for (const saved of savedEdges) {
+          const newEdge = (created.edges || []).find((e) => Number(e.edge_index) === Number(saved.edge_index));
+          if (!newEdge) continue;
+          const patch = {};
+          if (saved.end_type && saved.end_type !== newEdge.end_type) patch.end_type = saved.end_type;
+          if (saved.overhang_ft != null && Number(saved.overhang_ft) !== Number(newEdge.overhang_ft)) {
+            patch.overhang_ft = Number(saved.overhang_ft);
+          }
+          if (Object.keys(patch).length > 0) {
+            await api.updateRoofSectionEdge(projectId, created.id, newEdge.id, patch);
+          }
+        }
+        // Re-fetch the freshly-edited section so local state has the patched edges.
+        const refreshed = await api.listRoofSections(projectId);
+        setSections(refreshed || []);
+        onMaterialsChanged?.();
+      });
     } catch (e) { setError(e.message); }
   }
   async function createSectionFromCorners(corners) {
@@ -584,6 +672,12 @@ export default function RoofSketch({
       setSections((cur) => [...cur, created]);
       setSelectedSectionId(created.id);
       onMaterialsChanged?.();
+      pushUndo(`create section ${created.id}`, async () => {
+        await api.deleteRoofSection(projectId, created.id);
+        setSections((cur) => cur.filter((s) => s.id !== created.id));
+        if (selectedSectionId === created.id) setSelectedSectionId(null);
+        onMaterialsChanged?.();
+      });
       maybeOfferSplit(created);
     } catch (e) { setError(e.message); }
   }
@@ -639,6 +733,9 @@ export default function RoofSketch({
       });
       setSelectedSectionId(a.id);
       setSplitPrompt(null);
+      // Splits create fresh sections with new IDs; any pending undo entries
+      // would reference deleted sections.
+      clearUndo();
       showToast('Split into 2 sections — valley detected automatically');
       onMaterialsChanged?.();
     } catch (e) { setError(e.message); setSplitPrompt(null); }
@@ -697,6 +794,7 @@ export default function RoofSketch({
       });
       setSelectedSectionId(mainSec.id);
       setSplitPrompt(null);
+      clearUndo();
       showToast('Split into 3 sections — valleys detected automatically');
       onMaterialsChanged?.();
     } catch (e) { setError(e.message); setSplitPrompt(null); }
@@ -775,6 +873,9 @@ export default function RoofSketch({
       onProjectSettingsChange?.(settingsPatch);
       // If we pushed pitch onto existing sections, refetch them.
       if (body.apply_pitch_to_sections) await loadAll();
+      // AI apply mutates roof_sections in bulk — drop pending undo entries
+      // so they don't try to revert to stale section state.
+      clearUndo();
       onMaterialsChanged?.();
       showToast('Roof data applied from PDF');
       setExtractResult(null);
@@ -1090,6 +1191,15 @@ export default function RoofSketch({
           }
         }
         if (e.key === 'Escape' && fullscreen) setFullscreen(false);
+        // Ctrl/Cmd + Z → pop one undo entry. Skip when the user is typing
+        // in an input/textarea so it doesn't fight with native undo.
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+          const tag = e.target?.tagName;
+          if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !e.target?.isContentEditable) {
+            e.preventDefault();
+            popUndo();
+          }
+        }
       } else {
         if (e.key === ' ' || e.code === 'Space') spaceDown.current = false;
         if (e.key === 'Control' || e.key === 'Meta') ctrlDown.current = false;
@@ -1155,6 +1265,8 @@ export default function RoofSketch({
         sectionsCount={sections.length}
         drafting={tool === 'draw_section'}
         draftLen={draftCorners.length}
+        canUndo={undoCount > 0}
+        onUndo={popUndo}
       />
 
       <AIExtractionBar
@@ -1503,7 +1615,7 @@ function ExtractionResultModal({
 }
 
 // ---------- toolbar ----------
-function RoofToolbar({ tool, setTool, fullscreen, toggleFullscreen, sectionsCount, drafting, draftLen }) {
+function RoofToolbar({ tool, setTool, fullscreen, toggleFullscreen, sectionsCount, drafting, draftLen, canUndo, onUndo }) {
   const tools = [
     { key: 'select',       label: 'Select',       icon: ICONS.cursor, tooltip: 'Select & drag (default)' },
     { key: 'pan',          label: 'Pan',          icon: ICONS.hand,   tooltip: 'Click and drag to pan the view' },
@@ -1542,6 +1654,25 @@ function RoofToolbar({ tool, setTool, fullscreen, toggleFullscreen, sectionsCoun
       <span style={{ flex: 1 }} />
       <button
         type="button"
+        title="Undo (Ctrl+Z)"
+        disabled={!canUndo}
+        onClick={onUndo}
+        style={{
+          flex: '0 0 auto',
+          display: 'inline-flex', alignItems: 'center', gap: '0.4rem',
+          padding: '0.4rem 0.7rem',
+          background: 'white', color: canUndo ? '#1A1A1A' : '#9CA3AF',
+          border: '1px solid #E0E0E0',
+          borderRadius: 4,
+          cursor: canUndo ? 'pointer' : 'not-allowed',
+          opacity: canUndo ? 1 : 0.6,
+        }}
+      >
+        <Icon path={ICONS.undo} stroke={canUndo ? '#1A1A1A' : '#9CA3AF'} />
+        <span style={{ fontSize: '0.85rem' }}>Undo</span>
+      </button>
+      <button
+        type="button"
         title={fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
         onClick={toggleFullscreen}
         style={{
@@ -1576,6 +1707,7 @@ const ICONS = {
   hand:   'M7 11 V6 a1.5 1.5 0 0 1 3 0 V11 M10 11 V4 a1.5 1.5 0 0 1 3 0 V11 M13 11 V5 a1.5 1.5 0 0 1 3 0 V13 M16 13 V8 a1.5 1.5 0 0 1 3 0 V14 a6 6 0 0 1 -6 6 H11 a4 4 0 0 1 -3.5 -2 L4 12 a1.7 1.7 0 0 1 3 -1.5 L8 12',
   pencil: 'M4 20 L4 16 L16 4 L20 8 L8 20 Z M14 6 L18 10',
   expand: 'M4 9 V4 H9 M20 9 V4 H15 M4 15 V20 H9 M20 15 V20 H15',
+  undo:   'M9 14 L4 9 L9 4 M4 9 H14 a6 6 0 0 1 0 12 H10',
 };
 
 // ---------- side panels ----------
