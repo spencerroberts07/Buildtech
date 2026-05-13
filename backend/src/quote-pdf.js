@@ -256,15 +256,15 @@ function renderHtml(quote) {
     color: #6B7280;
   }
   .built-by {
-    margin-top: 8px;
+    margin-top: 10px;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 6px;
-    font-size: 8px;
-    color: #9CA3AF;
+    gap: 8px;
+    font-size: 10px;
+    color: #6B7280;
   }
-  .built-by svg { height: 11px; width: auto; display: block; }
+  .built-by svg { height: 22px; width: auto; display: block; }
 
   .tbd { color: #9CA3AF; font-style: italic; }
   .muted { color: #6B7280; font-style: italic; }

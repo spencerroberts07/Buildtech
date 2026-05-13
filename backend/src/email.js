@@ -183,11 +183,11 @@ function renderHtml({ quote, customMessage }) {
         <div style="font-size:10px;color:#6B7280;line-height:1.5;text-align:center;">
           This estimate is valid for 30 days. Prices subject to change without notice.
         </div>
-        <div style="font-size:10px;color:#9CA3AF;text-align:center;margin-top:8px;">
+        <div style="font-size:11px;color:#6B7280;text-align:center;margin-top:10px;">
           <span style="vertical-align:middle;">Built by</span>
           ${BUILDTEK_WORDMARK_DATA_URI
-            ? `<a href="https://buildtek.org" style="text-decoration:none;vertical-align:middle;margin-left:4px;"><img src="${BUILDTEK_WORDMARK_DATA_URI}" alt="BuildTek" height="12" style="display:inline-block;vertical-align:middle;border:0;outline:none;height:12px;width:auto;"></a>`
-            : `<a href="https://buildtek.org" style="color:#6B7280;text-decoration:none;font-weight:600;vertical-align:middle;margin-left:4px;">BuildTek</a>`
+            ? `<a href="https://buildtek.org" style="text-decoration:none;vertical-align:middle;margin-left:6px;"><img src="${BUILDTEK_WORDMARK_DATA_URI}" alt="BuildTek" height="22" style="display:inline-block;vertical-align:middle;border:0;outline:none;height:22px;width:auto;"></a>`
+            : `<a href="https://buildtek.org" style="color:#6B7280;text-decoration:none;font-weight:600;vertical-align:middle;margin-left:6px;">BuildTek</a>`
           }
         </div>
       </td></tr>

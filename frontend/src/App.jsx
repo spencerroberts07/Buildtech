@@ -34,7 +34,7 @@ function useAuth() {
 // Full BuildTek lockup (icon + wordmark) served as a static SVG file from
 // /public. `size` controls height; width auto-scales from the artwork's
 // aspect ratio (~4:1).
-export function BuildTekLogo({ size = 32 }) {
+export function BuildTekLogo({ size = 48 }) {
   return (
     <img
       src="/buildtek-logo.svg"
@@ -48,7 +48,7 @@ export function BuildTekLogo({ size = 32 }) {
 function BrandLogo() {
   return (
     <div className="brand">
-      <BuildTekLogo size={32} />
+      <BuildTekLogo size={48} />
     </div>
   );
 }
