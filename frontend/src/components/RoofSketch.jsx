@@ -144,12 +144,37 @@ function findReflexCorner(corners) {
   return null;
 }
 
-// "Complex shape" triggers the split prompt — anything that isn't a simple
-// convex quadrilateral.
+// Count reflex corners. 1 = L-shape, 2 = U-shape, 3+ = too complex to auto-split.
+function countReflexCorners(corners) {
+  const n = corners?.length || 0;
+  if (n < 4) return 0;
+  const ccw = isCCW(corners);
+  let count = 0;
+  for (let i = 0; i < n; i++) {
+    const prev = corners[(i - 1 + n) % n];
+    const cur = corners[i];
+    const next = corners[(i + 1) % n];
+    const v1x = Number(cur.x) - Number(prev.x), v1y = Number(cur.y) - Number(prev.y);
+    const v2x = Number(next.x) - Number(cur.x), v2y = Number(next.y) - Number(cur.y);
+    const cross = v1x * v2y - v1y * v2x;
+    if ((ccw && cross < 0) || (!ccw && cross > 0)) count++;
+  }
+  return count;
+}
+
+function bboxOf(corners) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const c of corners) {
+    minX = Math.min(minX, Number(c.x)); maxX = Math.max(maxX, Number(c.x));
+    minY = Math.min(minY, Number(c.y)); maxY = Math.max(maxY, Number(c.y));
+  }
+  return { minX, maxX, minY, maxY };
+}
+
+// "Complex shape" = anything with at least one reflex corner. Pentagons /
+// octagons without reflex corners don't need a split prompt.
 function isComplexShape(corners) {
-  if (!Array.isArray(corners) || corners.length < 3) return false;
-  if (corners.length > 4) return true;
-  return findReflexCorner(corners) != null;
+  return countReflexCorners(corners) >= 1;
 }
 
 // True when the polygon's axis-aligned bbox is wider than tall (or square).
@@ -263,6 +288,22 @@ function computeAutoSplit(corners) {
   const ma = maxAspect(cutA), mb = maxAspect(cutB);
   if (ma === Infinity && mb === Infinity) return null;
   return ma <= mb ? cutA : cutB;
+}
+
+// For a U-shape (two reflex corners), cut at the first reflex — that produces
+// a clean rectangle plus an L-shaped remainder. Cut the remainder at its
+// reflex corner to get the final three pieces.
+function computeUShapeSplit(corners) {
+  const first = computeAutoSplit(corners);
+  if (!first) return null;
+  const aReflex = findReflexCorner(first.polyA) != null;
+  const bReflex = findReflexCorner(first.polyB) != null;
+  if (aReflex === bReflex) return null;
+  const remainder = aReflex ? first.polyA : first.polyB;
+  const clean = aReflex ? first.polyB : first.polyA;
+  const second = computeAutoSplit(remainder);
+  if (!second) return null;
+  return { pieces: [clean, second.polyA, second.polyB] };
 }
 
 // Per-section quick-access geometry. Note `corners` are the wall corners and
@@ -443,8 +484,20 @@ export default function RoofSketch({
       // Run the same L-shape / complex-shape detection as manual draw.
       // Copying from an L-shaped floor plan should also surface the split
       // prompt so the user gets clean rectangular sections by default.
-      if (isComplexShape(created.corners)) setSplitPrompt(created);
+      maybeOfferSplit(created);
     } catch (e) { setError(e.message); }
+  }
+
+  // Offer split for L (1 reflex) and U (2 reflex); show "too complex" toast
+  // for 3+ reflex corners; do nothing for clean convex shapes.
+  function maybeOfferSplit(section) {
+    const reflexCount = countReflexCorners(section.corners || []);
+    if (reflexCount === 0) return;
+    if (reflexCount >= 3) {
+      showToast('Too complex to auto-split — please draw sections manually.');
+      return;
+    }
+    setSplitPrompt(section);
   }
 
   // ---- viewport persistence ----
@@ -512,12 +565,20 @@ export default function RoofSketch({
       setSections((cur) => [...cur, created]);
       setSelectedSectionId(created.id);
       onMaterialsChanged?.();
-      // L-shape / complex shape: offer to auto-split into two rectangles.
-      if (isComplexShape(corners)) setSplitPrompt(created);
+      maybeOfferSplit(created);
     } catch (e) { setError(e.message); }
   }
 
   async function applyAutoSplit(original) {
+    const reflexCount = countReflexCorners(original.corners || []);
+    if (reflexCount >= 3) {
+      showToast('Too complex to auto-split — please draw sections manually.');
+      setSplitPrompt(null);
+      return;
+    }
+    if (reflexCount === 2) {
+      return applyUShapeSplit(original);
+    }
     const split = computeAutoSplit(original.corners || []);
     if (!split) {
       showToast('Could not determine a clean split for this shape.');
@@ -563,6 +624,65 @@ export default function RoofSketch({
       onMaterialsChanged?.();
     } catch (e) { setError(e.message); setSplitPrompt(null); }
   }
+
+  async function applyUShapeSplit(original) {
+    const result = computeUShapeSplit(original.corners || []);
+    if (!result) {
+      showToast('Could not determine a clean split for this U-shape.');
+      setSplitPrompt(null);
+      return;
+    }
+    // Largest-area piece becomes Main Roof (the connector spanning the U's
+    // base). Its ridge runs along its own long axis. The two smaller pieces
+    // are wings with ridges perpendicular to Main so each forms a valley
+    // against it. Wings are sorted along Main's perpendicular axis so the
+    // left/right labels track the on-canvas position.
+    const pieces = result.pieces.map((corners) => ({
+      corners,
+      area: polygonArea(corners),
+      bbox: bboxOf(corners),
+    }));
+    pieces.sort((a, b) => b.area - a.area);
+    const main = pieces[0];
+    const wings = [pieces[1], pieces[2]];
+    const mainDir = preferredRidgeDir(main.corners, 'horizontal');
+    const wingDir = mainDir === 'horizontal' ? 'vertical' : 'horizontal';
+    if (mainDir === 'horizontal') {
+      wings.sort((a, b) => (a.bbox.minX + a.bbox.maxX) - (b.bbox.minX + b.bbox.maxX));
+    } else {
+      wings.sort((a, b) => (a.bbox.minY + a.bbox.maxY) - (b.bbox.minY + b.bbox.maxY));
+    }
+    try {
+      const mainSec = await api.createRoofSection(projectId, {
+        section_name: 'Main Roof',
+        corners: main.corners,
+        pitch: original.pitch,
+        ridge_direction: mainDir,
+      });
+      const leftSec = await api.createRoofSection(projectId, {
+        section_name: 'Left Wing',
+        corners: wings[0].corners,
+        pitch: original.pitch,
+        ridge_direction: wingDir,
+      });
+      const rightSec = await api.createRoofSection(projectId, {
+        section_name: 'Right Wing',
+        corners: wings[1].corners,
+        pitch: original.pitch,
+        ridge_direction: wingDir,
+      });
+      await api.deleteRoofSection(projectId, original.id);
+      setSections((cur) => {
+        const filtered = cur.filter((s) => s.id !== original.id);
+        return [...filtered, mainSec, leftSec, rightSec];
+      });
+      setSelectedSectionId(mainSec.id);
+      setSplitPrompt(null);
+      showToast('Split into 3 sections — valleys detected automatically');
+      onMaterialsChanged?.();
+    } catch (e) { setError(e.message); setSplitPrompt(null); }
+  }
+
   async function patchLegacyRoof(patch) {
     try {
       if (!legacyRoof) {
@@ -988,25 +1108,33 @@ export default function RoofSketch({
         </div>
       </div>
 
-      {splitPrompt && (
-        <div style={{
-          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100,
-        }}>
-          <div className="card" style={{ maxWidth: 480, padding: '1.25rem' }}>
-            <strong style={{ fontSize: '1.05rem' }}>Complex roof shape detected</strong>
-            <p style={{ marginTop: '0.5rem' }}>
-              This roof section has a complex shape. For an L-shaped or T-shaped house,
-              you'll get better results by drawing two separate rectangular sections that
-              meet at a valley. Would you like to split this into two sections automatically?
-            </p>
-            <div className="row" style={{ marginTop: '1rem' }}>
-              <button className="primary" onClick={() => applyAutoSplit(splitPrompt)}>Split automatically</button>
-              <button className="secondary" onClick={() => setSplitPrompt(null)}>Keep as one</button>
+      {splitPrompt && (() => {
+        const reflexCount = countReflexCorners(splitPrompt.corners || []);
+        const isU = reflexCount === 2;
+        return (
+          <div style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100,
+          }}>
+            <div className="card" style={{ maxWidth: 480, padding: '1.25rem' }}>
+              <strong style={{ fontSize: '1.05rem' }}>
+                {isU ? 'U-shape roof detected' : 'Complex roof shape detected'}
+              </strong>
+              <p style={{ marginTop: '0.5rem' }}>
+                {isU
+                  ? 'This roof has a U-shape. Split into 3 sections automatically? (Left Wing + Main Roof + Right Wing)'
+                  : "This roof section has a complex shape. For an L-shaped or T-shaped house, you'll get better results by drawing two separate rectangular sections that meet at a valley. Would you like to split this into two sections automatically?"}
+              </p>
+              <div className="row" style={{ marginTop: '1rem' }}>
+                <button className="primary" onClick={() => applyAutoSplit(splitPrompt)}>
+                  {isU ? 'Split into 3 sections' : 'Split automatically'}
+                </button>
+                <button className="secondary" onClick={() => setSplitPrompt(null)}>Keep as one</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {error && <p className="error">{error}</p>}
     </div>
@@ -1581,52 +1709,72 @@ function drawSharedEdges(ctx, sections, vp, scale) {
       const r2 = ridgeLine(sections[sj], scale);
       const ridgeIntersect = (r1 && r2) ? lineLineIntersect(r1, r2) : null;
 
-      let p1, p2, planLen;
+      // A valley line forms wherever two roof slopes meet at a re-entrant
+      // join. For an L/U split, both endpoints of the shared edge anchor a
+      // valley that runs UP to the ridge intersection — yielding a V shape
+      // with the ridge intersection at its peak.
+      const valleys = [];
       if (interior && ridgeIntersect) {
-        // Diagonal valley: inner corner of the L → ridge intersection.
-        p1 = worldToScreen(interior.x, interior.y, vp);
-        p2 = worldToScreen(ridgeIntersect.x, ridgeIntersect.y, vp);
-        planLen = Math.hypot(ridgeIntersect.x - interior.x, ridgeIntersect.y - interior.y);
+        valleys.push({
+          a: interior,
+          b: ridgeIntersect,
+          planLen: Math.hypot(ridgeIntersect.x - interior.x, ridgeIntersect.y - interior.y),
+        });
+        const exterior = sharedCorners.find((p) =>
+          Math.hypot(p.x - interior.x, p.y - interior.y) > 1e-6
+        );
+        if (exterior) {
+          valleys.push({
+            a: exterior,
+            b: ridgeIntersect,
+            planLen: Math.hypot(ridgeIntersect.x - exterior.x, ridgeIntersect.y - exterior.y),
+          });
+        }
       } else if (sharedCorners.length >= 2) {
         // Fallback when ridges are parallel or no interior corner exists:
         // draw along the shared edge using the first two shared corners.
-        p1 = worldToScreen(sharedCorners[0].x, sharedCorners[0].y, vp);
-        p2 = worldToScreen(sharedCorners[1].x, sharedCorners[1].y, vp);
-        planLen = Math.hypot(
-          sharedCorners[1].x - sharedCorners[0].x,
-          sharedCorners[1].y - sharedCorners[0].y
-        );
+        valleys.push({
+          a: sharedCorners[0],
+          b: sharedCorners[1],
+          planLen: Math.hypot(
+            sharedCorners[1].x - sharedCorners[0].x,
+            sharedCorners[1].y - sharedCorners[0].y
+          ),
+        });
       } else {
         continue;
       }
-      const valleyLfWorld = planLen * scale * factor;
 
-      ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
-      ctx.lineWidth = sameP ? 2.5 : 2;
-      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-
-      if (sameP) {
-        // Chevron at p2 (the high end — toward the ridge intersection).
-        const dx = p2.x - p1.x, dy = p2.y - p1.y;
-        const seg = Math.hypot(dx, dy) || 1;
-        const ux = dx / seg, uy = dy / seg;
-        const px = -uy, py = ux;
-        const back = 8;
-        ctx.beginPath();
-        ctx.moveTo(p2.x - ux * back + px * (back * 0.55), p2.y - uy * back + py * (back * 0.55));
-        ctx.lineTo(p2.x, p2.y);
-        ctx.lineTo(p2.x - ux * back - px * (back * 0.55), p2.y - uy * back - py * (back * 0.55));
-        ctx.stroke();
-        const mx = (p1.x + p2.x) / 2 + px * 12;
-        const my = (p1.y + p2.y) / 2 + py * 12;
-        const txt = `V: ${valleyLfWorld.toFixed(1)}'`;
-        ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        const tm = ctx.measureText(txt);
-        ctx.fillRect(mx - tm.width / 2 - 2, my - 7, tm.width + 4, 14);
-        ctx.fillStyle = '#7C3AED';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(txt, mx, my);
+      for (const v of valleys) {
+        const p1 = worldToScreen(v.a.x, v.a.y, vp);
+        const p2 = worldToScreen(v.b.x, v.b.y, vp);
+        const valleyLfWorld = v.planLen * scale * factor;
+        ctx.strokeStyle = sameP ? '#7C3AED' : '#D97706';
+        ctx.lineWidth = sameP ? 2.5 : 2;
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        if (sameP) {
+          // Chevron at p2 (the high end — toward the ridge intersection).
+          const dx = p2.x - p1.x, dy = p2.y - p1.y;
+          const seg = Math.hypot(dx, dy) || 1;
+          const ux = dx / seg, uy = dy / seg;
+          const px = -uy, py = ux;
+          const back = 8;
+          ctx.beginPath();
+          ctx.moveTo(p2.x - ux * back + px * (back * 0.55), p2.y - uy * back + py * (back * 0.55));
+          ctx.lineTo(p2.x, p2.y);
+          ctx.lineTo(p2.x - ux * back - px * (back * 0.55), p2.y - uy * back - py * (back * 0.55));
+          ctx.stroke();
+          const mx = (p1.x + p2.x) / 2 + px * 12;
+          const my = (p1.y + p2.y) / 2 + py * 12;
+          const txt = `V: ${valleyLfWorld.toFixed(1)}'`;
+          ctx.font = '500 10px "Segoe UI", -apple-system, sans-serif';
+          ctx.fillStyle = 'rgba(255,255,255,0.85)';
+          const tm = ctx.measureText(txt);
+          ctx.fillRect(mx - tm.width / 2 - 2, my - 7, tm.width + 4, 14);
+          ctx.fillStyle = '#7C3AED';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(txt, mx, my);
+        }
       }
     }
   }
