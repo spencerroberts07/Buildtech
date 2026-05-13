@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../api.js';
 import RoofSketch from './RoofSketch.jsx';
+import FloorPlanExtractionModal from './FloorPlanExtractionModal.jsx';
 
 const BASE_GRID_PX = 20;
 const MIN_ZOOM = 0.2;
@@ -388,6 +389,14 @@ function PolygonSketch({
   const scaleFtPerGrid = num(projectSettings?.scale_ft_per_grid) || 1;
   const wallByIndex = new Map(walls.map((w) => [Number(w.wall_index), w]));
 
+  // ---- AI floor plan extraction state ----
+  const [aiExtracting, setAiExtracting] = useState(false);
+  const [aiStage, setAiStage] = useState('');
+  const [aiData, setAiData] = useState(null);
+  const [aiError, setAiError] = useState('');
+  const aiAbortRef = useRef(null);
+  const hasAnyPdf = !!projectSettings?.pdf_filename;
+
   // ---- bootstrap floor plan for the active level ----
   useEffect(() => {
     let cancelled = false;
@@ -415,6 +424,79 @@ function PolygonSketch({
     })();
     return () => { cancelled = true; };
   }, [projectId, level]);
+
+  async function refreshFloorPlan() {
+    try {
+      const list = await api.listFloorPlans(projectId);
+      const fp = list.find((f) => f.level === level);
+      if (!fp) return;
+      const full = await api.getFloorPlan(projectId, fp.id);
+      setFloorPlanId(full.id);
+      const cs = Array.isArray(full.corners) ? full.corners : [];
+      setCorners(cs);
+      setWalls(full.walls || []);
+      setOpenings(full.openings || []);
+      setInteriorWalls(full.interior_walls || []);
+      const phase = full.drawing_phase === 'interior' ? 'interior' : 'exterior';
+      setDrawingPhase(phase);
+      const isClosed = cs.length >= 3;
+      setMode(isClosed ? 'editing' : 'placing');
+      setSketchMode(isClosed ? 'select' : 'draw_exterior');
+    } catch (e) { setError(e.message); }
+  }
+
+  async function runAiExtract() {
+    if (aiExtracting || !hasAnyPdf) return;
+    setAiExtracting(true);
+    setAiError('');
+    setAiData(null);
+    // Cycling stage text. Cleared in finally.
+    setAiStage('Reading floor plan…');
+    const stages = [
+      { at: 5000, text: 'Detecting walls…' },
+      { at: 10000, text: 'Reading door & window schedules…' },
+      { at: 15000, text: 'Finalizing…' },
+    ];
+    const stageTimers = stages.map((s) => setTimeout(() => setAiStage(s.text), s.at));
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    try {
+      const out = await api.extractFloorPlan(projectId, { signal: controller.signal });
+      if (!out?.data) {
+        setAiError(out?.error || 'Could not parse floor plan data from this PDF');
+        return;
+      }
+      setAiData(out.data);
+    } catch (e) {
+      if (e.name === 'AbortError' || /aborted/i.test(e.message || '')) {
+        // user cancelled — silent.
+      } else {
+        setAiError(e.message || 'Extraction failed');
+      }
+    } finally {
+      stageTimers.forEach((t) => clearTimeout(t));
+      setAiStage('');
+      setAiExtracting(false);
+      aiAbortRef.current = null;
+    }
+  }
+
+  function cancelAiExtract() {
+    aiAbortRef.current?.abort();
+  }
+
+  async function onAiExtractionApplied(result) {
+    setAiData(null);
+    await refreshFloorPlan();
+    onMaterialsChanged?.();
+    onOpeningsChanged?.();
+    setToast(
+      `Floor plan drawn from PDF — ${result?.exterior_walls_created || 0} exterior, ` +
+      `${result?.interior_walls_created || 0} interior, ${result?.openings_created || 0} opening${(result?.openings_created || 0) === 1 ? '' : 's'}`
+    );
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 6000);
+  }
 
   async function copyFromFloor1() {
     if (!confirm(`Copy Floor 1 footprint into ${level}? This replaces any existing corners/walls.`)) return;
@@ -1559,7 +1641,27 @@ function PolygonSketch({
         {polygonClosed && (
           <button className="danger" style={{ flex: '0 0 auto' }} onClick={clearFloorPlan}>Clear floor plan</button>
         )}
+        <button
+          type="button"
+          className="primary"
+          style={{ flex: '0 0 auto', opacity: hasAnyPdf && !aiExtracting ? 1 : 0.55 }}
+          disabled={!hasAnyPdf || aiExtracting}
+          onClick={runAiExtract}
+          title={!hasAnyPdf
+            ? 'Upload an architectural PDF to the project to enable AI extraction'
+            : aiExtracting ? 'Extraction in progress…' : 'AI reads the uploaded PDF and populates this floor automatically'}
+        >✨ Read Floor Plan</button>
       </div>
+      {aiError && !aiExtracting && (
+        <div style={{
+          padding: '0.6rem 0.85rem', marginTop: '0.4rem',
+          background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 6,
+          color: '#991B1B', fontSize: 13,
+        }}>
+          {aiError}
+          <button onClick={() => setAiError('')} style={{ marginLeft: 12, background: 'transparent', border: 'none', cursor: 'pointer', color: '#991B1B', fontWeight: 700 }}>×</button>
+        </div>
+      )}
       <div className="sketch-area">
         <div className="sketch-canvas-wrap" ref={wrapRef} style={{ position: 'relative' }}>
           <canvas
@@ -1593,6 +1695,27 @@ function PolygonSketch({
               pointerEvents: 'none',
               boxShadow: '0 4px 12px rgba(0,0,0,0.2)',
             }}>{toast}</div>
+          )}
+          {aiExtracting && (
+            <div style={{
+              position: 'absolute', inset: 0,
+              background: 'rgba(250,250,250,0.92)',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              gap: 14, zIndex: 50,
+            }}>
+              <div style={{
+                width: 40, height: 40, border: '3px solid #E0E0E0',
+                borderTopColor: '#CC0000', borderRadius: '50%',
+                animation: 'sketch-spin 1s linear infinite',
+              }} />
+              <div style={{ fontSize: 14, fontWeight: 500, color: '#1A1A1A' }}>{aiStage}</div>
+              <button
+                onClick={cancelAiExtract}
+                className="secondary"
+                style={{ padding: '0.35rem 0.85rem', fontSize: 13 }}
+              >Cancel</button>
+              <style>{'@keyframes sketch-spin{to{transform:rotate(360deg)}}'}</style>
+            </div>
           )}
           {calibDialog.open && (
             <div style={{
@@ -1671,6 +1794,20 @@ function PolygonSketch({
         )}
       </div>
       {error && <p className="error">{error}</p>}
+      {aiData && (
+        <FloorPlanExtractionModal
+          data={aiData}
+          scaleFtPerGrid={scaleFtPerGrid}
+          projectId={projectId}
+          currentFloorLevel={level}
+          existingExteriorWallCount={corners.length}
+          existingInteriorWallCount={interiorWalls.length}
+          existingOpeningsCount={openings.length}
+          onClose={() => setAiData(null)}
+          onApplied={onAiExtractionApplied}
+          onError={(e) => setAiError(e.message)}
+        />
+      )}
     </div>
   );
 }

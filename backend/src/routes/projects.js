@@ -20,6 +20,7 @@ import { ensureMaterial } from '../materialUpsert.js';
 import { r2, BUCKET, PUBLIC_URL } from '../r2.js';
 import { computeProjectMaterialList } from '../materialListBuilder.js';
 import { extractRoofData, aiConfigured } from '../aiRoofExtractor.js';
+import { extractFloorPlan } from '../aiFloorPlanExtractor.js';
 
 const r2Configured = () => !!process.env.R2_ENDPOINT;
 const pdfKey = (projectId) => `projects/${projectId}/plan.pdf`;
@@ -1686,6 +1687,256 @@ router.post('/:id/apply-extracted-roof-data', async (req, res) => {
     res.json({ ok: true, project: rows[0] });
   } catch (e) {
     await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------- AI floor plan extraction ----------------
+router.post('/:id/extract-floor-plan', async (req, res) => {
+  const { id } = req.params;
+  if (!aiConfigured()) return res.status(503).json({ error: 'AI extraction not available' });
+  if (!r2Configured()) return res.status(503).json({ error: 'PDF storage not configured' });
+  const p = await query(
+    'SELECT pdf_filename, truss_pdf_filename FROM projects WHERE id = $1', [id]
+  );
+  if (!p.rows[0]) return res.status(404).json({ error: 'project not found' });
+  const { pdf_filename, truss_pdf_filename } = p.rows[0];
+  if (!pdf_filename) {
+    return res.status(400).json({ error: 'No PDF uploaded to this project' });
+  }
+  try {
+    const { data, raw } = await extractFloorPlan({
+      architecturalKey: pdf_filename,
+      trussKey: truss_pdf_filename || null,
+    });
+    if (!data) {
+      return res.json({ ok: true, data: null, error: 'Could not parse floor plan data from this PDF', raw });
+    }
+    res.json({
+      ok: true,
+      data,
+      source: {
+        architectural: !!pdf_filename,
+        truss: !!truss_pdf_filename,
+      },
+    });
+  } catch (e) {
+    if (e.code === 'AI_NOT_CONFIGURED') return res.status(503).json({ error: 'AI extraction not available' });
+    if (e.code === 'NO_PDF') return res.status(400).json({ error: 'No PDF uploaded to this project' });
+    if (e.name === 'AbortError') return res.status(504).json({ error: 'Extraction timed out' });
+    if (e?.$metadata || e?.name === 'NoSuchKey') {
+      return res.status(503).json({ error: 'Could not load PDF from storage' });
+    }
+    console.error('Floor plan extraction failed:', e);
+    return res.status(500).json({ error: e.message || 'Extraction failed' });
+  }
+});
+
+// Apply the user-confirmed extraction subset. Body shape:
+// {
+//   floor_level: 'floor1' | 'floor2',
+//   replace_existing: boolean,          // required true if walls already exist
+//   exterior_polygon: [{ x, y }] | null, // already in GRID UNITS (frontend converts)
+//   interior_walls: [{ x1, y1, x2, y2, wall_type }] | null,
+//   openings: [{
+//      wall_kind: 'exterior' | 'interior',
+//      // For exterior: edge_index references the corner index in exterior_polygon
+//      // For interior: interior_wall_index references the index in interior_walls (post-insert)
+//      edge_index?: number,
+//      interior_wall_index?: number,
+//      type: 'window' | 'door',
+//      ro_width: number,   // inches
+//      ro_height: number,  // inches
+//      position: number,   // 0..1 along the wall
+//      label?: string,
+//   }],
+//   apply_roof_pitch?: string | null,    // e.g. '6:12' — pushed onto existing roof_sections
+//   apply_rafter_spacing?: '16_oc' | '24_oc' | null,
+//   apply_wall_type?: 'exterior_2x6' | 'exterior_2x4' | null,
+//   apply_wall_height_ft?: number | null,
+// }
+router.post('/:id/apply-floor-plan-extraction', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const level = b.floor_level || 'floor1';
+  if (!['foundation', 'floor1', 'floor2', 'roof'].includes(level)) {
+    return res.status(400).json({ error: "floor_level must be 'foundation', 'floor1', 'floor2', or 'roof'" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Resolve the floor_plans row for this project + level. Created at
+    // project-creation time but defensive: insert if missing.
+    let fpRow = (await client.query(
+      'SELECT * FROM floor_plans WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1',
+      [id, level]
+    )).rows[0];
+    if (!fpRow) {
+      fpRow = (await client.query(
+        `INSERT INTO floor_plans (project_id, level, corners) VALUES ($1, $2, '[]'::jsonb) RETURNING *`,
+        [id, level]
+      )).rows[0];
+    }
+    const fpid = fpRow.id;
+
+    // If the user opted to replace, wipe interior walls (cascade-deletes their
+    // openings) and clear the corners. The corners replacement below will
+    // cascade-delete the exterior walls + their openings via the wall_index
+    // reconciliation logic in floor_plans PUT.
+    if (b.replace_existing) {
+      await client.query(
+        `DELETE FROM floor_plan_interior_walls WHERE floor_plan_id = $1`, [fpid]
+      );
+    }
+
+    // 1. Exterior polygon → floor_plans.corners. We mirror the PUT
+    //    /floor-plans/:fpid logic inline so this stays one transaction.
+    let createdWallIds = []; // wall_index → floor_plan_walls.id (for opening attach)
+    if (Array.isArray(b.exterior_polygon) && b.exterior_polygon.length >= 3) {
+      const corners = b.exterior_polygon.map((c) => ({ x: Number(c.x), y: Number(c.y) }));
+      await client.query(
+        `UPDATE floor_plans SET corners = $1::jsonb, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(corners), fpid]
+      );
+      const targetCount = corners.length;
+      // If replacing, drop all existing walls first so the indices start clean.
+      // Otherwise reconcile: remove out-of-range and add missing.
+      if (b.replace_existing) {
+        await client.query(`DELETE FROM floor_plan_walls WHERE floor_plan_id = $1`, [fpid]);
+      } else {
+        await client.query(
+          `DELETE FROM floor_plan_walls WHERE floor_plan_id = $1 AND wall_index >= $2`,
+          [fpid, targetCount]
+        );
+      }
+      const existing = await client.query(
+        `SELECT wall_index, id FROM floor_plan_walls WHERE floor_plan_id = $1`,
+        [fpid]
+      );
+      const haveIds = new Map(existing.rows.map((r) => [Number(r.wall_index), r.id]));
+      const wallTypeForExterior = b.apply_wall_type || 'exterior_2x6';
+      const wallHeight = b.apply_wall_height_ft == null ? null : Number(b.apply_wall_height_ft);
+      for (let i = 0; i < targetCount; i++) {
+        let wallId = haveIds.get(i);
+        if (!wallId) {
+          const r = await client.query(
+            `INSERT INTO floor_plan_walls (floor_plan_id, wall_index, wall_type, height)
+             VALUES ($1, $2, $3, $4) RETURNING id`,
+            [fpid, i, wallTypeForExterior, wallHeight]
+          );
+          wallId = r.rows[0].id;
+        } else if (b.apply_wall_type || b.apply_wall_height_ft != null) {
+          await client.query(
+            `UPDATE floor_plan_walls SET wall_type = COALESCE($1, wall_type), height = COALESCE($2, height) WHERE id = $3`,
+            [b.apply_wall_type || null, wallHeight, wallId]
+          );
+        }
+        createdWallIds[i] = wallId;
+      }
+      // Auto-area cache. Same shoelace + scale as PUT /floor-plans.
+      const proj = await client.query('SELECT scale_ft_per_grid FROM projects WHERE id = $1', [id]);
+      const sft = Number(proj.rows[0]?.scale_ft_per_grid) || 1;
+      let acc = 0;
+      for (let i = 0; i < corners.length; i++) {
+        const a = corners[i], q = corners[(i + 1) % corners.length];
+        acc += (Number(a.x) * Number(q.y) - Number(q.x) * Number(a.y));
+      }
+      const areaSf = Math.abs(acc) / 2 * (sft * sft);
+      if (areaSf > 0) {
+        await client.query('UPDATE floor_plans SET auto_floor_area_sf = $1 WHERE id = $2', [areaSf, fpid]);
+        const f = await client.query(
+          'SELECT id FROM floors WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1',
+          [id, level]
+        );
+        if (f.rows[0]) {
+          await client.query('UPDATE floors SET auto_floor_area_sf = $1 WHERE id = $2', [areaSf, f.rows[0].id]);
+        }
+      }
+    }
+
+    // 2. Interior walls.
+    const createdInteriorIds = [];
+    if (Array.isArray(b.interior_walls)) {
+      for (const w of b.interior_walls) {
+        const wallType = w.wall_type || 'interior_2x4';
+        const r = await client.query(
+          `INSERT INTO floor_plan_interior_walls
+             (floor_plan_id, x1, y1, x2, y2, wall_type, height)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [fpid, Number(w.x1), Number(w.y1), Number(w.x2), Number(w.y2),
+           wallType, w.height ?? null]
+        );
+        createdInteriorIds.push(r.rows[0].id);
+      }
+    }
+
+    // 3. Openings. Each one specifies which wall_kind + index it attaches to.
+    let openingsCreated = 0;
+    if (Array.isArray(b.openings)) {
+      for (const op of b.openings) {
+        const opType = op.type === 'door' ? 'door' : 'window';
+        const roW = Number(op.ro_width);
+        const roH = Number(op.ro_height);
+        const pos = Math.max(0, Math.min(1, Number(op.position ?? 0.5)));
+        if (!Number.isFinite(roW) || !Number.isFinite(roH)) continue;
+        let extId = null, intId = null;
+        if (op.wall_kind === 'exterior') {
+          const idx = Number(op.edge_index);
+          if (!Number.isInteger(idx) || idx < 0 || idx >= createdWallIds.length) continue;
+          extId = createdWallIds[idx];
+        } else if (op.wall_kind === 'interior') {
+          const idx = Number(op.interior_wall_index);
+          if (!Number.isInteger(idx) || idx < 0 || idx >= createdInteriorIds.length) continue;
+          intId = createdInteriorIds[idx];
+        } else {
+          continue;
+        }
+        await client.query(
+          `INSERT INTO openings
+             (project_id, floor_plan_wall_id, floor_plan_interior_wall_id, type,
+              rough_opening_width, rough_opening_height, label, position_along_wall, swing)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            id, extId, intId, opType, roW, roH,
+            op.label || null, pos,
+            opType === 'door' && intId ? 'RHI' : null,
+          ]
+        );
+        openingsCreated++;
+      }
+    }
+
+    // 4. Roof settings — only when explicitly requested.
+    if (b.apply_roof_pitch) {
+      await client.query(
+        `UPDATE roof_sections SET pitch = $1, updated_at = NOW() WHERE project_id = $2`,
+        [String(b.apply_roof_pitch), id]
+      );
+    }
+    if (b.apply_rafter_spacing) {
+      await client.query(
+        `UPDATE projects SET rafter_spacing = $1, updated_at = NOW() WHERE id = $2`,
+        [String(b.apply_rafter_spacing), id]
+      );
+    }
+
+    await client.query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+    await client.query('COMMIT');
+
+    res.json({
+      ok: true,
+      floor_plan_id: fpid,
+      exterior_walls_created: createdWallIds.length,
+      interior_walls_created: createdInteriorIds.length,
+      openings_created: openingsCreated,
+    });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Apply floor plan extraction failed:', e);
     res.status(500).json({ error: e.message });
   } finally {
     client.release();

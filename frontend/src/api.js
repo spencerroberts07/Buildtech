@@ -202,6 +202,17 @@ export const api = {
   clearExtractedRoofData: (projectId) =>
     request(`/projects/${projectId}/extracted-roof-data`, { method: 'DELETE' }),
 
+  // AI floor plan extraction.
+  extractFloorPlan: (projectId, opts = {}) =>
+    request(`/projects/${projectId}/extract-floor-plan`, {
+      method: 'POST', body: JSON.stringify({}),
+      signal: opts.signal,
+    }),
+  applyFloorPlanExtraction: (projectId, data) =>
+    request(`/projects/${projectId}/apply-floor-plan-extraction`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+
   listPackages: (projectId) => request(`/projects/${projectId}/packages`),
   createPackage: (projectId, data) =>
     request(`/projects/${projectId}/packages`, { method: 'POST', body: JSON.stringify(data) }),
