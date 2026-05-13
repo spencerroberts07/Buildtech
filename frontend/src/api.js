@@ -251,6 +251,15 @@ export const api = {
     request(`/quotes/${qid}/line-items`, { method: 'POST', body: JSON.stringify(data) }),
   deleteQuoteLineItem: (qid, liid) =>
     request(`/quotes/${qid}/line-items/${liid}`, { method: 'DELETE' }),
+  // Manual per-row price override. Pass { unit_price } or { reset: true }.
+  updateQuoteLineItem: (qid, liid, data) =>
+    request(`/quotes/${qid}/line-items/${liid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  // Per-row visibility toggle.
+  setQuoteLineItemVisibility: (qid, liid, hidden) =>
+    request(`/quotes/${qid}/line-items/${liid}/visibility`, { method: 'PUT', body: JSON.stringify({ hidden }) }),
+  // Bulk visibility for "hide entire section".
+  bulkSetQuoteLineItemVisibility: (qid, ids, hidden) =>
+    request(`/quotes/${qid}/line-items/visibility-bulk`, { method: 'PUT', body: JSON.stringify({ ids, hidden }) }),
 
   // SKU search (full warehouse catalog)
   skuSearch: (q, limit = 20) =>

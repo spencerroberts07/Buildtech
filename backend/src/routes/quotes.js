@@ -273,8 +273,11 @@ async function insertQuoteLineItems(client, quoteId, items) {
 }
 
 async function updateQuoteTotals(client, quoteId) {
+  // Hidden rows are excluded — they don't contribute to subtotal, HST,
+  // grand total, total cost, gross profit, or margin. Restoring a hidden
+  // row goes through this same path so the totals come back automatically.
   const li = await client.query(
-    'SELECT * FROM quote_line_items WHERE quote_id = $1', [quoteId]
+    'SELECT * FROM quote_line_items WHERE quote_id = $1 AND hidden = false', [quoteId]
   );
   const q = await client.query('SELECT tax_rate FROM quotes WHERE id = $1', [quoteId]);
   const taxRate = num(q.rows[0]?.tax_rate) ?? TAX_RATE_DEFAULT;
@@ -284,6 +287,13 @@ async function updateQuoteTotals(client, quoteId) {
        gross_profit=$5, margin_pct=$6, updated_at=NOW() WHERE id=$7`,
     [t.subtotal, t.taxAmount, t.total, t.totalCost, t.grossProfit, t.marginPct, quoteId]
   );
+}
+
+// Filter the loaded quote's line items to visible-only. Used to build the
+// PDF and email payload so hidden rows truly never reach the customer.
+function quoteWithoutHidden(quote) {
+  if (!quote) return quote;
+  return { ...quote, line_items: (quote.line_items || []).filter((li) => !li.hidden) };
 }
 
 async function loadFullQuote(quoteId) {
@@ -341,7 +351,7 @@ router.get('/:qid/pdf', async (req, res) => {
   const q = await loadFullQuote(req.params.qid);
   if (!q) return res.status(404).json({ error: 'not found' });
   try {
-    const pdf = await generateQuotePdf(q);
+    const pdf = await generateQuotePdf(quoteWithoutHidden(q));
     const safeNumber = String(q.quote_number || `quote-${q.id}`).replace(/[^A-Za-z0-9_-]/g, '-');
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Quote-${safeNumber}.pdf"`);
@@ -368,14 +378,15 @@ router.post('/:qid/send', async (req, res) => {
   const q = await loadFullQuote(qid);
   if (!q) return res.status(404).json({ error: 'not found' });
   try {
-    const rawPdf = await generateQuotePdf(q);
+    const visible = quoteWithoutHidden(q);
+    const rawPdf = await generateQuotePdf(visible);
     // Newer puppeteer can return a Uint8Array; normalize to a Buffer so the
     // Resend SDK gets the binary type it expects.
     const pdfBuffer = Buffer.isBuffer(rawPdf) ? rawPdf : Buffer.from(rawPdf);
     if (!pdfBuffer || pdfBuffer.length < 1000) {
       throw new Error('PDF generation produced empty or invalid output');
     }
-    await sendQuoteEmail({ quote: q, recipientEmail, customMessage, pdfBuffer });
+    await sendQuoteEmail({ quote: visible, recipientEmail, customMessage, pdfBuffer });
     await query(
       `UPDATE quotes SET status='sent', sent_at=NOW(), sent_to=$1, updated_at=NOW() WHERE id=$2`,
       [recipientEmail, qid]
@@ -474,6 +485,10 @@ router.post('/:qid/adjust', async (req, res) => {
     const inScope = (li) => {
       if (li.is_package) return false;
       if (li.unit_price == null) return false;
+      // Hidden rows are excluded from totals already, so bulk adjustments
+      // shouldn't silently mutate their prices. They get restored later
+      // showing whatever price the user set the last time it was visible.
+      if (li.hidden) return false;
       if (sectionFilter && sectionFilter !== 'all' && li.section !== sectionFilter) return false;
       return true;
     };
@@ -632,6 +647,125 @@ router.post('/:qid/line-items', async (req, res) => {
     await updateQuoteTotals(client, qid);
     await client.query('COMMIT');
     res.status(201).json(ins.rows[0]);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /quotes/:qid/line-items/visibility-bulk — hide or restore many lines
+// in one transaction (used by the "hide entire section" UI so a 30-row
+// section doesn't fire 30 separate requests). Declared BEFORE the per-line
+// `/:liid` routes so Express doesn't capture "visibility-bulk" as an id.
+//   Body: { ids: number[], hidden: boolean }
+router.put('/:qid/line-items/visibility-bulk', async (req, res) => {
+  const { qid } = req.params;
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Number.isFinite) : [];
+  const hidden = !!req.body?.hidden;
+  if (ids.length === 0) return res.status(400).json({ error: 'ids[] required' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `UPDATE quote_line_items SET hidden = $1
+        WHERE quote_id = $2 AND id = ANY($3::int[])`,
+      [hidden, qid, ids]
+    );
+    await updateQuoteTotals(client, qid);
+    await client.query('COMMIT');
+    const fresh = await loadFullQuote(qid);
+    res.json(fresh);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /quotes/:qid/line-items/:liid — manual price override or reset.
+//   Body: { unit_price: number }   → set override + price_overridden = true
+//   Body: { reset: true }          → restore unit_price = base_unit_price
+//                                    and price_overridden = false
+// Recomputes line_price, margin_pct on the row + quote-level totals.
+// Returns the fresh full quote.
+router.put('/:qid/line-items/:liid', async (req, res) => {
+  const { qid, liid } = req.params;
+  const b = req.body || {};
+  const wantsReset = !!b.reset;
+  const newPriceRaw = b.unit_price;
+  if (!wantsReset && (newPriceRaw === undefined || newPriceRaw === null || newPriceRaw === '')) {
+    return res.status(400).json({ error: 'unit_price or { reset: true } required' });
+  }
+  let newPrice = null;
+  if (!wantsReset) {
+    newPrice = Number(newPriceRaw);
+    if (!Number.isFinite(newPrice) || newPrice < 0) {
+      return res.status(400).json({ error: 'unit_price must be a non-negative number' });
+    }
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = (await client.query(
+      'SELECT * FROM quote_line_items WHERE id = $1 AND quote_id = $2 FOR UPDATE',
+      [liid, qid]
+    )).rows[0];
+    if (!cur) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'line item not found' });
+    }
+    const qty = Number(cur.quantity);
+    const unitCost = cur.unit_cost == null ? null : Number(cur.unit_cost);
+    const effectivePrice = wantsReset
+      ? (cur.base_unit_price == null ? null : Number(cur.base_unit_price))
+      : newPrice;
+    const linePrice = effectivePrice == null ? null : qty * effectivePrice;
+    const lineCost = unitCost == null ? null : qty * unitCost;
+    const marginPct = (linePrice != null && linePrice > 0 && lineCost != null)
+      ? ((linePrice - lineCost) / linePrice) * 100 : null;
+    await client.query(
+      `UPDATE quote_line_items
+         SET unit_price = $1, line_price = $2, margin_pct = $3, price_overridden = $4
+       WHERE id = $5`,
+      [effectivePrice, linePrice, marginPct, !wantsReset, liid]
+    );
+    await updateQuoteTotals(client, qid);
+    await client.query('COMMIT');
+    const fresh = await loadFullQuote(qid);
+    res.json(fresh);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /quotes/:qid/line-items/:liid/visibility — hide or restore a line.
+//   Body: { hidden: boolean }
+// Hidden rows are excluded from subtotal/HST/grand-total/margin and from
+// the PDF + email payload. Returns the fresh full quote.
+router.put('/:qid/line-items/:liid/visibility', async (req, res) => {
+  const { qid, liid } = req.params;
+  const hidden = !!req.body?.hidden;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const r = await client.query(
+      'UPDATE quote_line_items SET hidden = $1 WHERE id = $2 AND quote_id = $3',
+      [hidden, liid, qid]
+    );
+    if (r.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'line item not found' });
+    }
+    await updateQuoteTotals(client, qid);
+    await client.query('COMMIT');
+    const fresh = await loadFullQuote(qid);
+    res.json(fresh);
   } catch (e) {
     await client.query('ROLLBACK');
     res.status(500).json({ error: e.message });

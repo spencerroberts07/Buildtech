@@ -419,6 +419,10 @@ const PROJECT_COLUMN_ALTERS = [
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_ridge_lf NUMERIC`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_hip_lf NUMERIC`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_fascia_lf NUMERIC`,
+  // Quote-line-item visibility. Hidden rows are excluded from totals, PDF,
+  // and email; the quote page surfaces them behind a "show hidden" toggle
+  // with a Restore button so the override is recoverable.
+  `ALTER TABLE quote_line_items ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`,
 ];
 
 const SKU_CATALOG_SEED = [

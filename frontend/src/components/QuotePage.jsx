@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import SendQuoteEmailModal from './SendQuoteEmailModal.jsx';
@@ -35,11 +35,25 @@ export default function QuotePage() {
   const [emailOpen, setEmailOpen] = useState(false);
   const [toast, setToast] = useState('');
   const [pdfBusy, setPdfBusy] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
 
-  // Memoized section grouping — must run on every render (hooks ordering rule),
-  // so it tolerates a null quote on first paint.
+  // Section grouping holds ALL items (visible + hidden). The render path
+  // decides per-section whether to draw the section header (hidden if every
+  // item is hidden and `showHidden` is off) and whether to draw each row.
+  // sectionList is the dropdown source for the price-adjustment panel and
+  // only includes sections with at least one visible row, so users can't
+  // bulk-adjust an empty (fully-hidden) section.
   const sections = useMemo(() => groupBySection(quote?.line_items || []), [quote]);
-  const sectionList = Array.from(sections.keys());
+  const sectionList = useMemo(
+    () => Array.from(sections.entries())
+      .filter(([, items]) => items.some((li) => !li.hidden))
+      .map(([k]) => k),
+    [sections]
+  );
+  const hiddenCount = useMemo(
+    () => (quote?.line_items || []).filter((li) => li.hidden).length,
+    [quote]
+  );
 
   async function load() {
     try { setQuote(await api.getQuote(id)); }
@@ -61,6 +75,34 @@ export default function QuotePage() {
     try {
       await api.deleteQuoteLineItem(id, liid);
       await load();
+    } catch (e) { setError(e.message); }
+  }
+
+  async function saveUnitPrice(liid, newPrice) {
+    try {
+      const updated = await api.updateQuoteLineItem(id, liid, { unit_price: newPrice });
+      setQuote(updated);
+    } catch (e) { setError(e.message); }
+  }
+  async function resetUnitPrice(liid) {
+    try {
+      const updated = await api.updateQuoteLineItem(id, liid, { reset: true });
+      setQuote(updated);
+    } catch (e) { setError(e.message); }
+  }
+  async function setLineHidden(liid, hidden) {
+    try {
+      const updated = await api.setQuoteLineItemVisibility(id, liid, hidden);
+      setQuote(updated);
+    } catch (e) { setError(e.message); }
+  }
+  async function hideSection(sectionName) {
+    const items = sections.get(sectionName) || [];
+    const ids = items.filter((li) => !li.hidden).map((li) => li.id);
+    if (ids.length === 0) return;
+    try {
+      const updated = await api.bulkSetQuoteLineItemVisibility(id, ids, true);
+      setQuote(updated);
     } catch (e) { setError(e.message); }
   }
 
@@ -156,54 +198,76 @@ export default function QuotePage() {
           </tr>
         </thead>
         <tbody>
-          {sectionList.map((sec) => (
-            <React.Fragment key={sec}>
-              <tr className="material-section-header">
-                <td colSpan={9}>
-                  <span className="section-chevron" style={{ display: 'inline-block', width: '1.2em' }}>▼</span>
-                  {sec || 'Other'}
-                </td>
-              </tr>
-              {sections.get(sec).map((li) => (
-                <tr key={li.id}>
-                  <td>{li.item_number || <span className="muted">—</span>}</td>
-                  <td>{li.catalog_number || <span className="muted">—</span>}</td>
-                  <td>
-                    {li.description}
-                    {li.price_overridden && (
-                      <span title="Price overridden" style={{ marginLeft: 6, display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#FFB800', verticalAlign: 'middle' }} />
+          {Array.from(sections.keys()).map((sec) => {
+            const items = sections.get(sec);
+            const visible = items.filter((li) => !li.hidden);
+            const hiddenInSec = items.filter((li) => li.hidden);
+            // Skip whole-section header when nothing visible AND user hasn't
+            // opted into showing hidden — keeps the table clean.
+            if (visible.length === 0 && !showHidden) return null;
+            return (
+              <React.Fragment key={sec}>
+                <tr className="material-section-header">
+                  <td colSpan={9}>
+                    <span className="section-chevron" style={{ display: 'inline-block', width: '1.2em' }}>▼</span>
+                    {sec || 'Other'}
+                    {visible.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => hideSection(sec)}
+                        title={`Hide all ${visible.length} item${visible.length === 1 ? '' : 's'} in this section`}
+                        style={{
+                          float: 'right', background: 'transparent', border: 'none',
+                          cursor: 'pointer', fontSize: '0.95rem', color: '#6B7280',
+                          padding: '0 0.25rem',
+                        }}
+                      >👁</button>
                     )}
                   </td>
-                  <td>{Number(li.quantity).toLocaleString()}</td>
-                  <td>{li.unit || '—'}</td>
-                  <td>
-                    {li.is_package && li.unit_price == null
-                      ? <span className="muted">— Quoted Separately —</span>
-                      : li.unit_price == null ? <span style={{ color: '#9CA3AF' }}>TBD</span>
-                      : fmtMoney(li.unit_price)}
-                  </td>
-                  <td>
-                    {li.is_package && li.line_price == null ? '—'
-                      : li.line_price == null ? <span style={{ color: '#9CA3AF' }}>TBD</span>
-                      : fmtMoney(li.line_price)}
-                  </td>
-                  <td style={{ color: marginColor(li.margin_pct), fontWeight: 600 }}>
-                    {li.is_package && li.line_price == null ? '—' : fmtPct(li.margin_pct)}
-                  </td>
-                  <td>
-                    <button
-                      className="secondary"
-                      style={{ padding: '0.15rem 0.5rem', fontSize: '0.85rem' }}
-                      onClick={() => deleteLine(li.id)}
-                      title="Remove line item"
-                    >🗑</button>
-                  </td>
                 </tr>
-              ))}
-            </React.Fragment>
-          ))}
+                {visible.map((li) => (
+                  <LineItemRow
+                    key={li.id}
+                    li={li}
+                    onSavePrice={saveUnitPrice}
+                    onResetPrice={resetUnitPrice}
+                    onHide={() => setLineHidden(li.id, true)}
+                    onDelete={() => deleteLine(li.id)}
+                  />
+                ))}
+                {showHidden && hiddenInSec.map((li) => (
+                  <LineItemRow
+                    key={li.id}
+                    li={li}
+                    hidden
+                    onSavePrice={saveUnitPrice}
+                    onResetPrice={resetUnitPrice}
+                    onRestore={() => setLineHidden(li.id, false)}
+                    onDelete={() => deleteLine(li.id)}
+                  />
+                ))}
+              </React.Fragment>
+            );
+          })}
         </tbody>
       </table>
+      {hiddenCount > 0 && (
+        <div style={{ marginTop: '0.5rem' }}>
+          <button
+            type="button"
+            onClick={() => setShowHidden((v) => !v)}
+            style={{
+              background: 'transparent', border: 'none', cursor: 'pointer',
+              color: '#6B7280', fontSize: '0.85rem', textDecoration: 'underline',
+              padding: '0.25rem 0',
+            }}
+          >
+            {showHidden
+              ? `Hide ${hiddenCount} hidden item${hiddenCount === 1 ? '' : 's'}`
+              : `Show ${hiddenCount} hidden item${hiddenCount === 1 ? '' : 's'}`}
+          </button>
+        </div>
+      )}
 
       <PriceAdjustmentPanel
         quote={quote}
@@ -268,6 +332,154 @@ export default function QuotePage() {
   );
 }
 
+// One line-item row. Encapsulates the inline price editor + per-row
+// actions (eye / restore / delete) so the parent render stays focused on
+// section layout. The price cell becomes an input on click; Enter or blur
+// saves, Esc cancels. The orange dot beside the price toggles a reset to
+// the original base_unit_price.
+function LineItemRow({ li, hidden, onSavePrice, onResetPrice, onHide, onRestore, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [hover, setHover] = useState(false);
+  const inputRef = useRef(null);
+  const rowStyle = hidden
+    ? { background: '#F9F9F9', color: '#9CA3AF', textDecoration: 'line-through' }
+    : undefined;
+  const isPackageQuoted = li.is_package && li.unit_price == null;
+
+  function beginEdit() {
+    if (hidden) return; // editing while hidden is confusing; restore first
+    if (isPackageQuoted) {
+      // Allow the user to put a price on a Quoted-Separately package by
+      // pre-filling 0 and letting them type over it.
+      setDraft('0');
+    } else {
+      setDraft(li.unit_price != null ? Number(li.unit_price).toString() : '');
+    }
+    setEditing(true);
+    // Defer focus until the input renders.
+    setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+  }
+  async function commit() {
+    setEditing(false);
+    const v = Number(draft);
+    if (!Number.isFinite(v) || v < 0) return;
+    const cur = li.unit_price == null ? null : Number(li.unit_price);
+    if (cur != null && Math.abs(v - cur) < 1e-9) return; // unchanged
+    await onSavePrice(li.id, v);
+  }
+  function cancel() {
+    setEditing(false);
+  }
+
+  return (
+    <tr
+      style={rowStyle}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <td>{li.item_number || <span className="muted">—</span>}</td>
+      <td>{li.catalog_number || <span className="muted">—</span>}</td>
+      <td>{li.description}</td>
+      <td>{Number(li.quantity).toLocaleString()}</td>
+      <td>{li.unit || '—'}</td>
+      <td
+        title={editing || hidden ? undefined : 'Click to edit unit price'}
+        style={{
+          cursor: hidden ? 'default' : (editing ? 'text' : 'pointer'),
+          border: hover && !editing && !hidden ? '1px dashed #FFB800' : '1px solid transparent',
+          borderRadius: 4,
+          padding: '2px 6px',
+          minWidth: 80,
+        }}
+        onClick={editing ? undefined : beginEdit}
+      >
+        {editing ? (
+          <input
+            ref={inputRef}
+            type="number"
+            step="0.01"
+            min="0"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { e.preventDefault(); commit(); }
+              else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+            }}
+            style={{ width: '6rem', padding: '2px 4px', fontSize: '0.9rem' }}
+          />
+        ) : (
+          <span>
+            {isPackageQuoted
+              ? <span className="muted">— Quoted Separately —</span>
+              : li.unit_price == null
+                ? <span style={{ color: '#9CA3AF' }}>TBD</span>
+                : fmtMoney(li.unit_price)}
+            {li.price_overridden && !hidden && (
+              <span
+                onClick={(e) => { e.stopPropagation(); onResetPrice(li.id); }}
+                title="Manually overridden — click to reset"
+                style={{
+                  marginLeft: 6, display: 'inline-block',
+                  width: 10, height: 10, borderRadius: '50%',
+                  background: '#FF8C00', verticalAlign: 'middle',
+                  cursor: 'pointer',
+                }}
+              />
+            )}
+          </span>
+        )}
+      </td>
+      <td>
+        {li.is_package && li.line_price == null ? '—'
+          : li.line_price == null ? <span style={{ color: '#9CA3AF' }}>TBD</span>
+          : fmtMoney(li.line_price)}
+      </td>
+      <td style={{ color: hidden ? '#9CA3AF' : marginColor(li.margin_pct), fontWeight: 600 }}>
+        {li.is_package && li.line_price == null ? '—' : fmtPct(li.margin_pct)}
+      </td>
+      <td style={{ whiteSpace: 'nowrap', textAlign: 'right' }}>
+        {hidden ? (
+          <button
+            type="button"
+            onClick={onRestore}
+            title="Restore — include this item in the quote again"
+            style={{
+              background: '#16A34A', color: 'white', border: 'none',
+              padding: '0.15rem 0.6rem', fontSize: '0.8rem', borderRadius: 4,
+              cursor: 'pointer', fontWeight: 500,
+            }}
+          >Restore</button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={onHide}
+              title="Hide from quote (excluded from PDF and totals)"
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                fontSize: '0.95rem', padding: '0 0.35rem',
+                visibility: hover ? 'visible' : 'hidden',
+                color: '#6B7280',
+              }}
+            >👁</button>
+            <button
+              className="secondary"
+              style={{ padding: '0.15rem 0.5rem', fontSize: '0.85rem' }}
+              onClick={onDelete}
+              title="Remove line item"
+            >🗑</button>
+          </>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 function groupBySection(items) {
   const m = new Map();
   for (const it of items) {
@@ -296,8 +508,12 @@ function statusText(s) {
 function InternalMarginPanel({ sections, quote }) {
   const rows = [];
   for (const [name, items] of sections) {
+    // Hidden items are excluded from the internal margin breakdown so it
+    // matches the quote-level totals (which also exclude hidden rows).
+    const visible = items.filter((li) => !li.hidden);
+    if (visible.length === 0) continue;
     let revenue = 0, cost = 0;
-    for (const li of items) {
+    for (const li of visible) {
       if (li.line_price != null) revenue += Number(li.line_price);
       if (li.line_cost != null) cost += Number(li.line_cost);
     }
@@ -351,9 +567,12 @@ function PriceAdjustmentPanel({ quote, open, onToggle, sectionList, onApplied })
     setTargetRevenue(Number(quote.subtotal) || 0);
   }, [quote]);
 
-  // Live preview for target_margin
+  // Live preview for target_margin. Hidden rows are excluded — they don't
+  // contribute to subtotal/totals so adjusting them would be invisible churn.
   const preview = useMemo(() => {
-    const items = (quote.line_items || []).filter((li) => !li.is_package && li.unit_price != null);
+    const items = (quote.line_items || []).filter(
+      (li) => !li.is_package && li.unit_price != null && !li.hidden
+    );
     const inScope = (li) => section === 'all' || li.section === section;
     let newSubtotal = 0;
     let newCost = 0;
