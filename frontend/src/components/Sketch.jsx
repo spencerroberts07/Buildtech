@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../api.js';
 import RoofSketch from './RoofSketch.jsx';
 import FloorPlanExtractionModal from './FloorPlanExtractionModal.jsx';
+import OpeningsOnlyModal from './OpeningsOnlyModal.jsx';
 
 const BASE_GRID_PX = 20;
 const MIN_ZOOM = 0.2;
@@ -397,7 +398,10 @@ function PolygonSketch({
   const [aiData, setAiData] = useState(null);
   const [aiError, setAiError] = useState('');
   const aiAbortRef = useRef(null);
+  // Mode 2: openings-only extraction.
+  const [aiOpData, setAiOpData] = useState(null);
   const hasAnyPdf = !!projectSettings?.pdf_filename;
+  const polygonClosedForAi = corners.length >= 3;
 
   // ---- bootstrap floor plan for the active level ----
   useEffect(() => {
@@ -485,6 +489,47 @@ function PolygonSketch({
 
   function cancelAiExtract() {
     aiAbortRef.current?.abort();
+  }
+
+  async function runOpeningsExtract() {
+    if (aiExtracting || !hasAnyPdf || !polygonClosedForAi) return;
+    setAiExtracting(true);
+    setAiError('');
+    setAiOpData(null);
+    setAiStage('Reading door &amp; window schedules…');
+    const controller = new AbortController();
+    aiAbortRef.current = controller;
+    try {
+      const out = await api.extractOpeningsOnly(projectId, { signal: controller.signal });
+      if (!out?.data) {
+        setAiError(out?.error || 'Could not parse openings from this PDF');
+        return;
+      }
+      setAiOpData(out.data);
+    } catch (e) {
+      if (e.name === 'AbortError' || /aborted/i.test(e.message || '')) {
+        // user cancelled — silent
+      } else {
+        setAiError(e.message || 'Extraction failed');
+      }
+    } finally {
+      setAiStage('');
+      setAiExtracting(false);
+      aiAbortRef.current = null;
+    }
+  }
+
+  async function onOpeningsApplied(result) {
+    setAiOpData(null);
+    await refreshFloorPlan();
+    onMaterialsChanged?.();
+    onOpeningsChanged?.();
+    if (pdfControls?.pdfFilename && pdfControls?.pdfStatus === 'ready') {
+      pdfControls.setPdfOpacity?.(0.4);
+    }
+    setToast(result?.summary || 'Placed openings from PDF');
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 8000);
   }
 
   async function onAiExtractionApplied(result) {
@@ -1668,6 +1713,22 @@ function PolygonSketch({
             ? 'Upload an architectural PDF to the project to enable AI extraction'
             : aiExtracting ? 'Extraction in progress…' : 'AI reads the uploaded PDF and populates this floor automatically'}
         >✨ Read Floor Plan</button>
+        <button
+          type="button"
+          className="secondary"
+          style={{ flex: '0 0 auto', opacity: hasAnyPdf && polygonClosedForAi && !aiExtracting ? 1 : 0.55 }}
+          disabled={!hasAnyPdf || !polygonClosedForAi || aiExtracting}
+          onClick={runOpeningsExtract}
+          title={
+            !hasAnyPdf
+              ? 'Upload an architectural PDF to the project first'
+              : !polygonClosedForAi
+                ? 'Draw exterior walls first — this places openings on existing walls'
+                : aiExtracting
+                  ? 'Extraction in progress…'
+                  : 'AI reads the door & window schedules and places them on your existing walls'
+          }
+        >✨ Place Openings</button>
       </div>
       {aiError && !aiExtracting && (
         <div style={{
@@ -1822,6 +1883,18 @@ function PolygonSketch({
           existingOpeningsCount={openings.length}
           onClose={() => setAiData(null)}
           onApplied={onAiExtractionApplied}
+          onError={(e) => setAiError(e.message)}
+        />
+      )}
+      {aiOpData && (
+        <OpeningsOnlyModal
+          data={aiOpData}
+          projectId={projectId}
+          currentFloorLevel={level}
+          existingCorners={corners}
+          existingInteriorWallCount={interiorWalls.length}
+          onClose={() => setAiOpData(null)}
+          onApplied={onOpeningsApplied}
           onError={(e) => setAiError(e.message)}
         />
       )}

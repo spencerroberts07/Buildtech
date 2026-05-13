@@ -20,7 +20,7 @@ import { ensureMaterial } from '../materialUpsert.js';
 import { r2, BUCKET, PUBLIC_URL } from '../r2.js';
 import { computeProjectMaterialList } from '../materialListBuilder.js';
 import { extractRoofData, aiConfigured } from '../aiRoofExtractor.js';
-import { extractFloorPlan } from '../aiFloorPlanExtractor.js';
+import { extractFloorPlan, extractOpeningsOnly } from '../aiFloorPlanExtractor.js';
 
 const r2Configured = () => !!process.env.R2_ENDPOINT;
 const pdfKey = (projectId) => `projects/${projectId}/plan.pdf`;
@@ -1734,6 +1734,41 @@ router.post('/:id/extract-floor-plan', async (req, res) => {
   }
 });
 
+// Openings-only AI extraction. One focused call that reads the door +
+// window schedules and tags each row with wall_side. The frontend places
+// these onto walls the user already drew manually. Returns:
+//   { ok: true, data: { exterior_doors, interior_doors, windows, ... } }
+//   { ok: true, data: null, error: '...' }
+router.post('/:id/extract-openings-only', async (req, res) => {
+  const { id } = req.params;
+  if (!aiConfigured()) return res.status(503).json({ error: 'AI extraction not available' });
+  if (!r2Configured()) return res.status(503).json({ error: 'PDF storage not configured' });
+  const p = await query(
+    'SELECT pdf_filename, truss_pdf_filename FROM projects WHERE id = $1', [id]
+  );
+  if (!p.rows[0]) return res.status(404).json({ error: 'project not found' });
+  const { pdf_filename, truss_pdf_filename } = p.rows[0];
+  if (!pdf_filename) {
+    return res.status(400).json({ error: 'No PDF uploaded to this project' });
+  }
+  try {
+    const { data, error } = await extractOpeningsOnly({
+      architecturalKey: pdf_filename,
+      trussKey: truss_pdf_filename || null,
+    });
+    if (!data) {
+      return res.json({ ok: true, data: null, error: error || 'Could not parse openings from this PDF' });
+    }
+    res.json({ ok: true, data });
+  } catch (e) {
+    if (e.code === 'AI_NOT_CONFIGURED') return res.status(503).json({ error: 'AI extraction not available' });
+    if (e.code === 'NO_PDF') return res.status(400).json({ error: 'No PDF uploaded to this project' });
+    if (e.name === 'AbortError') return res.status(504).json({ error: 'Extraction timed out' });
+    console.error('Openings-only extraction failed:', e);
+    return res.status(500).json({ error: e.message || 'Extraction failed' });
+  }
+});
+
 // Apply the user-confirmed extraction subset. Body shape:
 // {
 //   floor_level: 'floor1' | 'floor2',
@@ -1795,8 +1830,21 @@ router.post('/:id/apply-floor-plan-extraction', async (req, res) => {
 
     // 1. Exterior polygon → floor_plans.corners. We mirror the PUT
     //    /floor-plans/:fpid logic inline so this stays one transaction.
+    //
+    // attach_to_existing_walls (used by the "✨ Place Openings" flow):
+    //   the user already drew the exterior polygon + interior walls
+    //   manually. We DON'T touch corners or interior walls — we just load
+    //   their IDs so the openings step can hang doors/windows off them.
     let createdWallIds = []; // wall_index → floor_plan_walls.id (for opening attach)
-    if (Array.isArray(b.exterior_polygon) && b.exterior_polygon.length >= 3) {
+    if (b.attach_to_existing_walls) {
+      const ext = await client.query(
+        `SELECT wall_index, id FROM floor_plan_walls WHERE floor_plan_id = $1 ORDER BY wall_index`,
+        [fpid]
+      );
+      for (const row of ext.rows) {
+        createdWallIds[Number(row.wall_index)] = row.id;
+      }
+    } else if (Array.isArray(b.exterior_polygon) && b.exterior_polygon.length >= 3) {
       const corners = b.exterior_polygon.map((c) => ({ x: Number(c.x), y: Number(c.y) }));
       await client.query(
         `UPDATE floor_plans SET corners = $1::jsonb, updated_at = NOW() WHERE id = $2`,
@@ -1860,7 +1908,16 @@ router.post('/:id/apply-floor-plan-extraction', async (req, res) => {
 
     // 2. Interior walls.
     const createdInteriorIds = [];
-    if (Array.isArray(b.interior_walls)) {
+    if (b.attach_to_existing_walls) {
+      // Load existing interior wall IDs so openings can attach by index.
+      const rows = await client.query(
+        `SELECT id FROM floor_plan_interior_walls WHERE floor_plan_id = $1 ORDER BY id`,
+        [fpid]
+      );
+      for (const row of rows.rows) {
+        createdInteriorIds.push(row.id);
+      }
+    } else if (Array.isArray(b.interior_walls)) {
       for (const w of b.interior_walls) {
         const wallType = w.wall_type || 'interior_2x4';
         const r = await client.query(

@@ -208,6 +208,11 @@ export const api = {
       method: 'POST', body: JSON.stringify({}),
       signal: opts.signal,
     }),
+  extractOpeningsOnly: (projectId, opts = {}) =>
+    request(`/projects/${projectId}/extract-openings-only`, {
+      method: 'POST', body: JSON.stringify({}),
+      signal: opts.signal,
+    }),
   applyFloorPlanExtraction: (projectId, data) =>
     request(`/projects/${projectId}/apply-floor-plan-extraction`, {
       method: 'POST', body: JSON.stringify(data),
