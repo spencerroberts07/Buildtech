@@ -323,6 +323,28 @@ CREATE TABLE IF NOT EXISTS quote_line_items (
 
 CREATE INDEX IF NOT EXISTS idx_quotes_project ON quotes(project_id);
 CREATE INDEX IF NOT EXISTS idx_quote_line_items_quote ON quote_line_items(quote_id);
+
+CREATE TABLE IF NOT EXISTS training_examples (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+  project_name TEXT,
+  floor_level TEXT NOT NULL DEFAULT 'floor1',
+  pdf_filename TEXT,
+  pdf_source TEXT DEFAULT 'architectural',
+  building_info JSONB,
+  exterior_polygon JSONB,
+  interior_walls JSONB,
+  openings JSONB,
+  wall_settings JSONB,
+  quality_rating INTEGER DEFAULT NULL CHECK (quality_rating BETWEEN 1 AND 5),
+  notes TEXT,
+  created_by TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_examples_floor ON training_examples(floor_level);
+CREATE INDEX IF NOT EXISTS idx_training_examples_quality ON training_examples(quality_rating);
 `;
 
 const PROJECT_COLUMN_ALTERS = [

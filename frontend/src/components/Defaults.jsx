@@ -211,6 +211,9 @@ export default function Defaults() {
         <Row label="Housewrap">{pctField('waste_housewrap')}</Row>
         <Row label="Insulation">{pctField('waste_insulation')}</Row>
       </div>
+
+      <div className="form-section-band">Training data (GPT-4o fine-tuning)</div>
+      <TrainingDataPanel />
     </div>
   );
 }
@@ -220,6 +223,224 @@ function Row({ label, children }) {
     <div className="row" style={{ alignItems: 'center', marginBottom: '0.5rem' }}>
       <div style={{ flex: 1, fontSize: '0.9rem' }}>{label}</div>
       <div style={{ flex: '0 0 auto' }}>{children}</div>
+    </div>
+  );
+}
+
+// ============================================================
+// Training-data panel — admin-only collector + JSONL exporter for
+// fine-tuning GPT-4o on the user's own corrected floor plans.
+// ============================================================
+function TrainingDataPanel() {
+  const [examples, setExamples] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [aiStatus, setAiStatus] = useState(null);
+  const [err, setErr] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [editingRating, setEditingRating] = useState(null); // {id, current}
+
+  async function load() {
+    try {
+      const [ex, st, ai] = await Promise.all([
+        api.listTrainingExamples(),
+        api.trainingExampleStats(),
+        api.aiStatus().catch(() => null),
+      ]);
+      setExamples(ex);
+      setStats(st);
+      setAiStatus(ai);
+    } catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { load(); }, []);
+
+  async function deleteOne(id) {
+    if (!confirm('Delete this training example? This cannot be undone.')) return;
+    try { await api.deleteTrainingExample(id); await load(); }
+    catch (e) { setErr(e.message); }
+  }
+  async function rate(id, value) {
+    try {
+      await api.rateTrainingExample(id, { quality_rating: value });
+      setEditingRating(null);
+      await load();
+    } catch (e) { setErr(e.message); }
+  }
+  async function doExport() {
+    if (!stats || stats.ready_for_export === 0) return;
+    setExporting(true);
+    setErr('');
+    try {
+      const { blob, filename } = await api.exportTrainingJsonl();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr(e.message);
+    } finally { setExporting(false); }
+  }
+
+  if (err) return <div className="card" style={{ color: '#991B1B' }}>{err}</div>;
+  if (!stats || !examples) return <p className="muted">Loading…</p>;
+
+  return (
+    <>
+      <div className="card">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 12 }}>
+          <Stat label="Total examples" value={stats.total_examples} />
+          <Stat label="Ready to export" value={stats.ready_for_export} />
+          <Stat label="Est. training cost" value={`$${stats.estimated_training_cost_usd.toFixed(2)}`} />
+          <Stat label="Unique projects" value={stats.unique_projects} />
+        </div>
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 12, color: '#6B7280' }}>
+          <span>5★: <strong>{stats.by_quality[5]}</strong></span>
+          <span>4★: <strong>{stats.by_quality[4]}</strong></span>
+          <span>3★: <strong>{stats.by_quality[3]}</strong></span>
+          <span>2★: <strong>{stats.by_quality[2]}</strong></span>
+          <span>1★: <strong>{stats.by_quality[1]}</strong></span>
+          <span>Unrated: <strong>{stats.by_quality.unrated}</strong></span>
+          <span style={{ marginLeft: 'auto' }}>
+            Active extractor: <strong>{aiStatus?.active_extractor || 'unknown'}</strong>
+            {aiStatus?.fine_tuned_model && <> — <code style={{ fontSize: 11 }}>{aiStatus.fine_tuned_model}</code></>}
+          </span>
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <button
+            className="primary"
+            disabled={exporting || stats.ready_for_export === 0}
+            onClick={doExport}
+          >
+            {exporting
+              ? 'Generating JSONL (rendering PDFs)…'
+              : `Export for Fine-tuning (${stats.ready_for_export} example${stats.ready_for_export === 1 ? '' : 's'})`}
+          </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16, padding: 0 }}>
+        {examples.length === 0 ? (
+          <p className="muted" style={{ padding: 16, margin: 0 }}>
+            No training examples saved yet. Use the "💾 Save Example" button on a floor plan after drawing it to add one.
+          </p>
+        ) : (
+          <table style={{ width: '100%', fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left' }}>Project</th>
+                <th style={{ textAlign: 'left' }}>Floor</th>
+                <th style={{ textAlign: 'left' }}>Date</th>
+                <th style={{ textAlign: 'right' }}>Walls</th>
+                <th style={{ textAlign: 'right' }}>Openings</th>
+                <th style={{ textAlign: 'left' }}>Quality</th>
+                <th style={{ textAlign: 'left' }}>Notes</th>
+                <th style={{ textAlign: 'right', width: 80 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {examples.map((ex) => (
+                <tr key={ex.id}>
+                  <td>{ex.project_name || <span className="muted">—</span>}</td>
+                  <td>{ex.floor_level}</td>
+                  <td className="muted">{new Date(ex.created_at).toLocaleDateString()}</td>
+                  <td style={{ textAlign: 'right' }}>{ex.wall_count}</td>
+                  <td style={{ textAlign: 'right' }}>{ex.opening_count}</td>
+                  <td>
+                    <RatingStars
+                      value={ex.quality_rating}
+                      editing={editingRating?.id === ex.id}
+                      onOpen={() => setEditingRating({ id: ex.id, current: ex.quality_rating })}
+                      onClose={() => setEditingRating(null)}
+                      onChange={(v) => rate(ex.id, v)}
+                    />
+                  </td>
+                  <td className="muted" style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={ex.notes || ''}>
+                    {ex.notes || ''}
+                  </td>
+                  <td style={{ textAlign: 'right' }}>
+                    <button
+                      onClick={() => deleteOne(ex.id)}
+                      title="Delete"
+                      style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: 14, color: '#6B7280', padding: '2px 6px' }}
+                    >🗑</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="card" style={{ marginTop: 16, background: '#F9FAFB', fontSize: 13 }}>
+        <strong>How to fine-tune GPT-4o with this data:</strong>
+        <ol style={{ marginTop: 8, marginBottom: 0, paddingLeft: 20, lineHeight: 1.7 }}>
+          <li>Click <strong>Export for Fine-tuning</strong> above to download the .jsonl file.</li>
+          <li>Go to <a href="https://platform.openai.com/finetune" target="_blank" rel="noreferrer">platform.openai.com → Fine-tuning</a> → Create new.</li>
+          <li>Select model: <code>gpt-4o-2024-08-06</code>.</li>
+          <li>Upload the .jsonl file.</li>
+          <li>Set epochs: <strong>3</strong>, learning rate: <strong>auto</strong>.</li>
+          <li>Click <strong>Create</strong> — training takes 1–4 hours.</li>
+          <li>Copy the resulting model ID (<code>ft:gpt-4o-...</code>).</li>
+          <li>Add to Render env: <code>OPENAI_FINE_TUNED_MODEL=ft:gpt-4o-…</code> and <code>OPENAI_API_KEY=sk-…</code>.</li>
+          <li>BuildTek will automatically use your fine-tuned model on the next extraction.</li>
+        </ol>
+      </div>
+    </>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div>
+      <div className="muted" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, marginTop: 4 }}>{value}</div>
+    </div>
+  );
+}
+
+function RatingStars({ value, editing, onOpen, onClose, onChange }) {
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, font: 'inherit' }}
+      >
+        {value
+          ? <span style={{ color: '#FFB800', fontSize: 16 }}>{'★'.repeat(value)}<span style={{ color: '#D1D5DB' }}>{'★'.repeat(5 - value)}</span></span>
+          : <span className="muted">Unrated</span>}
+      </button>
+    );
+  }
+  return (
+    <div style={{ display: 'inline-flex', gap: 2, alignItems: 'center' }}>
+      {[1,2,3,4,5].map((n) => (
+        <button
+          key={n}
+          type="button"
+          onClick={() => onChange(n)}
+          style={{
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            padding: '0 2px', fontSize: 18,
+            color: value && n <= value ? '#FFB800' : '#D1D5DB',
+          }}
+          title={`${n} stars`}
+        >★</button>
+      ))}
+      <button
+        type="button"
+        onClick={() => onChange(null)}
+        style={{ background: 'transparent', border: 'none', cursor: 'pointer', marginLeft: 4, fontSize: 11, color: '#6B7280' }}
+        title="Clear rating"
+      >clear</button>
+      <button
+        type="button"
+        onClick={onClose}
+        style={{ background: 'transparent', border: 'none', cursor: 'pointer', marginLeft: 4, fontSize: 11, color: '#6B7280' }}
+      >×</button>
     </div>
   );
 }

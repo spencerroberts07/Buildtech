@@ -218,6 +218,34 @@ export const api = {
       method: 'POST', body: JSON.stringify(data),
     }),
 
+  // ---- Training-data collection (admin) ----
+  saveTrainingExample: (projectId, data) =>
+    request(`/projects/${projectId}/save-training-example`, {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  listTrainingExamples: () => request('/admin/training-examples'),
+  deleteTrainingExample: (id) => request(`/admin/training-examples/${id}`, { method: 'DELETE' }),
+  rateTrainingExample: (id, data) =>
+    request(`/admin/training-examples/${id}/rating`, { method: 'PUT', body: JSON.stringify(data) }),
+  trainingExampleStats: () => request('/admin/training-examples/stats'),
+  aiStatus: () => request('/admin/ai-status'),
+  // Exports a JSONL file as a blob — caller turns it into a download.
+  exportTrainingJsonl: async () => {
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/admin/training-examples/export`, { headers });
+    if (!res.ok) {
+      let msg = 'Export failed';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const fileMatch = cd.match(/filename="([^"]+)"/);
+    return { blob, filename: fileMatch ? fileMatch[1] : 'training-export.jsonl' };
+  },
+
   listPackages: (projectId) => request(`/projects/${projectId}/packages`),
   createPackage: (projectId, data) =>
     request(`/projects/${projectId}/packages`, { method: 'POST', body: JSON.stringify(data) }),

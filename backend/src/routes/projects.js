@@ -2002,6 +2002,167 @@ router.post('/:id/apply-floor-plan-extraction', async (req, res) => {
   }
 });
 
+// ---------------- Training-data collection ----------------
+// Snapshot the current floor's polygon + interior walls + openings as a
+// training example for future GPT-4o fine-tuning. Stores everything as
+// JSON on training_examples; admin endpoints render and export later.
+router.post('/:id/save-training-example', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const floorLevel = b.floor_level || 'floor1';
+  if (!['foundation', 'floor1', 'floor2', 'roof'].includes(floorLevel)) {
+    return res.status(400).json({ error: 'invalid floor_level' });
+  }
+  const ratingRaw = b.quality_rating;
+  let rating = null;
+  if (ratingRaw != null && ratingRaw !== '') {
+    const n = Number(ratingRaw);
+    if (!Number.isInteger(n) || n < 1 || n > 5) {
+      return res.status(400).json({ error: 'quality_rating must be 1-5' });
+    }
+    rating = n;
+  }
+  const proj = (await query(
+    `SELECT id, name, pdf_filename, truss_pdf_filename, num_storeys, default_wall_height,
+            exterior_sheathing, scale_ft_per_grid
+     FROM projects WHERE id = $1`,
+    [id]
+  )).rows[0];
+  if (!proj) return res.status(404).json({ error: 'project not found' });
+
+  // Floor plan + walls + interior walls + openings for the level.
+  const fp = (await query(
+    `SELECT * FROM floor_plans WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1`,
+    [id, floorLevel]
+  )).rows[0];
+  const corners = Array.isArray(fp?.corners) ? fp.corners : [];
+  if (corners.length < 3) {
+    return res.status(400).json({ error: 'floor has no closed polygon — draw exterior walls first' });
+  }
+  const fpWalls = fp ? (await query(
+    `SELECT id, wall_index, wall_type, height FROM floor_plan_walls WHERE floor_plan_id = $1 ORDER BY wall_index`,
+    [fp.id]
+  )).rows : [];
+  const interiorRows = fp ? (await query(
+    `SELECT id, x1, y1, x2, y2, wall_type, height FROM floor_plan_interior_walls WHERE floor_plan_id = $1 ORDER BY id`,
+    [fp.id]
+  )).rows : [];
+  const extOpenings = fp ? (await query(
+    `SELECT o.* FROM openings o
+     JOIN floor_plan_walls fpw ON fpw.id = o.floor_plan_wall_id
+     WHERE fpw.floor_plan_id = $1`,
+    [fp.id]
+  )).rows : [];
+  const intOpenings = fp ? (await query(
+    `SELECT o.* FROM openings o
+     JOIN floor_plan_interior_walls iw ON iw.id = o.floor_plan_interior_wall_id
+     WHERE iw.floor_plan_id = $1`,
+    [fp.id]
+  )).rows : [];
+
+  // Translate grid coords back to feet using the project's scale.
+  const sft = Number(proj.scale_ft_per_grid) || 1;
+  const polygonFt = corners.map((c) => ({
+    x_ft: Number(c.x) * sft,
+    y_ft: Number(c.y) * sft,
+  }));
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of polygonFt) {
+    if (p.x_ft < minX) minX = p.x_ft; if (p.x_ft > maxX) maxX = p.x_ft;
+    if (p.y_ft < minY) minY = p.y_ft; if (p.y_ft > maxY) maxY = p.y_ft;
+  }
+  const totalWidthFt = maxX - minX;
+  const totalDepthFt = maxY - minY;
+  // Shoelace area in ft².
+  let acc = 0;
+  for (let i = 0; i < polygonFt.length; i++) {
+    const a = polygonFt[i], q = polygonFt[(i + 1) % polygonFt.length];
+    acc += a.x_ft * q.y_ft - q.x_ft * a.y_ft;
+  }
+  const floorAreaSqft = Math.abs(acc) / 2;
+
+  // Sample wall_type from the floor's exterior walls. Defaults consistent
+  // with the rest of the app (exterior 2x6 in Ontario).
+  const sampledWallType = fpWalls[0]?.wall_type || 'exterior_2x6';
+  const sampledHeight = fpWalls.find((w) => w.height != null)?.height
+    || proj.default_wall_height
+    || 9;
+
+  const interiorWallsFt = interiorRows.map((w) => ({
+    start_x_ft: Number(w.x1) * sft,
+    start_y_ft: Number(w.y1) * sft,
+    end_x_ft: Number(w.x2) * sft,
+    end_y_ft: Number(w.y2) * sft,
+    wall_type: w.wall_type,
+    is_load_bearing: w.wall_type === 'interior_2x6',
+  }));
+
+  const openingsOut = [
+    ...extOpenings.map((o) => ({
+      type: o.type,
+      wall_kind: 'exterior',
+      width_inches: Number(o.rough_opening_width),
+      height_inches: Number(o.rough_opening_height),
+      ro_width_inches: Number(o.rough_opening_width),
+      ro_height_inches: Number(o.rough_opening_height),
+      position_fraction: Number(o.position_along_wall),
+      label: o.label,
+      swing: o.swing,
+    })),
+    ...intOpenings.map((o) => ({
+      type: o.type,
+      wall_kind: 'interior',
+      width_inches: Number(o.rough_opening_width),
+      height_inches: Number(o.rough_opening_height),
+      ro_width_inches: Number(o.rough_opening_width),
+      ro_height_inches: Number(o.rough_opening_height),
+      position_fraction: Number(o.position_along_wall),
+      label: o.label,
+      swing: o.swing,
+    })),
+  ];
+
+  const buildingInfo = {
+    wall_type: sampledWallType.startsWith('exterior_') ? sampledWallType.replace('exterior_', '') : sampledWallType,
+    wall_height_ft: Number(sampledHeight),
+    num_storeys: Number(proj.num_storeys) || 1,
+    total_width_ft: Math.round(totalWidthFt * 100) / 100,
+    total_depth_ft: Math.round(totalDepthFt * 100) / 100,
+    floor_area_sqft: Math.round(floorAreaSqft * 100) / 100,
+  };
+  const wallSettings = {
+    exterior_sheathing: proj.exterior_sheathing,
+    scale_ft_per_grid: Number(proj.scale_ft_per_grid) || 1,
+  };
+
+  const createdBy = req.user?.username || null;
+  const ins = await query(
+    `INSERT INTO training_examples
+       (project_id, project_name, floor_level, pdf_filename, pdf_source,
+        building_info, exterior_polygon, interior_walls, openings, wall_settings,
+        quality_rating, notes, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13)
+     RETURNING id`,
+    [
+      Number(id), proj.name, floorLevel, proj.pdf_filename || null, 'architectural',
+      JSON.stringify(buildingInfo),
+      JSON.stringify(polygonFt),
+      JSON.stringify(interiorWallsFt),
+      JSON.stringify(openingsOut),
+      JSON.stringify(wallSettings),
+      rating,
+      b.notes ? String(b.notes) : null,
+      createdBy,
+    ]
+  );
+  const total = (await query('SELECT COUNT(*) AS n FROM training_examples')).rows[0];
+  res.status(201).json({
+    ok: true,
+    example_id: ins.rows[0].id,
+    total_count: Number(total.n) || 0,
+  });
+});
+
 router.delete('/:id/extracted-roof-data', async (req, res) => {
   const { id } = req.params;
   const { rows } = await query(

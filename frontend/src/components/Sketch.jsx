@@ -403,6 +403,17 @@ function PolygonSketch({
   const scaleFtPerGrid = num(projectSettings?.scale_ft_per_grid) || 1;
   const wallByIndex = new Map(walls.map((w) => [Number(w.wall_index), w]));
 
+  // ---- Training-data save state ----
+  const isAdmin = (() => {
+    try {
+      const u = JSON.parse(localStorage.getItem('user') || 'null');
+      // Permissive: missing role on the saved user object is treated as
+      // admin (matches the single-tenant default).
+      return !u || u.role == null || u.role === 'admin';
+    } catch { return true; }
+  })();
+  const [saveTrainOpen, setSaveTrainOpen] = useState(false);
+
   // ---- AI floor plan extraction state ----
   const [aiExtracting, setAiExtracting] = useState(false);
   const [aiStage, setAiStage] = useState('');
@@ -1776,6 +1787,15 @@ function PolygonSketch({
                   : 'AI reads the door & window schedules and places them on your existing walls'
           }
         >✨ Place Openings</button>
+        {isAdmin && polygonClosedForAi && (
+          <button
+            type="button"
+            className="secondary"
+            style={{ flex: '0 0 auto', fontSize: '0.78rem', padding: '0.3rem 0.55rem', color: '#6B7280' }}
+            onClick={() => setSaveTrainOpen(true)}
+            title="Save the current floor as a training example for future GPT-4o fine-tuning (admin only)"
+          >💾 Save Example</button>
+        )}
       </div>
       {aiError && !aiExtracting && (
         <div style={{
@@ -1945,6 +1965,98 @@ function PolygonSketch({
           onError={(e) => setAiError(e.message)}
         />
       )}
+      {saveTrainOpen && (
+        <SaveTrainingExampleModal
+          projectId={projectId}
+          floorLevel={level}
+          onClose={() => setSaveTrainOpen(false)}
+          onSaved={(msg) => {
+            setSaveTrainOpen(false);
+            setToast(msg);
+            clearTimeout(toastTimer.current);
+            toastTimer.current = setTimeout(() => setToast(null), 5000);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function SaveTrainingExampleModal({ projectId, floorLevel, onClose, onSaved }) {
+  const [rating, setRating] = useState(null); // 1..5 or null
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  async function save() {
+    setBusy(true); setErr('');
+    try {
+      const out = await api.saveTrainingExample(projectId, {
+        floor_level: floorLevel,
+        quality_rating: rating,
+        notes: notes.trim() || null,
+      });
+      const ratingTxt = rating ? `${rating}★ ` : '';
+      onSaved?.(`Training example ${ratingTxt}saved ✓ (${out.total_count} total)`);
+    } catch (e) {
+      setErr(e.message);
+    } finally { setBusy(false); }
+  }
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1200,
+    }}>
+      <div className="card" style={{ maxWidth: 460, width: '92%', padding: '1.25rem' }}>
+        <strong style={{ fontSize: '1.05rem' }}>Save training example</strong>
+        <p className="muted" style={{ marginTop: 4, marginBottom: 14, fontSize: 13 }}>
+          Snapshots this floor's polygon, walls, and openings for future
+          GPT-4o fine-tuning. Saved alongside the project PDF.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <label className="muted" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4 }}>Floor</label>
+            <div style={{ fontSize: 14, marginTop: 4 }}>{floorLevel}</div>
+          </div>
+          <div>
+            <label className="muted" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4 }}>Quality rating (optional)</label>
+            <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
+              {[1,2,3,4,5].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() => setRating(rating === n ? null : n)}
+                  style={{
+                    background: 'transparent', border: 'none',
+                    cursor: 'pointer', fontSize: 22, padding: '2px 4px',
+                    color: rating && n <= rating ? '#FFB800' : '#D1D5DB',
+                  }}
+                  title={`${n} star${n === 1 ? '' : 's'}`}
+                >★</button>
+              ))}
+              <span className="muted" style={{ marginLeft: 8, fontSize: 12 }}>
+                {rating ? `${rating}/5 — leave blank if unsure` : 'leave blank to rate later'}
+              </span>
+            </div>
+          </div>
+          <div>
+            <label className="muted" style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.4 }}>Notes (optional)</label>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              rows={3}
+              placeholder="Any notes about this example…"
+              style={{ width: '100%', marginTop: 4, fontFamily: 'inherit', fontSize: 14, padding: 8, border: '1px solid #E5E7EB', borderRadius: 6, resize: 'vertical' }}
+            />
+          </div>
+          {err && <div style={{ color: '#991B1B', fontSize: 13, padding: '6px 8px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 4 }}>{err}</div>}
+        </div>
+        <div className="row" style={{ marginTop: 18, justifyContent: 'flex-end', gap: 8 }}>
+          <button className="secondary" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="primary" onClick={save} disabled={busy}>
+            {busy ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

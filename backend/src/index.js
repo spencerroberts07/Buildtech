@@ -3,7 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import bcrypt from 'bcryptjs';
 import { pool, query } from './db.js';
-import { signToken, authRequired } from './auth.js';
+import { signToken, authRequired, adminRequired } from './auth.js';
+import adminRouter from './routes/admin.js';
 import materialsRouter from './routes/materials.js';
 import assembliesRouter from './routes/assemblies.js';
 import projectsRouter from './routes/projects.js';
@@ -40,7 +41,7 @@ app.post('/auth/login', async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Invalid credentials' });
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
-  res.json({ token: signToken(user), user: { id: user.id, username: user.username } });
+  res.json({ token: signToken(user), user: { id: user.id, username: user.username, role: user.role || 'admin' } });
 });
 
 app.post('/auth/verify-password', authRequired, async (req, res) => {
@@ -76,6 +77,7 @@ app.use('/sku-search', authRequired, skuSearchRouter);
 app.use('/customers', authRequired, customersRouter);
 app.use('/system-settings', authRequired, systemSettingsRouter);
 app.use('/quotes', authRequired, quotesRouter);
+app.use('/admin', authRequired, adminRequired, adminRouter);
 
 app.use((err, req, res, next) => {
   console.error(err);
