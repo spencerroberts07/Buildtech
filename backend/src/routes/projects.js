@@ -58,6 +58,8 @@ const PROJECT_SETTING_FIELDS = [
   'pdf_scale',
   'pdf_page',
   'pdf_filename',
+  'pdf_offset_x',
+  'pdf_offset_y',
   'truss_pdf_filename',
   'extracted_pitch',
   'extracted_sheathing_sf',

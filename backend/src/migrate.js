@@ -428,6 +428,10 @@ const PROJECT_COLUMN_ALTERS = [
   // three corners. The material list builder already treats null as "no
   // floor area" and skips subfloor/adhesive/ceiling rows in that case.
   `ALTER TABLE floors ALTER COLUMN floor_area_sf DROP NOT NULL`,
+  // PDF underlay alignment offset (world/grid units). Set via the "Move PDF"
+  // tool — lets the user drag the PDF so it aligns with their drawn walls.
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_offset_x NUMERIC NOT NULL DEFAULT 0`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_offset_y NUMERIC NOT NULL DEFAULT 0`,
 ];
 
 const SKU_CATALOG_SEED = [

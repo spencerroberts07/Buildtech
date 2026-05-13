@@ -246,9 +246,19 @@ export default function Sketch({
     onProjectSettingsChange?.({ pdf_page: next });
   }
 
+  // PDF underlay alignment offset, persisted on the project (grid units).
+  // Setter is debounced via the existing onProjectSettingsChange path.
+  const pdfOffsetX = num(projectSettings?.pdf_offset_x) || 0;
+  const pdfOffsetY = num(projectSettings?.pdf_offset_y) || 0;
+  const setPdfOffset = (x, y) => onProjectSettingsChange?.({
+    pdf_offset_x: Number(x) || 0,
+    pdf_offset_y: Number(y) || 0,
+  });
+
   const pdfControls = {
     pdfFilename, pdfStatus, pdfNumPages, pdfPage, pdfOpacity, pdfPageCanvas,
     setPdfOpacity, uploadPdf, removePdf, changePage,
+    pdfOffsetX, pdfOffsetY, setPdfOffset,
   };
 
   if (activeLevel === 'roof') {
@@ -350,6 +360,7 @@ function PolygonSketch({
   const [error, setError] = useState('');
 
   const panState = useRef({ active: false, startX: 0, startY: 0, basePan: null });
+  const movePdfState = useRef({ active: false, startX: 0, startY: 0, baseX: 0, baseY: 0 });
   const spaceDown = useRef(false);
   const dragState = useRef({ active: false, type: null, idx: null, openingId: null, moved: false });
   const cornerSaveTimer = useRef(null);
@@ -628,6 +639,8 @@ function PolygonSketch({
       pdfPageCanvas: pdfControls?.pdfPageCanvas || null,
       pdfOpacity: pdfControls?.pdfOpacity ?? 0.4,
       pdfStatus: pdfControls?.pdfStatus || 'none',
+      pdfOffsetX: pdfControls?.pdfOffsetX ?? 0,
+      pdfOffsetY: pdfControls?.pdfOffsetY ?? 0,
       tool, toolPoints, measurements,
     });
   }, [canvasSize, viewport, corners, walls, openings, mode, selectedCornerIdx, selectedWallIdx,
@@ -856,6 +869,19 @@ function PolygonSketch({
       return;
     }
 
+    // Move-PDF tool: click-and-drag updates the persisted pdf_offset_x/y
+    // on the project. World-unit offset so alignment tracks zoom.
+    if (tool === 'move_pdf') {
+      e.preventDefault();
+      movePdfState.current = {
+        active: true,
+        startX: sx, startY: sy,
+        baseX: pdfControls?.pdfOffsetX ?? 0,
+        baseY: pdfControls?.pdfOffsetY ?? 0,
+      };
+      return;
+    }
+
     // SELECT mode: hit-test for drag/select. DRAW modes skip drag init and let mouseUp handle the click.
     if (sketchMode === 'select' && mode === 'editing') {
       // Check opening drag first
@@ -932,6 +958,20 @@ function PolygonSketch({
       const dx = sx - panState.current.startX;
       const dy = sy - panState.current.startY;
       setViewport((vp) => ({ ...vp, panX: panState.current.basePan.x + dx, panY: panState.current.basePan.y + dy }));
+      return;
+    }
+    if (movePdfState.current?.active) {
+      const dxPx = sx - movePdfState.current.startX;
+      const dyPx = sy - movePdfState.current.startY;
+      const k = BASE_GRID_PX * viewport.zoom;
+      if (k > 0) {
+        const x = movePdfState.current.baseX + dxPx / k;
+        const y = movePdfState.current.baseY + dyPx / k;
+        // Push to the parent's projectSettings — the parent already does
+        // optimistic local-update + debounced PUT, so each pointer move
+        // updates state immediately without spamming the network.
+        pdfControls?.setPdfOffset?.(x, y);
+      }
       return;
     }
     if (dragState.current.active && dragState.current.type === 'corner') {
@@ -1035,6 +1075,7 @@ function PolygonSketch({
 
   function onMouseUp(e) {
     if (panState.current.active) { panState.current.active = false; return; }
+    if (movePdfState.current?.active) { movePdfState.current.active = false; return; }
     // Calibrate / measure modes consumed the click on mousedown.
     if (tool === 'calibrate' || tool === 'measure') return;
     if (dragState.current.active) {
@@ -1625,6 +1666,8 @@ function PolygonSketch({
     ? 'grab'
     : sketchMode === 'pan'
       ? (panState.current.active ? 'grabbing' : 'grab')
+      : tool === 'move_pdf'
+        ? (movePdfState.current?.active ? 'grabbing' : 'move')
       : (tool === 'calibrate' || tool === 'measure'
           ? 'crosshair'
           : (sketchMode === 'draw_exterior' || sketchMode === 'draw_interior'
@@ -1676,6 +1719,10 @@ function PolygonSketch({
         ) : tool === 'measure' ? (
           <span className="muted">
             <strong>Measure:</strong> click two points to draw a measurement line. Repeat for more. <strong>Esc</strong> exits.
+          </span>
+        ) : tool === 'move_pdf' ? (
+          <span className="muted">
+            <strong>Move PDF:</strong> click and drag the PDF to align it with your sketch. Click <strong>Move PDF</strong> again to exit.
           </span>
         ) : sketchMode === 'draw_interior' ? (
           <span className="muted">
@@ -2378,7 +2425,9 @@ function PdfToolbar({ controls, tool, setTool }) {
   const fileRef = useRef(null);
   if (!controls) return null;
   const { pdfFilename, pdfStatus, pdfNumPages, pdfPage, pdfOpacity,
-    setPdfOpacity, uploadPdf, removePdf, changePage } = controls;
+    setPdfOpacity, uploadPdf, removePdf, changePage,
+    pdfOffsetX = 0, pdfOffsetY = 0, setPdfOffset } = controls;
+  const hasOffset = Math.abs(pdfOffsetX) > 1e-6 || Math.abs(pdfOffsetY) > 1e-6;
 
   function pickFile() { fileRef.current?.click(); }
   function onFile(e) {
@@ -2429,6 +2478,24 @@ function PdfToolbar({ controls, tool, setTool }) {
         style={{ flex: '0 0 auto' }}
         onClick={() => setTool(tool === 'measure' ? 'idle' : 'measure')}
       >Measure</button>
+      {pdfFilename && (
+        <>
+          <button
+            className={tool === 'move_pdf' ? 'primary' : 'secondary'}
+            style={{ flex: '0 0 auto' }}
+            onClick={() => setTool(tool === 'move_pdf' ? 'idle' : 'move_pdf')}
+            title="Click and drag the PDF to align it with your drawn walls"
+          >Move PDF{hasOffset ? ' ●' : ''}</button>
+          {hasOffset && (
+            <button
+              className="secondary"
+              style={{ flex: '0 0 auto', padding: '0.2rem 0.55rem', color: '#6B7280' }}
+              onClick={() => setPdfOffset?.(0, 0)}
+              title={`Reset PDF alignment (currently offset ${pdfOffsetX.toFixed(1)}, ${pdfOffsetY.toFixed(1)} grid units)`}
+            >Reset</button>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -2443,18 +2510,23 @@ function drawScene(ctx, size, vp, S) {
     pendingInteriorEndpoint = null,
     wallDragPreview = null,
     pdfPageCanvas = null, pdfOpacity = 0.4, pdfStatus = 'none',
+    pdfOffsetX = 0, pdfOffsetY = 0,
     tool = 'idle', toolPoints = [], measurements = [],
   } = S;
   ctx.fillStyle = GRID_BG;
   ctx.fillRect(0, 0, size.w, size.h);
 
   // PDF underlay sits beneath the grid so the grid + walls remain visible.
+  // Offset is applied in WORLD units so the alignment tracks zoom — drag
+  // the PDF 5 grid units at 1× zoom and it stays 5 grid units offset at 2×.
   if (pdfPageCanvas) {
     ctx.save();
     ctx.globalAlpha = pdfOpacity;
+    const offsetPx = BASE_GRID_PX * vp.zoom;
     ctx.drawImage(
       pdfPageCanvas,
-      vp.panX, vp.panY,
+      vp.panX + pdfOffsetX * offsetPx,
+      vp.panY + pdfOffsetY * offsetPx,
       pdfPageCanvas.width * vp.zoom,
       pdfPageCanvas.height * vp.zoom,
     );
