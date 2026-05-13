@@ -23,9 +23,15 @@ const SYSTEM_PROMPT =
   'You extract precise measurement data from architectural floor plans and schedules. ' +
   'Return ONLY valid JSON with no markdown, no code blocks, no explanation.';
 
-const USER_MESSAGE = `Analyze this architectural drawing set and extract the complete floor plan data. Look at ALL pages — the floor plan page (usually labeled 'FLOOR PLAN' or 'GROUND FLOOR PLAN'), the door schedule, the window schedule, and the building section.
+const USER_MESSAGE = `Analyze this architectural drawing set. BEFORE extracting any data, scan ALL pages of the document and identify which floor each plan page represents:
 
-Extract and return this exact JSON structure:
+- A page titled "FLOOR PLAN", "GROUND FLOOR PLAN", "MAIN FLOOR PLAN", or "FIRST FLOOR" → floor_level: "floor1"
+- A page titled "UPPER FLOOR PLAN", "SECOND FLOOR PLAN", "2ND FLOOR" → floor_level: "floor2"
+- A page titled "BASEMENT PLAN", "FOUNDATION PLAN" → floor_level: "basement"
+
+Extract detailed plan data for EVERY floor plan page you find — not just one. Return one entry in the floors[] array per detected floor.
+
+Return this EXACT JSON structure with no markdown, no code blocks, no prose:
 
 {
   "building": {
@@ -36,51 +42,67 @@ Extract and return this exact JSON structure:
     "floor_area_sqft": number or null,
     "wall_height_ft": number
   },
-  "exterior_polygon": [
-    { "x_ft": number, "y_ft": number }
+  "floors_detected": [
+    { "floor_level": "floor1" | "floor2" | "basement", "page_number": number, "label": string }
   ],
-  "interior_walls": [
+  "floors": [
     {
-      "start_x_ft": number,
-      "start_y_ft": number,
-      "end_x_ft": number,
-      "end_y_ft": number,
-      "wall_type": "interior_2x4" or "interior_2x6",
-      "is_load_bearing": boolean
-    }
-  ],
-  "exterior_doors": [
-    {
-      "label": string,
-      "width_inches": number,
-      "height_inches": number,
-      "ro_width_inches": number,
-      "ro_height_inches": number,
-      "type": "hinged" or "slider" or "french",
-      "quantity": number,
-      "wall_side": "front" or "back" or "left" or "right" or null
-    }
-  ],
-  "interior_doors": [
-    {
-      "label": string,
-      "width_inches": number,
-      "height_inches": number,
-      "ro_width_inches": number,
-      "ro_height_inches": number,
-      "quantity": number
-    }
-  ],
-  "windows": [
-    {
-      "label": string,
-      "width_inches": number,
-      "height_inches": number,
-      "ro_width_inches": number,
-      "ro_height_inches": number,
-      "type": string,
-      "quantity": number,
-      "wall_side": "front" or "back" or "left" or "right" or null
+      "floor_level": "floor1" | "floor2" | "basement",
+      "page_number": number,
+      "exterior_polygon": [
+        { "x_ft": number, "y_ft": number, "x_fraction": number, "y_fraction": number }
+      ],
+      "interior_walls": [
+        {
+          "start_x_ft": number,
+          "start_y_ft": number,
+          "end_x_ft": number,
+          "end_y_ft": number,
+          "start_x_fraction": number,
+          "start_y_fraction": number,
+          "end_x_fraction": number,
+          "end_y_fraction": number,
+          "wall_type": "interior_2x4" or "interior_2x6",
+          "is_load_bearing": boolean
+        }
+      ],
+      "exterior_doors": [
+        {
+          "label": string,
+          "width_inches": number,
+          "height_inches": number,
+          "ro_width_inches": number,
+          "ro_height_inches": number,
+          "type": "hinged" or "slider" or "french",
+          "quantity": number,
+          "wall_side": "front" or "back" or "left" or "right" or null,
+          "position_fraction": number or null
+        }
+      ],
+      "interior_doors": [
+        {
+          "label": string,
+          "width_inches": number,
+          "height_inches": number,
+          "ro_width_inches": number,
+          "ro_height_inches": number,
+          "quantity": number,
+          "interior_wall_hint": string or null
+        }
+      ],
+      "windows": [
+        {
+          "label": string,
+          "width_inches": number,
+          "height_inches": number,
+          "ro_width_inches": number,
+          "ro_height_inches": number,
+          "type": string,
+          "quantity": number,
+          "wall_side": "front" or "back" or "left" or "right" or null,
+          "position_fraction": number or null
+        }
+      ]
     }
   ],
   "roof": {
@@ -92,15 +114,92 @@ Extract and return this exact JSON structure:
   "warnings": [string]
 }
 
-For exterior_polygon: trace the exterior wall corners starting from the top-left corner going clockwise. Use the overall dimensions from the floor plan. For a simple rectangle, 4 points. For an L-shape, 6 points. Coordinates in feet from top-left origin (0,0).
+============================================================
+EXTERIOR POLYGON — CRITICAL RULES
+============================================================
+The exterior polygon must trace ONLY the conditioned living space (the actual heated building walls).
 
-For interior_walls: trace the major interior walls from the floor plan. Use the room dimensions and labels to determine wall positions. Approximate positions are fine — the user will review and adjust.
+DO NOT include any of the following in the polygon, even if they're shown attached to the building:
+- Decks (usually drawn with dashed lines, diagonal hatching, or "5/4" or composite decking notation)
+- Porches and covered entries (often labeled "PORCH", "COVERED PORCH", "COVERED ENTRY")
+- Garages (unless they share a heated wall — and even then trace only the heated envelope)
+- Patios, walkways, stairs, any outdoor structure
 
-For doors and windows: read the door schedule and window schedule tables directly — these have exact sizes. Also note which walls they are on from the floor plan layout. wall_side conventions: "front" = the edge of the polygon at the largest y coordinate (bottom of drawing); "back" = smallest y (top); "left" = smallest x; "right" = largest x.
+Look for the THICK exterior wall lines that form the heated envelope. These are typically drawn as solid double lines. The polygon must close around just the heated space.
 
-If multiple documents are provided (e.g. architectural + truss), cross-reference them but trust the architectural set for door/window/wall data.
+If you detect a deck, porch, or other excluded structure, add a string to "warnings" describing it, e.g. "Excluded 12'×16' rear deck from polygon" or "Excluded covered front porch".
 
-If any value cannot be determined, use null. Do not guess measurements — use null instead.`;
+Trace the corners starting from the top-left going clockwise. For each corner, return both the absolute foot coordinate (x_ft, y_ft, from top-left origin) AND its position as a fraction of the building bounding box (x_fraction = x_ft / total_width_ft, y_fraction = y_ft / total_depth_ft).
+
+============================================================
+INTERIOR WALLS — WALL TYPE RULES
+============================================================
+Default interior wall_type to "interior_2x4". The vast majority of residential interior partition walls are 2x4.
+
+Mark is_load_bearing=true and wall_type="interior_2x6" ONLY when the wall is explicitly labeled on the drawing as:
+- "2x6 LOAD BEARING"
+- "2x6 @ 16 O.C. LOAD BEARING"
+- Any explicit structural notation indicating a load-bearing 2x6 wall
+
+When in doubt, choose interior_2x4. Do not infer load bearing from wall position alone.
+
+For each interior wall return BOTH the absolute coordinates (start_x_ft, start_y_ft, end_x_ft, end_y_ft, from top-left origin in feet) AND the fraction-based positions:
+- start_x_fraction = start_x_ft / total_width_ft
+- start_y_fraction = start_y_ft / total_depth_ft
+- end_x_fraction = end_x_ft / total_width_ft
+- end_y_fraction = end_y_ft / total_depth_ft
+
+Use the dimension annotations printed on the drawing to calculate these fractions accurately.
+
+============================================================
+DOORS — INTERIOR vs EXTERIOR CATEGORIZATION
+============================================================
+Read the door schedule and categorize EACH row:
+
+EXTERIOR doors → exterior_doors[]:
+- The label or description contains "EXT.", "EXTERIOR", "SLIDER", "PATIO", or "GLASS PANEL"
+- OR the door is shown on the perimeter walls of the building in the plan view
+
+INTERIOR doors → interior_doors[]:
+- The label or description is just "HINGED", "3 PANEL", "DOUBLE HINGED", "BIFOLD", "POCKET" without an EXT/EXTERIOR prefix
+- OR the door is shown on an interior partition wall in the plan view
+
+Examples from a real plan set:
+- D01 "HINGED-3 PANEL" (no EXT label) → interior_doors
+- D04 "DOUBLE HINGED-3 PANEL" (no EXT label) → interior_doors
+- D02 "EXT. HINGED" → exterior_doors
+- D03 "EXT. SLIDER" → exterior_doors
+
+For interior doors, also include interior_wall_hint — the room/area where the door is located based on the floor plan layout (e.g. "Office", "Bedroom 2", "Bath", "Master Closet"). This helps the placement engine match each door to its likely interior wall.
+
+============================================================
+WINDOWS AND DOOR PLACEMENT
+============================================================
+Read the schedules directly for exact RO sizes.
+
+For each exterior door and window, set wall_side based on which exterior wall the opening is on:
+- "front"  = the edge at the LARGEST y coordinate (bottom of the plan drawing)
+- "back"   = the edge at the SMALLEST y coordinate (top of the plan drawing)
+- "left"   = the edge at the SMALLEST x coordinate
+- "right"  = the edge at the LARGEST x coordinate
+
+Also estimate position_fraction (0 to 1) representing where along that wall_side edge the opening sits, measured from the start of the edge. Use null only if the wall_side can't be determined.
+
+============================================================
+ROOF + CONFIDENCE
+============================================================
+For roof.pitch: read from the building section drawing (e.g. "5.5:12", "6:12").
+For roof.truss_spacing_inches: read from any roof framing note (typically 24 or 16).
+
+Set confidence to "high" only when wall lines are clear, schedules are readable, and dimensions are explicitly labeled. Use "medium" when minor details are inferred. Use "low" when significant guessing was required.
+
+============================================================
+RULES
+============================================================
+- If multiple PDFs are provided (e.g. architectural + truss), cross-reference but TRUST the architectural set for walls/doors/windows.
+- If any value cannot be determined, use null. DO NOT GUESS measurements — null is correct.
+- If only one floor plan page is present, return a single entry in floors[].
+- Always populate the absolute foot fields AND the fraction fields together — don't return one without the other.`;
 
 async function fetchR2Object(key) {
   const out = await r2.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));

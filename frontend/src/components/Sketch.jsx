@@ -490,12 +490,22 @@ function PolygonSketch({
     await refreshFloorPlan();
     onMaterialsChanged?.();
     onOpeningsChanged?.();
-    setToast(
+    // Auto-dim the PDF underlay so the user can verify the drawn walls
+    // line up with the PDF beneath. Only when a PDF is actually loaded.
+    if (pdfControls?.pdfFilename && pdfControls?.pdfStatus === 'ready') {
+      pdfControls.setPdfOpacity?.(0.3);
+    }
+    // Prefer the rich summary the modal built ("Floor 1 drawn from PDF:
+    // 4 exterior walls (47'×35'), 6 interior walls (5×2x4, 1×2x6), …").
+    // Fall back to plain counts if it isn't present.
+    const msg = result?.summary || (
       `Floor plan drawn from PDF — ${result?.exterior_walls_created || 0} exterior, ` +
-      `${result?.interior_walls_created || 0} interior, ${result?.openings_created || 0} opening${(result?.openings_created || 0) === 1 ? '' : 's'}`
+      `${result?.interior_walls_created || 0} interior, ` +
+      `${result?.openings_created || 0} opening${(result?.openings_created || 0) === 1 ? '' : 's'}`
     );
+    setToast(msg);
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 6000);
+    toastTimer.current = setTimeout(() => setToast(null), 8000);
   }
 
   async function copyFromFloor1() {

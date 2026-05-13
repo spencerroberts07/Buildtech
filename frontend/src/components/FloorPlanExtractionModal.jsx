@@ -34,6 +34,28 @@ export default function FloorPlanExtractionModal({
     (existingInteriorWallCount || 0) > 0 ||
     (existingOpeningsCount || 0) > 0;
 
+  // ---- multi-floor handling ----
+  // Newer extractions return `floors: [{ floor_level, ...per-floor data }]`.
+  // Older single-floor responses return plan data directly on the root.
+  // `activeFloor` derefs to whichever shape we're working with.
+  const multiFloor = Array.isArray(data.floors) && data.floors.length > 0;
+  const detectedFloors = data.floors_detected || (multiFloor
+    ? data.floors.map((f, i) => ({
+        floor_level: f.floor_level || 'floor1',
+        page_number: f.page_number || (i + 1),
+        label: f.label || `Floor ${i + 1}`,
+      }))
+    : []);
+  // Default selection: the entry whose floor_level matches the canvas's
+  // currentFloorLevel, falling back to index 0.
+  const initialFloorIdx = (() => {
+    if (!multiFloor) return 0;
+    const match = data.floors.findIndex((f) => f.floor_level === currentFloorLevel);
+    return match >= 0 ? match : 0;
+  })();
+  const [selectedFloorIdx, setSelectedFloorIdx] = useState(initialFloorIdx);
+  const activeFloor = multiFloor ? data.floors[selectedFloorIdx] : data;
+
   // ---- editable building info ----
   const initial = data.building || {};
   const [bldgWallType, setBldgWallType] = useState(initial.wall_type === '2x4' ? '2x4' : '2x6');
@@ -46,21 +68,20 @@ export default function FloorPlanExtractionModal({
   const [includeExterior, setIncludeExterior] = useState(true);
   const [includeRoof, setIncludeRoof] = useState(!!(data.roof?.pitch || data.roof?.truss_spacing_inches));
 
-  // Interior walls: track which indices are checked (Set<number>). All-on default.
-  const interiorWalls = data.interior_walls || [];
-  const [interiorChecks, setInteriorChecks] = useState(
-    () => new Set(interiorWalls.map((_, i) => i))
-  );
+  // Interior walls + opening lists pulled from the active floor.
+  const interiorWalls = activeFloor.interior_walls || [];
+  const extDoors = activeFloor.exterior_doors || [];
+  const intDoors = activeFloor.interior_doors || [];
+  const windows  = activeFloor.windows || [];
+
+  // Re-initialize the check sets whenever the selected floor changes so the
+  // UI starts with all rows checked again.
+  const [interiorChecks, setInteriorChecks] = useState(() => new Set(interiorWalls.map((_, i) => i)));
   const toggleInterior = (i) => setInteriorChecks((cur) => {
     const next = new Set(cur);
     if (next.has(i)) next.delete(i); else next.add(i);
     return next;
   });
-
-  // Schedule-table checks. Each row gets a stable key `${cat}:${idx}`.
-  const extDoors = data.exterior_doors || [];
-  const intDoors = data.interior_doors || [];
-  const windows  = data.windows || [];
   const [openChecks, setOpenChecks] = useState(() => {
     const s = new Set();
     extDoors.forEach((_, i) => s.add(`ext_door:${i}`));
@@ -74,6 +95,18 @@ export default function FloorPlanExtractionModal({
     return next;
   });
 
+  // When the floor selector changes, reset every checkbox so the user starts
+  // with everything-on for the newly-active floor.
+  React.useEffect(() => {
+    setInteriorChecks(new Set(interiorWalls.map((_, i) => i)));
+    const s = new Set();
+    extDoors.forEach((_, i) => s.add(`ext_door:${i}`));
+    intDoors.forEach((_, i) => s.add(`int_door:${i}`));
+    windows.forEach((_, i) => s.add(`win:${i}`));
+    setOpenChecks(s);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFloorIdx]);
+
   // ---- replace warning ----
   const [replaceConfirmed, setReplaceConfirmed] = useState(false);
 
@@ -81,14 +114,21 @@ export default function FloorPlanExtractionModal({
   const [err, setErr] = useState('');
 
   // ---- compute exterior polygon (grid units, snapped) ----
+  // Prefer fraction-based positions (more reliable when Claude's absolute
+  // feet drift) — multiplied against the user-editable building dimensions
+  // so adjusting Width/Depth in the form rescales the whole polygon.
   const polygonGrid = useMemo(() => {
-    if (!Array.isArray(data.exterior_polygon) || data.exterior_polygon.length < 3) return [];
-    return data.exterior_polygon.map((p) => ({
-      x: ftToGrid(p.x_ft),
-      y: ftToGrid(p.y_ft),
-    }));
+    const poly = activeFloor.exterior_polygon;
+    if (!Array.isArray(poly) || poly.length < 3) return [];
+    const w = Number(bldgWidth) > 0 ? Number(bldgWidth) : null;
+    const d = Number(bldgDepth) > 0 ? Number(bldgDepth) : null;
+    return poly.map((p) => {
+      const xFt = (p.x_fraction != null && w != null) ? Number(p.x_fraction) * w : Number(p.x_ft);
+      const yFt = (p.y_fraction != null && d != null) ? Number(p.y_fraction) * d : Number(p.y_ft);
+      return { x: ftToGrid(xFt), y: ftToGrid(yFt) };
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data.exterior_polygon, scaleFtPerGrid]);
+  }, [activeFloor.exterior_polygon, scaleFtPerGrid, bldgWidth, bldgDepth]);
 
   // ---- L-shape edge mapping: pick longest matching edge for each wall_side ----
   const edgeBySide = useMemo(() => {
@@ -139,7 +179,11 @@ export default function FloorPlanExtractionModal({
         unplaced.push({ category, idx, row, reason: edgeIdx < 0 ? 'wall_side unknown' : 'missing RO size' });
         return;
       }
-      // Even distribution: positions 1/(N+1), 2/(N+1), ..., N/(N+1).
+      // If Claude returned a position_fraction for a SINGLE-quantity row, use
+      // it directly. Otherwise distribute evenly: 1/(N+1)..N/(N+1).
+      const hintedPos = (qty === 1 && Number.isFinite(Number(row.position_fraction)))
+        ? Math.max(0, Math.min(1, Number(row.position_fraction)))
+        : null;
       for (let k = 1; k <= qty; k++) {
         placed.push({
           wall_kind: 'exterior',
@@ -147,7 +191,7 @@ export default function FloorPlanExtractionModal({
           type: category === 'win' ? 'window' : 'door',
           ro_width: ro_w,
           ro_height: ro_h,
-          position: k / (qty + 1),
+          position: hintedPos != null ? hintedPos : (k / (qty + 1)),
           label: qty > 1 ? `${baseLabel}-${k}` : baseLabel,
         });
       }
@@ -157,11 +201,17 @@ export default function FloorPlanExtractionModal({
       const qty = Math.max(1, Math.round(Number(row.quantity) || 1));
       const ro_w = Number(row.ro_width_inches);
       const ro_h = Number(row.ro_height_inches);
-      const baseLabel = row.label || `Int Door ${idx + 1}`;
-      // Map to interior walls round-robin at the midpoint. Each interior door
-      // gets attached to the NEXT available interior wall in the checked
-      // set. If there are more doors than interior walls, the extras wrap
-      // around — user can drag them after the apply.
+      // Interior doors carry a room hint from the AI (e.g. "Bedroom 2",
+      // "Bath"). Append it to the canvas label so the user can see which
+      // door is supposed to go where when they fine-tune positions after
+      // the apply.
+      const hint = row.interior_wall_hint ? String(row.interior_wall_hint).trim() : '';
+      const baseLabel = row.label
+        ? (hint ? `${row.label} — ${hint}` : row.label)
+        : (hint || `Int Door ${idx + 1}`);
+      // Round-robin assignment across the checked interior walls. We don't
+      // have room positions, so we can't truly "match hint to nearest wall"
+      // here — the hint flows through to the label for the user to verify.
       const checkedInteriorIndices = interiorWalls
         .map((_, i) => i)
         .filter((i) => interiorChecks.has(i));
@@ -209,15 +259,25 @@ export default function FloorPlanExtractionModal({
     try {
       const exteriorWallType =
         bldgWallType === '2x4' ? 'exterior_2x4' : 'exterior_2x6';
+      const wFt = Number(bldgWidth) > 0 ? Number(bldgWidth) : null;
+      const dFt = Number(bldgDepth) > 0 ? Number(bldgDepth) : null;
+      // Prefer fraction-based positions when present so the wall positions
+      // scale with whatever Width/Depth the user edited in the form.
+      const ftFor = (absFt, frac, total) =>
+        (frac != null && total != null) ? Number(frac) * total : Number(absFt);
       const interiorWallsBody = interiorWalls
         .map((w, i) => ({ w, i }))
         .filter(({ i }) => interiorChecks.has(i))
         .map(({ w }) => ({
-          x1: ftToGrid(w.start_x_ft),
-          y1: ftToGrid(w.start_y_ft),
-          x2: ftToGrid(w.end_x_ft),
-          y2: ftToGrid(w.end_y_ft),
-          wall_type: w.is_load_bearing ? 'interior_2x6' : (w.wall_type || 'interior_2x4'),
+          x1: ftToGrid(ftFor(w.start_x_ft, w.start_x_fraction, wFt)),
+          y1: ftToGrid(ftFor(w.start_y_ft, w.start_y_fraction, dFt)),
+          x2: ftToGrid(ftFor(w.end_x_ft,   w.end_x_fraction,   wFt)),
+          y2: ftToGrid(ftFor(w.end_y_ft,   w.end_y_fraction,   dFt)),
+          // Default to interior_2x4 unless the row is explicitly load-bearing
+          // OR Claude already returned interior_2x6 for it.
+          wall_type: w.is_load_bearing
+            ? 'interior_2x6'
+            : (w.wall_type === 'interior_2x6' ? 'interior_2x6' : 'interior_2x4'),
         }));
       // After the modal selects a subset of interior walls, the apply endpoint
       // inserts them in order — so we need to remap each opening's
@@ -251,7 +311,31 @@ export default function FloorPlanExtractionModal({
           : null,
       });
       if (out?.error) throw new Error(out.error);
-      onApplied?.(out);
+      // Build the rich toast summary: "Floor 1 drawn from PDF: 4 exterior
+      // walls (47'×35'), 6 interior walls (5×2x4, 1×2x6), 14 windows, 3
+      // exterior doors, 10 interior doors". Counts come from what we just
+      // submitted, NOT what the server returned, so the breakdown matches
+      // what the user saw on the modal.
+      const int2x4 = interiorWallsBody.filter((w) => w.wall_type === 'interior_2x4').length;
+      const int2x6 = interiorWallsBody.filter((w) => w.wall_type === 'interior_2x6').length;
+      const winCount = openingsBody.filter((o) => o.type === 'window').length;
+      const extDoorCount = openingsBody.filter((o) => o.type === 'door' && o.wall_kind === 'exterior').length;
+      const intDoorCount = openingsBody.filter((o) => o.type === 'door' && o.wall_kind === 'interior').length;
+      const dimensions = (wFt && dFt) ? ` (${wFt}'×${dFt}')` : '';
+      const intBits = [];
+      if (int2x4 > 0) intBits.push(`${int2x4}×2x4`);
+      if (int2x6 > 0) intBits.push(`${int2x6}×2x6`);
+      const intDetail = intBits.length > 0 ? ` (${intBits.join(', ')})` : '';
+      const levelLabel = currentFloorLevel === 'floor2' ? 'Floor 2'
+        : currentFloorLevel === 'basement' ? 'Basement'
+        : 'Floor 1';
+      const summary =
+        `${levelLabel} drawn from PDF: ${out?.exterior_walls_created || 0} exterior walls${dimensions}, ` +
+        `${interiorWallsBody.length} interior walls${intDetail}, ` +
+        `${winCount} window${winCount === 1 ? '' : 's'}, ` +
+        `${extDoorCount} exterior door${extDoorCount === 1 ? '' : 's'}, ` +
+        `${intDoorCount} interior door${intDoorCount === 1 ? '' : 's'}`;
+      onApplied?.({ ...out, summary });
     } catch (e) {
       setErr(e.message);
       onError?.(e);
@@ -307,6 +391,44 @@ export default function FloorPlanExtractionModal({
         )}
 
         <div className="fpx-body">
+          {/* Floor selector — visible only when the AI detected multiple
+              plan pages. The user picks WHICH plan-page to draw onto the
+              current canvas level. */}
+          {multiFloor && detectedFloors.length > 1 && (
+            <section className="fpx-section">
+              <h3 className="fpx-section-title">
+                {detectedFloors.length} floors detected — pick which to draw
+              </h3>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {detectedFloors.map((f, i) => {
+                  const active = i === selectedFloorIdx;
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => setSelectedFloorIdx(i)}
+                      style={{
+                        padding: '8px 14px', borderRadius: 6, cursor: 'pointer',
+                        font: 'inherit', fontSize: 13, fontWeight: 600,
+                        background: active ? '#CC0000' : '#FFFFFF',
+                        color: active ? '#FFFFFF' : '#1A1A1A',
+                        border: `1px solid ${active ? '#CC0000' : '#E5E7EB'}`,
+                      }}
+                    >
+                      {f.label || `Floor ${i + 1}`}
+                      <span style={{ marginLeft: 6, opacity: 0.7, fontWeight: 400 }}>
+                        (p.{f.page_number})
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="fpx-muted" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+                Drawing onto: <strong>{currentFloorLevel}</strong>. Run extraction again from another floor tab to draw the other floor.
+              </p>
+            </section>
+          )}
+
           {/* Section 1 — Building Info */}
           <section className="fpx-section">
             <h3 className="fpx-section-title">Building info</h3>
