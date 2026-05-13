@@ -1,209 +1,175 @@
-// AI-powered floor plan extraction. Sends the project's architectural PDF
-// (and the optional engineered truss layout when both are uploaded) to
-// Claude's vision API and asks it to read off the exterior polygon, interior
-// walls, door/window schedules, and basic roof settings as structured JSON.
+// AI-powered floor plan extraction.
 //
-// The user reviews everything in a confirmation modal on the frontend
-// before any walls or openings get written to the database. The dedicated
-// /apply-floor-plan-extraction route handles the actual inserts.
+// The pipeline is split into THREE focused, sequential Claude calls — each
+// with one well-defined job. This is more reliable than asking a single call
+// to produce a giant nested JSON for everything; the model can devote full
+// reasoning + token budget to one task at a time, and partial failures
+// degrade gracefully (e.g. schedules-call failure → empty doors/windows
+// but exterior polygon + interior walls still work).
+//
+// CALL 1 — door + window SCHEDULES (table reading, no spatial work)
+// CALL 2 — exterior POLYGON only (conditioned space only — exclude decks)
+// CALL 3 — interior WALLS (given the polygon dims from call 2)
+//
+// Merged result matches the shape the frontend modal expects (a floors[]
+// wrapper around { building, exterior_polygon, interior_walls, doors,
+// windows, roof, ... }). The merge defaults wall_side/position_fraction
+// to null for now — placement on specific exterior walls happens manually
+// after the apply (those rows show up in the modal's "could not be placed"
+// section).
 
 import Anthropic from '@anthropic-ai/sdk';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { r2, BUCKET } from './r2.js';
 
-const MODEL = 'claude-sonnet-4-6';
-const TIMEOUT_MS = 60_000; // floor plans are 4-8x larger than roof-only
-// 4096 was running into truncation on real plan sets — a 2-storey house
-// with ~12 interior walls + ~14 openings doubled to absolute+fraction
-// coords easily crosses 5K output tokens. 8192 gives generous headroom.
-const MAX_TOKENS = 8192;
+const MODEL = 'claude-opus-4-5';
+const TIMEOUT_MS = 60_000; // applied per Claude call; 3 calls × 60s = 180s worst case
 
 export function aiConfigured() {
   return !!process.env.ANTHROPIC_API_KEY;
 }
 
-const SYSTEM_PROMPT =
-  'You are an expert architectural drawing reader specializing in residential construction drawings. ' +
-  'You extract precise measurement data from architectural floor plans and schedules. ' +
-  'Return ONLY valid JSON with no markdown, no code blocks, no explanation.';
+// ============================================================
+// Prompts — one per call
+// ============================================================
 
-const USER_MESSAGE = `Analyze this architectural drawing set. BEFORE extracting any data, scan ALL pages of the document and identify which floor each plan page represents:
+const SYSTEM_SCHEDULES =
+  'You are an expert at reading architectural drawing schedules. ' +
+  'Extract data from tables exactly as written. ' +
+  'Return ONLY valid JSON with no markdown.';
 
-- A page titled "FLOOR PLAN", "GROUND FLOOR PLAN", "MAIN FLOOR PLAN", or "FIRST FLOOR" → floor_level: "floor1"
-- A page titled "UPPER FLOOR PLAN", "SECOND FLOOR PLAN", "2ND FLOOR" → floor_level: "floor2"
-- A page titled "BASEMENT PLAN", "FOUNDATION PLAN" → floor_level: "basement"
+const USER_SCHEDULES = `Find the DOOR SCHEDULE and WINDOW SCHEDULE tables in this architectural drawing set. These are usually on a notes/schedule page.
 
-Extract detailed plan data for EVERY floor plan page you find — not just one. Return one entry in the floors[] array per detected floor.
-
-Return this EXACT JSON structure with no markdown, no code blocks, no prose:
-
+Return this exact JSON:
 {
-  "building": {
-    "total_width_ft": number,
-    "total_depth_ft": number,
-    "wall_type": "2x4" or "2x6",
-    "num_storeys": 1 or 2,
-    "floor_area_sqft": number or null,
-    "wall_height_ft": number
-  },
-  "floors_detected": [
-    { "floor_level": "floor1" | "floor2" | "basement", "page_number": number, "label": string }
-  ],
-  "floors": [
+  "door_schedule": [
     {
-      "floor_level": "floor1" | "floor2" | "basement",
-      "page_number": number,
-      "exterior_polygon": [
-        { "x_ft": number, "y_ft": number, "x_fraction": number, "y_fraction": number }
-      ],
-      "interior_walls": [
-        {
-          "start_x_ft": number,
-          "start_y_ft": number,
-          "end_x_ft": number,
-          "end_y_ft": number,
-          "start_x_fraction": number,
-          "start_y_fraction": number,
-          "end_x_fraction": number,
-          "end_y_fraction": number,
-          "wall_type": "interior_2x4" or "interior_2x6",
-          "is_load_bearing": boolean
-        }
-      ],
-      "exterior_doors": [
-        {
-          "label": string,
-          "width_inches": number,
-          "height_inches": number,
-          "ro_width_inches": number,
-          "ro_height_inches": number,
-          "type": "hinged" or "slider" or "french",
-          "quantity": number,
-          "wall_side": "front" or "back" or "left" or "right" or null,
-          "position_fraction": number or null
-        }
-      ],
-      "interior_doors": [
-        {
-          "label": string,
-          "width_inches": number,
-          "height_inches": number,
-          "ro_width_inches": number,
-          "ro_height_inches": number,
-          "quantity": number,
-          "interior_wall_hint": string or null
-        }
-      ],
-      "windows": [
-        {
-          "label": string,
-          "width_inches": number,
-          "height_inches": number,
-          "ro_width_inches": number,
-          "ro_height_inches": number,
-          "type": string,
-          "quantity": number,
-          "wall_side": "front" or "back" or "left" or "right" or null,
-          "position_fraction": number or null
-        }
-      ]
+      "label": string,
+      "quantity": number,
+      "floor": number,
+      "width_inches": number,
+      "height_inches": number,
+      "ro_width_inches": number|null,
+      "ro_height_inches": number|null,
+      "description": string,
+      "is_exterior": boolean,
+      "comments": string|null
     }
   ],
-  "roof": {
-    "pitch": string or null,
-    "truss_spacing_inches": number or null
-  },
-  "confidence": "high" or "medium" or "low",
-  "notes": string,
-  "warnings": [string]
+  "window_schedule": [
+    {
+      "label": string,
+      "quantity": number,
+      "floor": number,
+      "width_inches": number,
+      "height_inches": number,
+      "ro_width_inches": number|null,
+      "ro_height_inches": number|null,
+      "description": string,
+      "comments": string|null
+    }
+  ]
 }
 
-============================================================
-EXTERIOR POLYGON — CRITICAL RULES
-============================================================
-The exterior polygon must trace ONLY the conditioned living space (the actual heated building walls).
+For "is_exterior": set true when the DESCRIPTION column contains any of "EXT.", "EXTERIOR", "SLIDER", "PATIO", or "GLASS PANEL". Otherwise false.
 
-DO NOT include any of the following in the polygon, even if they're shown attached to the building:
-- Decks (usually drawn with dashed lines, diagonal hatching, or "5/4" or composite decking notation)
-- Porches and covered entries (often labeled "PORCH", "COVERED PORCH", "COVERED ENTRY")
-- Garages (unless they share a heated wall — and even then trace only the heated envelope)
-- Patios, walkways, stairs, any outdoor structure
+Read the RO (rough opening) column carefully — it may be formatted as 32 1/2"×83 1/2" or similar. Convert fractions to decimals.
 
-Look for the THICK exterior wall lines that form the heated envelope. These are typically drawn as solid double lines. The polygon must close around just the heated space.
+If no schedules are found, return { "door_schedule": [], "window_schedule": [] }.`;
 
-If you detect a deck, porch, or other excluded structure, add a string to "warnings" describing it, e.g. "Excluded 12'×16' rear deck from polygon" or "Excluded covered front porch".
+const SYSTEM_POLYGON =
+  'You are an expert at reading architectural floor plans. ' +
+  'Your only job is to identify the exact outline of the heated/conditioned living space. ' +
+  'Return ONLY valid JSON with no markdown.';
 
-Trace the corners starting from the top-left going clockwise. For each corner, return both the absolute foot coordinate (x_ft, y_ft, from top-left origin) AND its position as a fraction of the building bounding box (x_fraction = x_ft / total_width_ft, y_fraction = y_ft / total_depth_ft).
+const USER_POLYGON = `Look at the FLOOR PLAN page (usually labeled 'GROUND FLOOR PLAN' or 'FLOOR PLAN'). Find the plan scale (e.g. 1/8" = 1'-0").
 
-============================================================
-INTERIOR WALLS — WALL TYPE RULES
-============================================================
-Default interior wall_type to "interior_2x4". The vast majority of residential interior partition walls are 2x4.
+Your task: Identify the exterior wall outline of the CONDITIONED LIVING SPACE ONLY.
 
-Mark is_load_bearing=true and wall_type="interior_2x6" ONLY when the wall is explicitly labeled on the drawing as:
-- "2x6 LOAD BEARING"
-- "2x6 @ 16 O.C. LOAD BEARING"
-- Any explicit structural notation indicating a load-bearing 2x6 wall
+CRITICAL EXCLUSION RULES — these must NEVER be included in the polygon:
+1. DECKS — areas labeled "DECK", "COMPOSITE DECKING", or showing deck railings/guards. Decks attach to the outside of the building.
+2. PORCHES — covered or uncovered entry porches.
+3. CARPORTS or GARAGES — unless they share a heated wall, and even then trace only the heated envelope.
+4. Any outdoor area even if it touches the building walls.
 
-When in doubt, choose interior_2x4. Do not infer load bearing from wall position alone.
+HOW TO IDENTIFY THE BUILDING OUTLINE:
+- The exterior walls are drawn as thick double lines (representing the wall thickness).
+- Look for the heated rooms: bedrooms, kitchen, living room, bathroom, office, sunroom.
+- The building outline connects all exterior wall faces.
+- Dimension strings along the perimeter show the distances between corners.
 
-For each interior wall return BOTH the absolute coordinates (start_x_ft, start_y_ft, end_x_ft, end_y_ft, from top-left origin in feet) AND the fraction-based positions:
-- start_x_fraction = start_x_ft / total_width_ft
-- start_y_fraction = start_y_ft / total_depth_ft
-- end_x_fraction = end_x_ft / total_width_ft
-- end_y_fraction = end_y_ft / total_depth_ft
+EXAMPLE — Mitro Residence:
+- The overall dimensions shown on the title block are 47'-0" wide × 35'-0" deep.
+- BUT the 35'-0" dimension INCLUDES the rear deck (approximately 8'-0" deep).
+- The HOUSE itself is approximately 47'-0" wide × 27'-0" deep.
+- A SUN ROOM on one side is part of the conditioned space (include it).
+- The DECK areas labeled as such are NOT part of the conditioned space (exclude them).
 
-Use the dimension annotations printed on the drawing to calculate these fractions accurately.
+Return the exterior polygon as corners starting from top-left going clockwise. Each corner has x_ft, y_ft (feet from top-left origin) AND x_fraction, y_fraction (fraction of building bounding box):
 
-============================================================
-DOORS — INTERIOR vs EXTERIOR CATEGORIZATION
-============================================================
-Read the door schedule and categorize EACH row:
+{
+  "scale": string,
+  "total_width_ft": number,
+  "total_depth_ft": number,
+  "wall_type": "2x4"|"2x6",
+  "wall_height_ft": number,
+  "floor_area_sqft": number|null,
+  "exterior_polygon": [
+    { "x_ft": number, "y_ft": number, "x_fraction": number, "y_fraction": number, "label": string|null }
+  ],
+  "deck_excluded": string,
+  "confidence": "high"|"medium"|"low",
+  "notes": string
+}
 
-EXTERIOR doors → exterior_doors[]:
-- The label or description contains "EXT.", "EXTERIOR", "SLIDER", "PATIO", or "GLASS PANEL"
-- OR the door is shown on the perimeter walls of the building in the plan view
+If you excluded any deck/porch/garage, describe what you excluded in the "deck_excluded" field (e.g. "Rear deck 47'×8' and front entry porch 8'×6'"). If nothing was excluded, set it to "".
 
-INTERIOR doors → interior_doors[]:
-- The label or description is just "HINGED", "3 PANEL", "DOUBLE HINGED", "BIFOLD", "POCKET" without an EXT/EXTERIOR prefix
-- OR the door is shown on an interior partition wall in the plan view
+If any value cannot be determined, use null. Do not guess.`;
 
-Examples from a real plan set:
-- D01 "HINGED-3 PANEL" (no EXT label) → interior_doors
-- D04 "DOUBLE HINGED-3 PANEL" (no EXT label) → interior_doors
-- D02 "EXT. HINGED" → exterior_doors
-- D03 "EXT. SLIDER" → exterior_doors
+const SYSTEM_WALLS =
+  'You are an expert at reading architectural floor plans. ' +
+  'Extract interior wall positions accurately. ' +
+  'Return ONLY valid JSON with no markdown.';
 
-For interior doors, also include interior_wall_hint — the room/area where the door is located based on the floor plan layout (e.g. "Office", "Bedroom 2", "Bath", "Master Closet"). This helps the placement engine match each door to its likely interior wall.
+function userWallsPrompt({ totalWidthFt, totalDepthFt }) {
+  return `Look at the FLOOR PLAN page. The exterior building outline is ${totalWidthFt}ft wide × ${totalDepthFt}ft deep.
 
-============================================================
-WINDOWS AND DOOR PLACEMENT
-============================================================
-Read the schedules directly for exact RO sizes.
+Extract all INTERIOR PARTITION WALLS from the floor plan. For each wall:
+1. Measure its START and END position using the room dimensions printed on the plan.
+2. Express positions as both feet from the top-left corner AND as a fraction (0.0 to 1.0) of the building width/depth.
+3. Determine wall type: ONLY use "interior_2x6" if the wall is explicitly labeled "2x6 LOAD BEARING" or a similar structural note. Default ALL other interior walls to "interior_2x4".
 
-For each exterior door and window, set wall_side based on which exterior wall the opening is on:
-- "front"  = the edge at the LARGEST y coordinate (bottom of the plan drawing)
-- "back"   = the edge at the SMALLEST y coordinate (top of the plan drawing)
-- "left"   = the edge at the SMALLEST x coordinate
-- "right"  = the edge at the LARGEST x coordinate
+Also read the BUILDING SECTION drawing (if present) to determine wall height.
 
-Also estimate position_fraction (0 to 1) representing where along that wall_side edge the opening sits, measured from the start of the edge. Use null only if the wall_side can't be determined.
+Return:
+{
+  "wall_height_ft": number,
+  "interior_walls": [
+    {
+      "start_x_ft": number,
+      "start_y_ft": number,
+      "end_x_ft": number,
+      "end_y_ft": number,
+      "start_x_fraction": number,
+      "start_y_fraction": number,
+      "end_x_fraction": number,
+      "end_y_fraction": number,
+      "wall_type": "interior_2x4"|"interior_2x6",
+      "is_load_bearing": boolean,
+      "room_label": string
+    }
+  ],
+  "floors_detected": [
+    { "floor_level": "floor1"|"floor2", "page_label": string }
+  ]
+}
 
-============================================================
-ROOF + CONFIDENCE
-============================================================
-For roof.pitch: read from the building section drawing (e.g. "5.5:12", "6:12").
-For roof.truss_spacing_inches: read from any roof framing note (typically 24 or 16).
+If any value cannot be determined, use null.`;
+}
 
-Set confidence to "high" only when wall lines are clear, schedules are readable, and dimensions are explicitly labeled. Use "medium" when minor details are inferred. Use "low" when significant guessing was required.
-
-============================================================
-RULES
-============================================================
-- If multiple PDFs are provided (e.g. architectural + truss), cross-reference but TRUST the architectural set for walls/doors/windows.
-- If any value cannot be determined, use null. DO NOT GUESS measurements — null is correct.
-- If only one floor plan page is present, return a single entry in floors[].
-- Always populate the absolute foot fields AND the fraction fields together — don't return one without the other.`;
+// ============================================================
+// Helpers
+// ============================================================
 
 async function fetchR2Object(key) {
   const out = await r2.send(new GetObjectCommand({ Bucket: BUCKET, Key: key }));
@@ -212,40 +178,127 @@ async function fetchR2Object(key) {
   return Buffer.concat(chunks);
 }
 
-// Parse the model's text response, tolerating common wrapping issues:
-// - markdown code fences (```json ... ```)
-// - leading prose like "Here's the extracted data:"
-// - trailing prose
-// Returns { data, parseError } so callers can log what went wrong.
-function parseExtractionJson(rawText) {
-  if (!rawText) return { data: null, parseError: 'Empty response from model' };
+// Parse the model's text response, tolerating common wrapping issues
+// (markdown fences, leading prose, trailing prose). Returns null on
+// failure; callers decide whether the failure is fatal.
+function parseClaudeJson(rawText) {
+  if (!rawText) return null;
   let text = String(rawText).trim();
-  // Strip surrounding code fences. Handle both ```json...``` and bare ```...```.
   text = text
     .replace(/^```json\s*/i, '')
     .replace(/^```\s*/i, '')
     .replace(/\s*```\s*$/i, '')
     .trim();
-  // If there's prose before the JSON, slice from the first { to the last }.
   const first = text.indexOf('{');
   const last = text.lastIndexOf('}');
-  if (first < 0) {
-    return { data: null, parseError: `Response contained no '{' — likely truncated or non-JSON: ${text.slice(0, 200)}` };
-  }
-  if (last <= first) {
-    return { data: null, parseError: `Response had no closing '}' — likely truncated at ${text.length} chars: ${text.slice(0, 200)}` };
-  }
+  if (first < 0 || last <= first) return null;
   text = text.slice(first, last + 1);
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+async function callClaude(client, documentBlocks, systemPrompt, userPrompt, maxTokens) {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
-    return { data: JSON.parse(text), parseError: null };
-  } catch (e) {
-    return { data: null, parseError: `${e.message} (response was ${text.length} chars)` };
+    const message = await client.messages.create(
+      {
+        model: MODEL,
+        max_tokens: maxTokens,
+        system: systemPrompt,
+        messages: [{
+          role: 'user',
+          content: [...documentBlocks, { type: 'text', text: userPrompt }],
+        }],
+      },
+      { signal: abort.signal }
+    );
+    const textBlock = (message.content || []).find((b) => b.type === 'text');
+    return textBlock?.text || '';
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-// Wrap a flat (non-multi-floor) response in a floors[] array so callers can
-// treat both shapes uniformly. Idempotent — if floors[] is already present
-// returns the input unchanged.
+// ============================================================
+// Merge — turn three call outputs into the modal-ready shape
+// ============================================================
+
+function mergeExtraction(schedules, polygon, walls) {
+  const door_schedule = Array.isArray(schedules?.door_schedule) ? schedules.door_schedule : [];
+  const window_schedule = Array.isArray(schedules?.window_schedule) ? schedules.window_schedule : [];
+
+  const exterior_doors = door_schedule.filter((d) => d.is_exterior).map((d) => ({
+    label: d.label,
+    width_inches: d.width_inches,
+    height_inches: d.height_inches,
+    ro_width_inches: d.ro_width_inches,
+    ro_height_inches: d.ro_height_inches,
+    type: String(d.description || '').toLowerCase().includes('slider') ? 'slider' : 'hinged',
+    quantity: d.quantity || 1,
+    wall_side: null,
+    position_fraction: null,
+  }));
+
+  const interior_doors = door_schedule.filter((d) => !d.is_exterior).map((d) => ({
+    label: d.label,
+    width_inches: d.width_inches,
+    height_inches: d.height_inches,
+    ro_width_inches: d.ro_width_inches,
+    ro_height_inches: d.ro_height_inches,
+    quantity: d.quantity || 1,
+    interior_wall_hint: null,
+  }));
+
+  const windows = window_schedule.map((w) => {
+    const desc = String(w.description || '').toLowerCase();
+    const type = desc.includes('casement') ? 'casement'
+      : desc.includes('fixed') ? 'fixed'
+      : desc.includes('slider') ? 'slider'
+      : 'single';
+    return {
+      label: w.label,
+      width_inches: w.width_inches,
+      height_inches: w.height_inches,
+      ro_width_inches: w.ro_width_inches,
+      ro_height_inches: w.ro_height_inches,
+      type,
+      quantity: w.quantity || 1,
+      wall_side: null,
+      position_fraction: null,
+    };
+  });
+
+  const numStoreys = Array.isArray(walls?.floors_detected) && walls.floors_detected.length > 0
+    ? walls.floors_detected.length
+    : 1;
+  const wallHeight = walls?.wall_height_ft || polygon?.wall_height_ft || 9;
+  const notesParts = [polygon?.notes, polygon?.deck_excluded].filter(Boolean);
+  const warnings = polygon?.deck_excluded ? [`Excluded: ${polygon.deck_excluded}`] : [];
+
+  const merged = {
+    building: {
+      total_width_ft: polygon?.total_width_ft,
+      total_depth_ft: polygon?.total_depth_ft,
+      wall_type: polygon?.wall_type,
+      wall_height_ft: wallHeight,
+      num_storeys: numStoreys,
+      floor_area_sqft: polygon?.floor_area_sqft ?? null,
+    },
+    exterior_polygon: polygon?.exterior_polygon || [],
+    interior_walls: walls?.interior_walls || [],
+    exterior_doors,
+    interior_doors,
+    windows,
+    roof: { pitch: null, truss_spacing_inches: 24 },
+    confidence: polygon?.confidence || 'medium',
+    notes: notesParts.join(' | '),
+    warnings,
+    floors_detected: walls?.floors_detected || [{ floor_level: 'floor1', label: 'Ground Floor Plan' }],
+  };
+  return normalizeExtraction(merged);
+}
+
+// Wrap a flat response in the floors[] shape the modal expects. Idempotent.
 export function normalizeExtraction(parsed) {
   if (!parsed || typeof parsed !== 'object') return parsed;
   if (Array.isArray(parsed.floors) && parsed.floors.length > 0) return parsed;
@@ -266,63 +319,19 @@ export function normalizeExtraction(parsed) {
   };
 }
 
-// Simpler, single-floor prompt used as a fallback when the full multi-floor
-// extraction fails to parse (typically due to max-tokens truncation on a
-// large plan set). The response shape is the OLD flat structure — the
-// caller normalizes it back to the floors[] wrapper.
-const SIMPLIFIED_USER_MESSAGE = `Extract the ground floor plan data from this architectural drawing. Return ONLY this JSON structure with no markdown:
-{
-  "building": { "total_width_ft": number, "total_depth_ft": number, "wall_type": "2x4"|"2x6", "wall_height_ft": number, "num_storeys": 1|2, "floor_area_sqft": number|null },
-  "exterior_polygon": [{ "x_ft": number, "y_ft": number, "x_fraction": number, "y_fraction": number }],
-  "interior_walls": [{ "start_x_ft": number, "start_y_ft": number, "end_x_ft": number, "end_y_ft": number, "start_x_fraction": number, "start_y_fraction": number, "end_x_fraction": number, "end_y_fraction": number, "wall_type": "interior_2x4"|"interior_2x6", "is_load_bearing": boolean }],
-  "exterior_doors": [{ "label": string, "width_inches": number, "height_inches": number, "ro_width_inches": number, "ro_height_inches": number, "type": string, "quantity": number, "wall_side": "front"|"back"|"left"|"right"|null, "position_fraction": number|null }],
-  "interior_doors": [{ "label": string, "width_inches": number, "height_inches": number, "ro_width_inches": number, "ro_height_inches": number, "quantity": number, "interior_wall_hint": string|null }],
-  "windows": [{ "label": string, "width_inches": number, "height_inches": number, "ro_width_inches": number, "ro_height_inches": number, "type": string, "quantity": number, "wall_side": "front"|"back"|"left"|"right"|null, "position_fraction": number|null }],
-  "roof": { "pitch": string|null, "truss_spacing_inches": number|null },
-  "confidence": "high"|"medium"|"low",
-  "notes": string,
-  "warnings": [string]
-}
-
-Rules:
-- Exterior polygon: trace ONLY the conditioned heated space. Exclude decks, porches, covered entries, garages.
-- Interior walls: default to interior_2x4. Only mark interior_2x6 + is_load_bearing=true when the drawing explicitly says "2x6 LOAD BEARING".
-- Interior doors: any door NOT labeled EXT./EXTERIOR/SLIDER/PATIO in the schedule.
-- Exterior doors: doors labeled EXT., EXTERIOR, SLIDER, PATIO DOOR, or GLASS PANEL.
-- Use null for any value you cannot determine. Do not guess.`;
-
-async function callClaude(client, content, userMessage) {
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
-  try {
-    const message = await client.messages.create(
-      {
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: [...content, { type: 'text', text: userMessage }] }],
-      },
-      { signal: abort.signal }
-    );
-    const textBlock = (message.content || []).find((b) => b.type === 'text');
-    return {
-      raw: textBlock?.text || '',
-      stop_reason: message.stop_reason,
-      input_tokens: message.usage?.input_tokens,
-      output_tokens: message.usage?.output_tokens,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// ============================================================
+// Main entry — run all three calls + merge
+// ============================================================
 
 /**
  * Run the floor-plan extraction. Pass the R2 keys of the PDFs to include.
  * At least one is required.
  *
- * Returns { data, raw, parseError, attempts }. `data` is the normalized
- * parsed JSON (always with a floors[] array) or null if parse failed even
- * after the simplified-prompt retry.
+ * Returns { data, error }:
+ * - data: normalized merged extraction with floors[] shape
+ * - error: human-readable message when extraction had a hard failure (only
+ *   when the polygon call fails — partial failures on schedules/walls
+ *   degrade silently to empty arrays)
  */
 export async function extractFloorPlan({ architecturalKey, trussKey }) {
   if (!aiConfigured()) {
@@ -347,49 +356,60 @@ export async function extractFloorPlan({ architecturalKey, trussKey }) {
   }));
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const attempts = [];
 
-  // First attempt: full multi-floor prompt.
-  const a1 = await callClaude(client, documentBlocks, USER_MESSAGE);
-  const p1 = parseExtractionJson(a1.raw);
-  attempts.push({
-    prompt: 'multi-floor',
-    stop_reason: a1.stop_reason,
-    output_tokens: a1.output_tokens,
-    parse_error: p1.parseError,
-    raw_length: a1.raw.length,
-  });
-  if (p1.data) {
-    return { data: normalizeExtraction(p1.data), raw: a1.raw, parseError: null, attempts };
+  // ---- Call 1: schedules (non-fatal on failure) ----
+  let schedules = { door_schedule: [], window_schedule: [] };
+  try {
+    const raw1 = await callClaude(client, documentBlocks, SYSTEM_SCHEDULES, USER_SCHEDULES, 2048);
+    const parsed1 = parseClaudeJson(raw1);
+    if (parsed1) schedules = parsed1;
+    else console.warn('[floor-plan-extractor] Call 1 (schedules): parse failed, continuing with empty schedules');
+    console.log(
+      `[floor-plan-extractor] Call 1 (schedules): ${schedules.door_schedule?.length || 0} doors, ` +
+      `${schedules.window_schedule?.length || 0} windows`
+    );
+  } catch (e) {
+    console.warn('[floor-plan-extractor] Call 1 (schedules) failed:', e.message);
   }
 
-  // Truncation diagnostic: log conspicuously when the model hit max_tokens.
-  if (a1.stop_reason === 'max_tokens') {
-    console.error(`[floor-plan-extractor] First attempt hit max_tokens (${a1.output_tokens} output tokens). Retrying with simplified prompt.`);
-  } else {
-    console.error(`[floor-plan-extractor] First attempt parse failed: ${p1.parseError}. Retrying with simplified prompt.`);
+  // ---- Call 2: exterior polygon (FATAL on failure — we can't draw without it) ----
+  let polygon = null;
+  try {
+    const raw2 = await callClaude(client, documentBlocks, SYSTEM_POLYGON, USER_POLYGON, 1024);
+    polygon = parseClaudeJson(raw2);
+  } catch (e) {
+    console.error('[floor-plan-extractor] Call 2 (polygon) errored:', e.message);
   }
-
-  // Second attempt: simplified single-floor prompt.
-  const a2 = await callClaude(client, documentBlocks, SIMPLIFIED_USER_MESSAGE);
-  const p2 = parseExtractionJson(a2.raw);
-  attempts.push({
-    prompt: 'simplified',
-    stop_reason: a2.stop_reason,
-    output_tokens: a2.output_tokens,
-    parse_error: p2.parseError,
-    raw_length: a2.raw.length,
-  });
-  if (p2.data) {
-    return { data: normalizeExtraction(p2.data), raw: a2.raw, parseError: null, attempts };
+  if (!polygon || !Array.isArray(polygon.exterior_polygon) || polygon.exterior_polygon.length < 3) {
+    return {
+      data: null,
+      error: 'Could not extract a valid exterior polygon from this PDF. ' +
+             'Make sure the floor plan page is included and clearly labeled.',
+    };
   }
+  console.log(
+    `[floor-plan-extractor] Call 2 (polygon): ${polygon.total_width_ft}'×${polygon.total_depth_ft}' building, ` +
+    `${polygon.exterior_polygon.length} corners, confidence=${polygon.confidence || 'unknown'}` +
+    (polygon.deck_excluded ? `, excluded=${polygon.deck_excluded}` : '')
+  );
 
-  // Both failed — return raw from the first attempt and the most useful
-  // error message we have.
-  return {
-    data: null,
-    raw: a1.raw,
-    parseError: p1.parseError || p2.parseError,
-    attempts,
-  };
+  // ---- Call 3: interior walls (non-fatal on failure) ----
+  let walls = { wall_height_ft: null, interior_walls: [], floors_detected: [] };
+  try {
+    const userWalls = userWallsPrompt({
+      totalWidthFt: polygon.total_width_ft,
+      totalDepthFt: polygon.total_depth_ft,
+    });
+    const raw3 = await callClaude(client, documentBlocks, SYSTEM_WALLS, userWalls, 2048);
+    const parsed3 = parseClaudeJson(raw3);
+    if (parsed3) walls = parsed3;
+    else console.warn('[floor-plan-extractor] Call 3 (walls): parse failed, continuing with no interior walls');
+  } catch (e) {
+    console.warn('[floor-plan-extractor] Call 3 (walls) failed:', e.message);
+  }
+  console.log(`[floor-plan-extractor] Call 3 (interior walls): ${walls.interior_walls?.length || 0} walls detected`);
+
+  const merged = mergeExtraction(schedules, polygon, walls);
+  console.log('[floor-plan-extractor] Merge complete. Sending to frontend.');
+  return { data: merged, error: null };
 }

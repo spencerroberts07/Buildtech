@@ -277,6 +277,7 @@ export default function Sketch({
         onMaterialsChanged={onMaterialsChanged}
         onOpeningsChanged={onOpeningsChanged}
         pdfControls={pdfControls}
+        onSwitchLevel={setActiveLevel}
       />
     </div>
   );
@@ -310,6 +311,7 @@ function PolygonSketch({
   onMaterialsChanged,
   onOpeningsChanged,
   pdfControls,
+  onSwitchLevel,
 }) {
   const canvasRef = useRef(null);
   const wrapRef = useRef(null);
@@ -493,8 +495,13 @@ function PolygonSketch({
     // Auto-dim the PDF underlay so the user can verify the drawn walls
     // line up with the PDF beneath. Only when a PDF is actually loaded.
     if (pdfControls?.pdfFilename && pdfControls?.pdfStatus === 'ready') {
-      pdfControls.setPdfOpacity?.(0.3);
+      pdfControls.setPdfOpacity?.(0.4);
     }
+    // Ensure the canvas is on the level the walls were drawn to. `level`
+    // is this PolygonSketch's level (== the level the modal sent in
+    // `floor_level`), so in the normal flow this is a no-op. Belt-and-
+    // suspenders for the case where the parent's activeLevel drifted.
+    onSwitchLevel?.(level);
     // Prefer the rich summary the modal built ("Floor 1 drawn from PDF:
     // 4 exterior walls (47'×35'), 6 interior walls (5×2x4, 1×2x6), …").
     // Fall back to plain counts if it isn't present.
