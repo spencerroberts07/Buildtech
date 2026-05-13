@@ -677,24 +677,38 @@ router.put('/:id/floor-plans/:fpid', async (req, res) => {
       }
       const areaSf = Math.abs(acc) / 2 * (sft * sft);
       const lvl = fp.rows[0].level || 'floor1';
-      // Cache on this floor_plans row.
-      await client.query(
-        'UPDATE floor_plans SET auto_floor_area_sf = $1 WHERE id = $2',
-        [areaSf, fpid]
-      );
-      // Mirror onto the matching floors row if one exists.
-      const f = await client.query(
-        'SELECT id FROM floors WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1',
-        [id, lvl]
-      );
-      if (f.rows[0]) {
+      // Guard against degenerate polygons (3+ collinear corners → area=0)
+      // and any other non-positive area. Writing 0 would make material
+      // calcs treat the floor as "present but empty"; clearing to NULL
+      // matches the < 3 corners path and lets the material list skip
+      // the floor rows cleanly until a real polygon is drawn.
+      if (areaSf > 0) {
         await client.query(
-          'UPDATE floors SET auto_floor_area_sf = $1 WHERE id = $2',
-          [areaSf, f.rows[0].id]
+          'UPDATE floor_plans SET auto_floor_area_sf = $1 WHERE id = $2',
+          [areaSf, fpid]
         );
+        const f = await client.query(
+          'SELECT id FROM floors WHERE project_id = $1 AND level = $2 ORDER BY id LIMIT 1',
+          [id, lvl]
+        );
+        if (f.rows[0]) {
+          // Don't auto-create the row — only update if the user has already
+          // created a floor. (Avoids cluttering projects that don't want
+          // floor materials.)
+          await client.query(
+            'UPDATE floors SET auto_floor_area_sf = $1 WHERE id = $2',
+            [areaSf, f.rows[0].id]
+          );
+        }
       } else {
-        // Don't auto-create the row — only update if the user has already created a floor.
-        // (Avoids cluttering projects that don't want floor materials.)
+        await client.query(
+          'UPDATE floor_plans SET auto_floor_area_sf = NULL WHERE id = $1',
+          [fpid]
+        );
+        await client.query(
+          'UPDATE floors SET auto_floor_area_sf = NULL WHERE project_id = $1 AND level = $2',
+          [id, lvl]
+        );
       }
     } else {
       // Polygon dropped below 3 corners — clear the cached area.
@@ -1319,13 +1333,19 @@ router.get('/:id/floor', async (req, res) => {
 router.post('/:id/floor', async (req, res) => {
   const { id } = req.params;
   const b = req.body || {};
-  if (b.floor_area_sf == null) {
-    return res.status(400).json({ error: 'floor_area_sf required' });
+  // floor_area_sf is optional — null is valid and means "no polygon drawn
+  // yet". The material list builder treats null as zero area and skips
+  // the subfloor / adhesive / ceiling rows until a real area shows up.
+  const areaSf = (b.floor_area_sf == null || b.floor_area_sf === '')
+    ? null
+    : Number(b.floor_area_sf);
+  if (areaSf != null && !Number.isFinite(areaSf)) {
+    return res.status(400).json({ error: 'floor_area_sf must be a number or null' });
   }
   const { rows } = await query(
     `INSERT INTO floors (project_id, level, floor_area_sf, subfloor_type, notes)
      VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [id, b.level || 'floor1', Number(b.floor_area_sf), b.subfloor_type || '58tgcsp', b.notes || null]
+    [id, b.level || 'floor1', areaSf, b.subfloor_type || '58tgcsp', b.notes || null]
   );
   // Auto-create a "Floor Package" line item if one doesn't already exist for this project.
   const existing = await query(

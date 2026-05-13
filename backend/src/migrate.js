@@ -423,6 +423,11 @@ const PROJECT_COLUMN_ALTERS = [
   // and email; the quote page surfaces them behind a "show hidden" toggle
   // with a Restore button so the override is recoverable.
   `ALTER TABLE quote_line_items ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT false`,
+  // floors.floor_area_sf is allowed to be NULL — the column legitimately
+  // has no value when the polygon hasn't been drawn yet or has fewer than
+  // three corners. The material list builder already treats null as "no
+  // floor area" and skips subfloor/adhesive/ceiling rows in that case.
+  `ALTER TABLE floors ALTER COLUMN floor_area_sf DROP NOT NULL`,
 ];
 
 const SKU_CATALOG_SEED = [
