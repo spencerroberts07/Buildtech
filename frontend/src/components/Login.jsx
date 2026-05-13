@@ -25,7 +25,7 @@ export default function Login({ onLogin }) {
     <div className="login-page">
       <div className="login-page-inner">
         <div className="login-brand">
-          <BuildTekLogo size={72} />
+          <BuildTekLogo size={56} />
         </div>
         <div className="login-wrap">
           <h2 style={{marginTop:0}}>Sign in</h2>

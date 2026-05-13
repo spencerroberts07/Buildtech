@@ -37,6 +37,21 @@ const HH_LOGO_SVG = (() => {
   }
 })();
 
+const BUILDTEK_WORDMARK_PATH = path.resolve(__dirname, '../assets/buildtek-wordmark-black.svg');
+const BUILDTEK_WORDMARK_SVG = (() => {
+  try {
+    return fs.readFileSync(BUILDTEK_WORDMARK_PATH, 'utf8')
+      .replace(/<\?xml[^?]*\?>/, '')
+      .replace(/<!DOCTYPE[^>]*>/, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/(<svg\b[^>]*?)\s+width="[^"]*"/i, '$1')
+      .replace(/(<svg\b[^>]*?)\s+height="[^"]*"/i, '$1');
+  } catch (e) {
+    console.warn('quote-pdf: failed to read BuildTek wordmark SVG:', e.message);
+    return '';
+  }
+})();
+
 const STORE = {
   name: 'Lyndhurst Home Building Centre',
   address: '397 Lyndhurst Rd, Lyndhurst ON  K0E 1N0',
@@ -240,6 +255,16 @@ function renderHtml(quote) {
     font-size: 9px;
     color: #6B7280;
   }
+  .built-by {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    font-size: 8px;
+    color: #9CA3AF;
+  }
+  .built-by svg { height: 11px; width: auto; display: block; }
 
   .tbd { color: #9CA3AF; font-style: italic; }
   .muted { color: #6B7280; font-style: italic; }
@@ -314,6 +339,10 @@ function renderHtml(quote) {
   <div class="footer">
     ${esc(STORE.name)}  ·  ${esc(STORE.phone)}  ·  ${esc(STORE.email)}
   </div>
+  ${BUILDTEK_WORDMARK_SVG
+    ? `<div class="built-by"><span>Built by</span>${BUILDTEK_WORDMARK_SVG}</div>`
+    : `<div class="built-by"><span>Built by BuildTek</span></div>`
+  }
 </div>
 
 </body>

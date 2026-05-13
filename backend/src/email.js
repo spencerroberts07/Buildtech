@@ -36,6 +36,18 @@ if (!LOGO_BASE64) {
   LOGO_BASE64 = process.env.STORE_LOGO_BASE64 || null;
 }
 
+// BuildTek wordmark as a base64 data URI. Used in the footer's "Built by"
+// credit. SVG renders in Apple Mail, Gmail, and modern Outlook; the alt
+// text "BuildTek" covers legacy Outlook Desktop where SVG is stripped.
+let BUILDTEK_WORDMARK_DATA_URI = '';
+try {
+  const wordmarkPath = path.join(__dirname, '../assets/buildtek-wordmark-black.svg');
+  const svg = fs.readFileSync(wordmarkPath, 'utf8');
+  BUILDTEK_WORDMARK_DATA_URI = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+} catch {
+  // file not found — footer falls back to plain text
+}
+
 function esc(s) {
   if (s == null) return '';
   return String(s)
@@ -171,8 +183,12 @@ function renderHtml({ quote, customMessage }) {
         <div style="font-size:10px;color:#6B7280;line-height:1.5;text-align:center;">
           This estimate is valid for 30 days. Prices subject to change without notice.
         </div>
-        <div style="font-size:10px;color:#9CA3AF;text-align:center;margin-top:6px;">
-          Powered by BuildTek | <a href="https://buildtek.org" style="color:#9CA3AF;text-decoration:none;">buildtek.org</a>
+        <div style="font-size:10px;color:#9CA3AF;text-align:center;margin-top:8px;">
+          <span style="vertical-align:middle;">Built by</span>
+          ${BUILDTEK_WORDMARK_DATA_URI
+            ? `<a href="https://buildtek.org" style="text-decoration:none;vertical-align:middle;margin-left:4px;"><img src="${BUILDTEK_WORDMARK_DATA_URI}" alt="BuildTek" height="12" style="display:inline-block;vertical-align:middle;border:0;outline:none;height:12px;width:auto;"></a>`
+            : `<a href="https://buildtek.org" style="color:#6B7280;text-decoration:none;font-weight:600;vertical-align:middle;margin-left:4px;">BuildTek</a>`
+          }
         </div>
       </td></tr>
 
