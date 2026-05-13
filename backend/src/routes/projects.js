@@ -19,9 +19,11 @@ import { pool } from '../db.js';
 import { ensureMaterial } from '../materialUpsert.js';
 import { r2, BUCKET, PUBLIC_URL } from '../r2.js';
 import { computeProjectMaterialList } from '../materialListBuilder.js';
+import { extractRoofData, aiConfigured } from '../aiRoofExtractor.js';
 
 const r2Configured = () => !!process.env.R2_ENDPOINT;
 const pdfKey = (projectId) => `projects/${projectId}/plan.pdf`;
+const trussPdfKey = (projectId) => `projects/${projectId}/truss.pdf`;
 
 const pdfUpload = multer({
   storage: multer.memoryStorage(),
@@ -55,6 +57,13 @@ const PROJECT_SETTING_FIELDS = [
   'pdf_scale',
   'pdf_page',
   'pdf_filename',
+  'truss_pdf_filename',
+  'extracted_pitch',
+  'extracted_sheathing_sf',
+  'extracted_valley_lf',
+  'extracted_ridge_lf',
+  'extracted_hip_lf',
+  'extracted_fascia_lf',
   'ceiling_drywall_type',
   'price_level',
 ];
@@ -1450,6 +1459,235 @@ router.get('/:id/material-list', async (req, res) => {
   const filtered = await computeProjectMaterialList(id, { includeDeleted });
   if (filtered === null) return res.status(404).json({ error: 'not found' });
   res.json(filtered);
+});
+
+// ---------------- Engineered truss layout PDF (separate slot) ----------------
+// Mirrors /upload-pdf, /pdf, DELETE /pdf — same R2 storage pattern but a
+// distinct key (projects/<id>/truss.pdf) and a separate column on projects
+// (truss_pdf_filename). The AI extractor sends both PDFs to Claude when both
+// are uploaded.
+router.post('/:id/upload-truss-pdf', (req, res) => {
+  pdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) {
+      const code = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+      return res.status(code).json({ error: err.message });
+    }
+    if (!req.file) return res.status(400).json({ error: 'pdf file required' });
+    if (!r2Configured()) return res.status(503).json({ error: 'PDF storage not configured' });
+    const { id } = req.params;
+    try {
+      const exists = await query('SELECT id FROM projects WHERE id = $1', [id]);
+      if (!exists.rows[0]) return res.status(404).json({ error: 'project not found' });
+      const key = trussPdfKey(id);
+      await r2.send(new PutObjectCommand({
+        Bucket: BUCKET, Key: key, Body: req.file.buffer, ContentType: 'application/pdf',
+      }));
+      const { rows } = await query(
+        `UPDATE projects SET truss_pdf_filename = $1, updated_at = NOW()
+         WHERE id = $2 RETURNING id, truss_pdf_filename, updated_at`,
+        [key, id]
+      );
+      res.status(201).json(rows[0]);
+    } catch (e) {
+      console.error('R2 truss upload failed:', e);
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
+router.get('/:id/truss-pdf', async (req, res) => {
+  const { id } = req.params;
+  const r = await query('SELECT truss_pdf_filename, updated_at FROM projects WHERE id = $1', [id]);
+  const key = r.rows[0]?.truss_pdf_filename;
+  if (!key) return res.status(404).json({ error: 'no truss pdf uploaded' });
+  if (!r2Configured()) return res.status(503).json({ error: 'PDF storage not configured' });
+  try {
+    await r2.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key }));
+  } catch (e) {
+    if (e?.$metadata?.httpStatusCode === 404 || e?.name === 'NotFound') {
+      return res.status(404).json({ error: 'pdf_missing' });
+    }
+    console.error('R2 head failed:', e);
+    return res.status(500).json({ error: 'pdf storage error' });
+  }
+  const v = encodeURIComponent(new Date(r.rows[0].updated_at).getTime());
+  res.redirect(302, `${PUBLIC_URL}/${key}?v=${v}`);
+});
+
+router.delete('/:id/truss-pdf', async (req, res) => {
+  const { id } = req.params;
+  const r = await query('SELECT truss_pdf_filename FROM projects WHERE id = $1', [id]);
+  const key = r.rows[0]?.truss_pdf_filename;
+  if (key && r2Configured()) {
+    try { await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key })); } catch (e) {
+      console.error('R2 delete failed:', e);
+    }
+  }
+  await query(
+    `UPDATE projects SET truss_pdf_filename = NULL, updated_at = NOW() WHERE id = $1`,
+    [id]
+  );
+  res.status(204).end();
+});
+
+// ---------------- AI roof extraction ----------------
+// Project-scoped to dodge the `/:id` collision; also lets the frontend ask
+// "can I extract for THIS project right now?" — combining the API-key check
+// with a probe for at least one uploaded PDF.
+router.get('/:id/extraction-status', async (req, res) => {
+  const { id } = req.params;
+  const r = await query(
+    'SELECT pdf_filename, truss_pdf_filename FROM projects WHERE id = $1', [id]
+  );
+  if (!r.rows[0]) return res.status(404).json({ error: 'project not found' });
+  res.json({
+    ai_configured: aiConfigured(),
+    has_architectural_pdf: !!r.rows[0].pdf_filename,
+    has_truss_pdf: !!r.rows[0].truss_pdf_filename,
+  });
+});
+
+router.post('/:id/extract-roof-data', async (req, res) => {
+  const { id } = req.params;
+  if (!aiConfigured()) {
+    return res.status(503).json({ error: 'AI extraction not available' });
+  }
+  if (!r2Configured()) {
+    return res.status(503).json({ error: 'PDF storage not configured' });
+  }
+  const p = await query(
+    'SELECT pdf_filename, truss_pdf_filename FROM projects WHERE id = $1', [id]
+  );
+  if (!p.rows[0]) return res.status(404).json({ error: 'project not found' });
+  const { pdf_filename, truss_pdf_filename } = p.rows[0];
+  if (!pdf_filename && !truss_pdf_filename) {
+    return res.status(400).json({ error: 'No PDF uploaded to this project' });
+  }
+  try {
+    const { data, raw } = await extractRoofData({
+      architecturalKey: pdf_filename || null,
+      trussKey: truss_pdf_filename || null,
+    });
+    if (!data) {
+      return res.json({ ok: true, data: null, error: 'Could not parse roof data from this plan', raw });
+    }
+    res.json({
+      ok: true,
+      data,
+      source: {
+        architectural: !!pdf_filename,
+        truss: !!truss_pdf_filename,
+      },
+    });
+  } catch (e) {
+    if (e.code === 'AI_NOT_CONFIGURED') return res.status(503).json({ error: 'AI extraction not available' });
+    if (e.code === 'NO_PDF') return res.status(400).json({ error: 'No PDF uploaded to this project' });
+    if (e.name === 'AbortError') return res.status(504).json({ error: 'Extraction timed out' });
+    if (e?.$metadata || e?.name === 'NoSuchKey') {
+      return res.status(503).json({ error: 'Could not load PDF from storage' });
+    }
+    console.error('Roof extraction failed:', e);
+    return res.status(500).json({ error: e.message || 'Extraction failed' });
+  }
+});
+
+// Apply the user-confirmed subset of extracted values. Body shape:
+//   {
+//     extracted_pitch?: string | null,
+//     extracted_sheathing_sf?: number | null,
+//     extracted_valley_lf?: number | null,
+//     extracted_ridge_lf?: number | null,
+//     extracted_hip_lf?: number | null,
+//     extracted_fascia_lf?: number | null,
+//     apply_pitch_to_sections?: boolean   // if true and extracted_pitch is
+//                                          // set, update pitch on every
+//                                          // existing roof_sections row too
+//   }
+// Only the keys present in the body get written; missing keys are left alone.
+router.post('/:id/apply-extracted-roof-data', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  const numericFields = [
+    'extracted_sheathing_sf',
+    'extracted_valley_lf',
+    'extracted_ridge_lf',
+    'extracted_hip_lf',
+    'extracted_fascia_lf',
+  ];
+  const updates = [];
+  const values = [];
+  let p = 1;
+  if ('extracted_pitch' in b) {
+    const v = b.extracted_pitch;
+    if (v != null && typeof v !== 'string') {
+      return res.status(400).json({ error: 'extracted_pitch must be a string or null' });
+    }
+    updates.push(`extracted_pitch = $${p++}`);
+    values.push(v == null ? null : String(v));
+  }
+  for (const f of numericFields) {
+    if (f in b) {
+      const v = b[f];
+      if (v == null) { updates.push(`${f} = $${p++}`); values.push(null); continue; }
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({ error: `${f} must be a non-negative number or null` });
+      }
+      updates.push(`${f} = $${p++}`);
+      values.push(n);
+    }
+  }
+  if (updates.length === 0) {
+    return res.status(400).json({ error: 'no fields provided' });
+  }
+  values.push(id);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `UPDATE projects SET ${updates.join(', ')}, updated_at = NOW()
+       WHERE id = $${values.length} RETURNING *`,
+      values
+    );
+    if (!rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'project not found' });
+    }
+    // Optional: push the extracted pitch onto every existing roof_section so
+    // the on-canvas pitch labels match the extracted value. Polygon geometry
+    // is left alone — the user drew those manually.
+    if (b.apply_pitch_to_sections && b.extracted_pitch) {
+      await client.query(
+        `UPDATE roof_sections SET pitch = $1, updated_at = NOW() WHERE project_id = $2`,
+        [String(b.extracted_pitch), id]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, project: rows[0] });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete('/:id/extracted-roof-data', async (req, res) => {
+  const { id } = req.params;
+  const { rows } = await query(
+    `UPDATE projects SET
+       extracted_pitch = NULL,
+       extracted_sheathing_sf = NULL,
+       extracted_valley_lf = NULL,
+       extracted_ridge_lf = NULL,
+       extracted_hip_lf = NULL,
+       extracted_fascia_lf = NULL,
+       updated_at = NOW()
+     WHERE id = $1 RETURNING *`,
+    [id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'project not found' });
+  res.json({ ok: true, project: rows[0] });
 });
 
 

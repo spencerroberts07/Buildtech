@@ -171,6 +171,13 @@ export async function computeProjectMaterialList(projectId, options = {}) {
   const roofSections = (await query(
     'SELECT * FROM roof_sections WHERE project_id = $1 ORDER BY id', [id]
   )).rows;
+  // Collect identity keys for any row we override with extracted values. The
+  // `is_extracted` flag is re-applied to the final output after sumMaterials
+  // strips unknown fields, so we need a way to find those rows again.
+  const extractedKeys = new Set();
+  const extractedKey = (section, category, name, unit) =>
+    `${(section || '').toLowerCase()}|${(category || '').toLowerCase()}|${(name || '').toLowerCase()}|${(unit || '').toLowerCase()}`;
+  let roofItems = [];
   if (roofSections.length > 0) {
     const roofEdges = (await query(
       `SELECT e.* FROM roof_section_edges e
@@ -188,11 +195,72 @@ export async function computeProjectMaterialList(projectId, options = {}) {
       ...s,
       edges: edgesBySection.get(s.id) || [],
     }));
-    wallItems.push(...computeRoofMaterials(sectionsWithEdges, {
+    roofItems = computeRoofMaterials(sectionsWithEdges, {
       sheathing_type: roofRow.sheathing_type,
       rafter_spacing: roofRow.rafter_spacing,
-    }));
+    });
   }
+
+  // AI-extracted roof overrides. When the user has confirmed extracted values
+  // from a PDF, those quantities replace the polygon-calculated ones for the
+  // matching rows. Rows touched here get `is_extracted: true` so the frontend
+  // can badge them ("from plan"). This runs even when there are NO roof
+  // sections — sheathing/ridge/valley/hip rows are synthesized from the
+  // extracted values alone so the user gets a roof rollup without having to
+  // draw the polygon first.
+  const extracted = {
+    sheathing_sf: projectRow.extracted_sheathing_sf == null ? null : Number(projectRow.extracted_sheathing_sf),
+    valley_lf:    projectRow.extracted_valley_lf    == null ? null : Number(projectRow.extracted_valley_lf),
+    ridge_lf:     projectRow.extracted_ridge_lf     == null ? null : Number(projectRow.extracted_ridge_lf),
+    hip_lf:       projectRow.extracted_hip_lf       == null ? null : Number(projectRow.extracted_hip_lf),
+  };
+  const hasAnyExtracted =
+    extracted.sheathing_sf != null || extracted.valley_lf != null ||
+    extracted.ridge_lf != null || extracted.hip_lf != null;
+  if (hasAnyExtracted) {
+    const sheathingKey = roofRow.sheathing_type || 'plywood_1_2_csp';
+    const sheathingName =
+      sheathingKey === 'osb_7_16'    ? '4 X 8 - 7/16 ORIENTED STRAND BOARD' :
+      sheathingKey === 'plywood_5_8' ? '4 X 8 - 5/8 STD.SPRUCE PLYWOOD' :
+                                       '4 X 8 - 1/2 STD.SPRUCE PLYWOOD';
+      const ROOF_SECTION = 'Roof';
+      const overrides = {
+        // Match key = section + category + name. Values keep matching
+        // computeRoofMaterials so the post-process can find them by row, or
+        // synthesize one if no calc row exists yet (e.g. polygon not drawn).
+        Sheathing: extracted.sheathing_sf == null ? null : {
+          name: sheathingName, unit: 'EA',
+          // Convert area → sheet count using the same 32sf/sheet + waste
+          // factor wallRules.js uses (SHEET_WASTE constant = 0.10).
+          quantity: Math.ceil(Number(extracted.sheathing_sf) / 32) * 1.10,
+        },
+        Ridge: extracted.ridge_lf == null ? null : {
+          name: 'RIDGE (linear feet)', unit: 'LF', quantity: Number(extracted.ridge_lf),
+        },
+        Valley: extracted.valley_lf == null ? null : {
+          name: 'VALLEY FLASHING (linear feet)', unit: 'LF', quantity: Number(extracted.valley_lf),
+        },
+        Hip: extracted.hip_lf == null ? null : {
+          name: 'HIP FLASHING (linear feet)', unit: 'LF', quantity: Number(extracted.hip_lf),
+        },
+      };
+      for (const [category, ov] of Object.entries(overrides)) {
+        if (!ov) continue;
+        // Sheathing rows come back from computeRoofMaterials with category =
+        // 'Sheathing'; the other three use the same string as the key here.
+        const idx = roofItems.findIndex((it) =>
+          (it.section === ROOF_SECTION) &&
+          (it.category === category)
+        );
+        if (idx >= 0) {
+          roofItems[idx] = { ...roofItems[idx], ...ov };
+        } else {
+          roofItems.push({ section: ROOF_SECTION, category, ...ov });
+        }
+        extractedKeys.add(extractedKey(ROOF_SECTION, category, ov.name, ov.unit));
+      }
+  }
+  wallItems.push(...roofItems);
 
   // Floor items (subfloor + adhesive + ceiling drywall)
   const floorRow = (await query(
@@ -293,6 +361,12 @@ export async function computeProjectMaterialList(projectId, options = {}) {
     } else {
       r.modified = false;
     }
+    // Re-apply the "from plan" badge that sumMaterials dropped. Match against
+    // the original (pre-rename) description so renamed roof rows still flag.
+    const matchName = r.original_description || r.material_name;
+    r.is_extracted = extractedKeys.has(
+      extractedKey(r.section, r.category, matchName, r.material_unit)
+    );
   }
 
   // Attach SKU catalog metadata. The description column is the wall-rules

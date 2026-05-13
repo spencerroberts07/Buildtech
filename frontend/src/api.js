@@ -174,6 +174,34 @@ export const api = {
   },
   deletePdf: (projectId) => request(`/projects/${projectId}/pdf`, { method: 'DELETE' }),
 
+  // Engineered truss layout PDF — separate slot from the architectural pdf.
+  uploadTrussPdf: async (projectId, file) => {
+    const fd = new FormData();
+    fd.append('pdf', file);
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/projects/${projectId}/upload-truss-pdf`, {
+      method: 'POST', headers, body: fd,
+    });
+    if (!res.ok) {
+      let msg = 'Upload failed';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.json();
+  },
+  deleteTrussPdf: (projectId) => request(`/projects/${projectId}/truss-pdf`, { method: 'DELETE' }),
+
+  // AI roof extraction.
+  getExtractionStatus: (projectId) => request(`/projects/${projectId}/extraction-status`),
+  extractRoofData: (projectId) =>
+    request(`/projects/${projectId}/extract-roof-data`, { method: 'POST', body: '{}' }),
+  applyExtractedRoofData: (projectId, data) =>
+    request(`/projects/${projectId}/apply-extracted-roof-data`, { method: 'POST', body: JSON.stringify(data) }),
+  clearExtractedRoofData: (projectId) =>
+    request(`/projects/${projectId}/extracted-roof-data`, { method: 'DELETE' }),
+
   listPackages: (projectId) => request(`/projects/${projectId}/packages`),
   createPackage: (projectId, data) =>
     request(`/projects/${projectId}/packages`, { method: 'POST', body: JSON.stringify(data) }),

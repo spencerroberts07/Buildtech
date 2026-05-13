@@ -630,6 +630,18 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
             }}
           />
         )}
+        {row.is_extracted && (
+          <span
+            title="Quantity from PDF extraction"
+            style={{
+              display: 'inline-block', marginLeft: 6,
+              padding: '1px 6px', fontSize: 10, fontWeight: 600,
+              color: '#92400E', background: '#FEF3C7',
+              border: '1px solid #FDE68A', borderRadius: 4,
+              verticalAlign: 'middle', whiteSpace: 'nowrap',
+            }}
+          >📄 from plan</span>
+        )}
       </td>
       <td style={cellStyle}>{Number(row.total_quantity)}</td>
       <td style={cellStyle}>{row.material_unit}</td>

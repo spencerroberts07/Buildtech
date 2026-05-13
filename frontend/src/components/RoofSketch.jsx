@@ -420,6 +420,25 @@ export default function RoofSketch({
     toastTimer.current = setTimeout(() => setToast(null), 4500);
   }
 
+  // AI roof extraction state.
+  const [extracting, setExtracting] = useState(false);
+  const [extractStage, setExtractStage] = useState(''); // 'Reading roof plan…' → 'Analyzing measurements…'
+  const [extractResult, setExtractResult] = useState(null); // { data, source }
+  const [extractError, setExtractError] = useState('');
+  const [extractFieldsChecked, setExtractFieldsChecked] = useState({});
+  const [extractApplyPitchToSections, setExtractApplyPitchToSections] = useState(true);
+
+  const hasArchPdf = !!projectSettings?.pdf_filename;
+  const hasTrussPdf = !!projectSettings?.truss_pdf_filename;
+  const hasAnyPdf = hasArchPdf || hasTrussPdf;
+  const hasAnyExtracted =
+    projectSettings?.extracted_pitch != null ||
+    projectSettings?.extracted_sheathing_sf != null ||
+    projectSettings?.extracted_valley_lf != null ||
+    projectSettings?.extracted_ridge_lf != null ||
+    projectSettings?.extracted_hip_lf != null ||
+    projectSettings?.extracted_fascia_lf != null;
+
   const [selectedSectionId, setSelectedSectionId] = useState(null);
   const [selectedCornerKey, setSelectedCornerKey] = useState(null);
   const [selectedEdgeKey, setSelectedEdgeKey] = useState(null);
@@ -681,6 +700,103 @@ export default function RoofSketch({
       showToast('Split into 3 sections — valleys detected automatically');
       onMaterialsChanged?.();
     } catch (e) { setError(e.message); setSplitPrompt(null); }
+  }
+
+  // ---- AI extraction handlers ----
+  async function uploadTrussPdf(file) {
+    if (!file) return;
+    try {
+      const r = await api.uploadTrussPdf(projectId, file);
+      onProjectSettingsChange?.({ truss_pdf_filename: r?.truss_pdf_filename || `projects/${projectId}/truss.pdf` });
+      showToast('Truss layout uploaded');
+    } catch (e) { setError(e.message); }
+  }
+  async function deleteTrussPdf() {
+    if (!confirm('Remove the engineered truss layout PDF?')) return;
+    try {
+      await api.deleteTrussPdf(projectId);
+      onProjectSettingsChange?.({ truss_pdf_filename: null });
+      showToast('Truss layout removed');
+    } catch (e) { setError(e.message); }
+  }
+  async function runExtract() {
+    if (!hasAnyPdf || extracting) return;
+    setExtracting(true);
+    setExtractError('');
+    setExtractStage('Reading roof plan…');
+    const stageTimer = setTimeout(() => setExtractStage('Analyzing measurements…'), 4000);
+    try {
+      const out = await api.extractRoofData(projectId);
+      if (!out.data) {
+        setExtractError(out.error || 'Could not read roof data from this plan');
+        setExtracting(false);
+        clearTimeout(stageTimer);
+        return;
+      }
+      // Default all extracted fields to "use" (checked); user can uncheck per row.
+      const d = out.data;
+      const defaults = {
+        extracted_pitch: d.pitch != null,
+        extracted_sheathing_sf: d.sheathing_area_sf != null,
+        extracted_valley_lf: d.valley_lf != null,
+        extracted_ridge_lf: d.ridge_lf != null,
+        extracted_hip_lf: d.hip_ridge_lf != null,
+        extracted_fascia_lf: d.fascia_lf != null,
+        roof_width_ft: d.roof_width_ft != null,
+        roof_depth_ft: d.roof_depth_ft != null,
+      };
+      setExtractFieldsChecked(defaults);
+      setExtractResult(out);
+    } catch (e) {
+      setExtractError(e.message || 'Extraction failed');
+    } finally {
+      setExtracting(false);
+      clearTimeout(stageTimer);
+    }
+  }
+  async function applyExtracted() {
+    if (!extractResult?.data) return;
+    const d = extractResult.data;
+    const body = {};
+    if (extractFieldsChecked.extracted_pitch && d.pitch) body.extracted_pitch = d.pitch;
+    if (extractFieldsChecked.extracted_sheathing_sf && d.sheathing_area_sf != null) body.extracted_sheathing_sf = d.sheathing_area_sf;
+    if (extractFieldsChecked.extracted_valley_lf && d.valley_lf != null) body.extracted_valley_lf = d.valley_lf;
+    if (extractFieldsChecked.extracted_ridge_lf && d.ridge_lf != null) body.extracted_ridge_lf = d.ridge_lf;
+    if (extractFieldsChecked.extracted_hip_lf && d.hip_ridge_lf != null) body.extracted_hip_lf = d.hip_ridge_lf;
+    if (extractFieldsChecked.extracted_fascia_lf && d.fascia_lf != null) body.extracted_fascia_lf = d.fascia_lf;
+    if (body.extracted_pitch && extractApplyPitchToSections) body.apply_pitch_to_sections = true;
+    if (Object.keys(body).length === 0) { setExtractResult(null); return; }
+    try {
+      await api.applyExtractedRoofData(projectId, body);
+      // Reflect updated extracted_* on local projectSettings so the badge UI
+      // refreshes without a full project refetch.
+      const settingsPatch = { ...body };
+      delete settingsPatch.apply_pitch_to_sections;
+      onProjectSettingsChange?.(settingsPatch);
+      // If we pushed pitch onto existing sections, refetch them.
+      if (body.apply_pitch_to_sections) await loadAll();
+      onMaterialsChanged?.();
+      showToast('Roof data applied from PDF');
+      setExtractResult(null);
+    } catch (e) {
+      setExtractError(e.message);
+    }
+  }
+  async function clearExtracted() {
+    if (!confirm('Clear all extracted roof values? The material list will revert to polygon-calculated quantities.')) return;
+    try {
+      await api.clearExtractedRoofData(projectId);
+      onProjectSettingsChange?.({
+        extracted_pitch: null,
+        extracted_sheathing_sf: null,
+        extracted_valley_lf: null,
+        extracted_ridge_lf: null,
+        extracted_hip_lf: null,
+        extracted_fascia_lf: null,
+      });
+      onMaterialsChanged?.();
+      showToast('Extracted values cleared');
+    } catch (e) { setError(e.message); }
   }
 
   async function patchLegacyRoof(patch) {
@@ -1041,6 +1157,17 @@ export default function RoofSketch({
         draftLen={draftCorners.length}
       />
 
+      <AIExtractionBar
+        hasArchPdf={hasArchPdf}
+        hasTrussPdf={hasTrussPdf}
+        hasAnyExtracted={hasAnyExtracted}
+        extracting={extracting}
+        onUploadTruss={uploadTrussPdf}
+        onDeleteTruss={deleteTrussPdf}
+        onExtract={runExtract}
+        onClearExtracted={clearExtracted}
+      />
+
       <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
         <div ref={wrapRef} style={{ flex: 1, position: 'relative', border: '1px solid #E0E0E0', borderRadius: 4, overflow: 'hidden', background: '#FAFAFA' }}>
           <canvas
@@ -1086,6 +1213,43 @@ export default function RoofSketch({
               fontSize: 13, borderRadius: 6, pointerEvents: 'none',
               boxShadow: '0 4px 12px rgba(0,0,0,0.2)', maxWidth: '80%',
             }}>{toast}</div>
+          )}
+          {extracting && (
+            <div style={{
+              position: 'absolute', inset: 0,
+              background: 'rgba(250,250,250,0.85)',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              gap: 12, zIndex: 50,
+            }}>
+              <div style={{
+                width: 36, height: 36, border: '3px solid #E0E0E0',
+                borderTopColor: '#CC0000', borderRadius: '50%',
+                animation: 'spin 1s linear infinite',
+              }} />
+              <div style={{ fontSize: 14, fontWeight: 500, color: '#1A1A1A' }}>
+                {extractStage || 'Reading roof plan…'}
+              </div>
+              <style>{'@keyframes spin{to{transform:rotate(360deg)}}'}</style>
+            </div>
+          )}
+          {extractError && !extracting && (
+            <div style={{
+              position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
+              padding: '0.5rem 0.9rem',
+              background: '#FEF2F2', color: '#991B1B',
+              border: '1px solid #FECACA', borderRadius: 6,
+              fontSize: 13, maxWidth: '80%', boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+              zIndex: 51,
+            }}>
+              {extractError}
+              <button
+                onClick={() => setExtractError('')}
+                style={{
+                  marginLeft: 10, background: 'transparent', border: 'none',
+                  color: '#991B1B', cursor: 'pointer', fontSize: 14, fontWeight: 700,
+                }}
+              >×</button>
+            </div>
           )}
         </div>
 
@@ -1136,7 +1300,204 @@ export default function RoofSketch({
         );
       })()}
 
+      {extractResult?.data && (
+        <ExtractionResultModal
+          result={extractResult}
+          checked={extractFieldsChecked}
+          setChecked={setExtractFieldsChecked}
+          applyPitchToSections={extractApplyPitchToSections}
+          setApplyPitchToSections={setExtractApplyPitchToSections}
+          hasSections={sections.length > 0}
+          onApply={applyExtracted}
+          onCancel={() => setExtractResult(null)}
+        />
+      )}
+
       {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+// ---------- AI extraction bar (above canvas) ----------
+function AIExtractionBar({
+  hasArchPdf, hasTrussPdf, hasAnyExtracted, extracting,
+  onUploadTruss, onDeleteTruss, onExtract, onClearExtracted,
+}) {
+  const trussInputRef = useRef(null);
+  const canExtract = (hasArchPdf || hasTrussPdf) && !extracting;
+  const extractTitle = !hasArchPdf && !hasTrussPdf
+    ? 'Upload an architectural or truss PDF first'
+    : extracting ? 'Extraction in progress…' : 'Extract roof measurements from the uploaded PDF(s)';
+  return (
+    <div className="card" style={{
+      display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center',
+      padding: '0.4rem 0.6rem', marginBottom: '0.4rem',
+    }}>
+      <input
+        ref={trussInputRef} type="file" accept="application/pdf" style={{ display: 'none' }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onUploadTruss(f);
+          e.target.value = '';
+        }}
+      />
+      <button
+        type="button"
+        className={hasTrussPdf ? 'secondary' : 'secondary'}
+        onClick={() => trussInputRef.current?.click()}
+        title={hasTrussPdf
+          ? 'Replace the uploaded engineered truss layout PDF'
+          : 'Upload your engineered truss layouts for more accurate AI extraction'}
+        style={{ padding: '0.4rem 0.7rem', fontSize: '0.85rem' }}
+      >
+        {hasTrussPdf ? '↻ Replace Truss Layouts' : '⬆ Upload Truss Layouts'}
+      </button>
+      {hasTrussPdf && (
+        <button
+          type="button"
+          className="secondary"
+          onClick={onDeleteTruss}
+          title="Remove the engineered truss layout PDF"
+          style={{ padding: '0.4rem 0.55rem', fontSize: '0.85rem', color: '#991B1B', borderColor: '#FECACA' }}
+        >×</button>
+      )}
+      <button
+        type="button"
+        className="primary"
+        disabled={!canExtract}
+        onClick={onExtract}
+        title={extractTitle}
+        style={{
+          padding: '0.4rem 0.85rem', fontSize: '0.85rem',
+          opacity: canExtract ? 1 : 0.55, cursor: canExtract ? 'pointer' : 'not-allowed',
+        }}
+      >✨ Extract from PDF</button>
+      <span className="muted" style={{ fontSize: '0.8rem', marginLeft: '0.25rem' }}>
+        {hasTrussPdf && hasArchPdf
+          ? 'Using both PDFs (architectural + truss).'
+          : hasTrussPdf
+            ? 'Using truss layouts.'
+            : hasArchPdf
+              ? 'Using architectural PDF. Upload truss layouts for higher accuracy.'
+              : 'Upload an architectural or truss PDF to enable.'}
+      </span>
+      <span style={{ flex: 1 }} />
+      {hasAnyExtracted && (
+        <button
+          type="button"
+          onClick={onClearExtracted}
+          title="Revert roof line items back to polygon-calculated quantities"
+          style={{
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            color: '#6B7280', fontSize: '0.8rem', textDecoration: 'underline',
+            padding: '0.25rem 0.5rem',
+          }}
+        >Clear extracted values</button>
+      )}
+    </div>
+  );
+}
+
+// ---------- Extraction confirmation modal ----------
+function ExtractionResultModal({
+  result, checked, setChecked, applyPitchToSections, setApplyPitchToSections,
+  hasSections, onApply, onCancel,
+}) {
+  const d = result.data;
+  const conf = d.confidence || 'medium';
+  const confColor =
+    conf === 'high' ? { bg: '#DCFCE7', fg: '#166534', border: '#86EFAC' } :
+    conf === 'low'  ? { bg: '#FFEDD5', fg: '#9A3412', border: '#FDBA74' } :
+                      { bg: '#FEF9C3', fg: '#854D0E', border: '#FDE68A' };
+  const rows = [
+    { key: 'extracted_pitch',         label: 'Pitch',           value: d.pitch,             unit: '' },
+    { key: 'extracted_sheathing_sf',  label: 'Sheathing area',  value: d.sheathing_area_sf, unit: 'sf' },
+    { key: 'extracted_valley_lf',     label: 'Valley length',   value: d.valley_lf,         unit: 'lf' },
+    { key: 'extracted_ridge_lf',      label: 'Ridge length',    value: d.ridge_lf,          unit: 'lf' },
+    { key: 'extracted_hip_lf',        label: 'Hip ridge',       value: d.hip_ridge_lf,      unit: 'lf' },
+    { key: 'extracted_fascia_lf',     label: 'Fascia',          value: d.fascia_lf,         unit: 'lf' },
+    { key: 'roof_width_ft',           label: 'Roof width',      value: d.roof_width_ft,     unit: 'ft' },
+    { key: 'roof_depth_ft',           label: 'Roof depth',      value: d.roof_depth_ft,     unit: 'ft' },
+  ];
+  const anyValueAvailable = rows.some((r) => r.value != null);
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1200,
+    }}>
+      <div className="card" style={{ maxWidth: 560, width: '100%', padding: '1.25rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: '0.75rem' }}>
+          <strong style={{ fontSize: '1.05rem', flex: 1 }}>Roof Data Extracted</strong>
+          <span style={{
+            padding: '2px 10px', fontSize: 11, fontWeight: 600,
+            color: confColor.fg, background: confColor.bg,
+            border: `1px solid ${confColor.border}`, borderRadius: 4,
+            textTransform: 'capitalize',
+          }}>{conf} confidence</span>
+        </div>
+        {!anyValueAvailable && (
+          <p className="muted" style={{ marginTop: 0 }}>
+            No clear roof measurements were found on this plan. You can still apply nothing, or cancel and upload a truss layout for better results.
+          </p>
+        )}
+        {anyValueAvailable && (
+          <table style={{ width: '100%', fontSize: '0.9rem' }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: 'left' }}>Field</th>
+                <th style={{ textAlign: 'left' }}>Extracted</th>
+                <th style={{ width: 60, textAlign: 'center' }}>Use?</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const isPresent = r.value != null;
+                const disabled = !isPresent;
+                return (
+                  <tr key={r.key}>
+                    <td>{r.label}</td>
+                    <td>{isPresent
+                      ? <strong>{typeof r.value === 'number' ? r.value.toLocaleString() : r.value}{r.unit ? ` ${r.unit}` : ''}</strong>
+                      : <span className="muted">—</span>}
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      <input
+                        type="checkbox"
+                        checked={!!checked[r.key] && isPresent}
+                        disabled={disabled}
+                        onChange={(e) => setChecked({ ...checked, [r.key]: e.target.checked })}
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        {checked.extracted_pitch && d.pitch && hasSections && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: '0.75rem', fontSize: '0.85rem', textTransform: 'none', letterSpacing: 0, fontWeight: 400, color: '#1A1A1A' }}>
+            <input type="checkbox" checked={applyPitchToSections}
+              onChange={(e) => setApplyPitchToSections(e.target.checked)} />
+            Also update pitch on existing roof sections ({d.pitch})
+          </label>
+        )}
+        {d.notes && (
+          <div style={{
+            marginTop: '0.85rem', padding: '0.6rem 0.75rem',
+            background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 6,
+            fontSize: '0.85rem', color: '#374151', lineHeight: 1.45,
+          }}>
+            <strong style={{ display: 'block', marginBottom: 4, color: '#1A1A1A' }}>Notes from extraction</strong>
+            {d.notes}
+          </div>
+        )}
+        <div className="row" style={{ marginTop: '1rem' }}>
+          <button className="primary" onClick={onApply} disabled={!anyValueAvailable}>
+            Apply to Roof
+          </button>
+          <button className="secondary" onClick={onCancel}>Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }

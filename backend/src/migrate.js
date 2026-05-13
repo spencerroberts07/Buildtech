@@ -406,6 +406,19 @@ const PROJECT_COLUMN_ALTERS = [
   // Per-section ridge direction override. 'auto' (default) picks the long
   // axis of the bounding box; 'horizontal' / 'vertical' force the ridge.
   `ALTER TABLE roof_sections ADD COLUMN IF NOT EXISTS ridge_direction TEXT DEFAULT 'auto'`,
+  // Engineered truss layout PDF — separate from the architectural pdf_filename
+  // so the AI extractor can read both when present (truss drawings carry the
+  // precise linear footages that architectural plans usually omit).
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS truss_pdf_filename TEXT`,
+  // AI-extracted roof measurement overrides. NULL = no override (material list
+  // falls back to polygon-calculated values). Cleared via the "Clear extracted
+  // values" UI action.
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_pitch TEXT`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_sheathing_sf NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_valley_lf NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_ridge_lf NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_hip_lf NUMERIC`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS extracted_fascia_lf NUMERIC`,
 ];
 
 const SKU_CATALOG_SEED = [
