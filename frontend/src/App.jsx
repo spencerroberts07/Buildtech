@@ -37,7 +37,7 @@ function useAuth() {
 export function BuildTekLogo({ size = 48 }) {
   return (
     <img
-      src="/buildtek-logo.svg"
+      src="/buildtek-logo.svg?v=2"
       alt="BuildTek"
       height={size}
       style={{ height: size, width: 'auto', display: 'block' }}
