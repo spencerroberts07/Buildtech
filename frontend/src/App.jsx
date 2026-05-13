@@ -31,83 +31,24 @@ function useAuth() {
   return { token, user, login, logout };
 }
 
-export function BuildTekLogo({ size = 36 }) {
+// Full BuildTek lockup (icon + wordmark) served as a static SVG file from
+// /public so the 449KB PNG-in-SVG payload doesn't bloat the JS bundle.
+// `size` controls height; width auto-scales from the artwork's aspect ratio.
+export function BuildTekLogo({ size = 40 }) {
   return (
-    <svg
-      viewBox="0 0 40 40"
-      xmlns="http://www.w3.org/2000/svg"
-      width={size}
+    <img
+      src="/buildtek-logo.svg"
+      alt="BuildTek"
       height={size}
-      aria-hidden="true"
-    >
-      {/* Angular B silhouette with two cutouts (even-odd fills the cutouts as transparent) */}
-      <path
-        fill="white"
-        fillRule="evenodd"
-        d="
-          M5 3
-          L24 3
-          L31 9
-          L31 17
-          L27 20
-          L31 23
-          L31 33
-          L24 37
-          L5 37
-          Z
-          M11 8
-          L11 18
-          L23 18
-          L26 15
-          L26 11
-          L23 8
-          Z
-          M11 22
-          L11 32
-          L23 32
-          L26 29
-          L26 25
-          L23 22
-          Z
-        "
-      />
-      {/* Stylized building/skyline inside the lower cutout: three ascending towers with peaked tops */}
-      <path
-        fill="white"
-        d="
-          M13 31
-          L13 28
-          L15 26
-          L15 31
-          Z
-          M16 31
-          L16 25
-          L18 23
-          L18 31
-          Z
-          M19 31
-          L19 22
-          L21 20
-          L21 31
-          Z
-          M22 31
-          L22 26
-          L24 26
-          L24 31
-          Z
-        "
-      />
-    </svg>
+      style={{ height: size, width: 'auto', display: 'block' }}
+    />
   );
 }
 
 function BrandLogo() {
   return (
     <div className="brand">
-      <div className="brand-mark" aria-hidden="true">
-        <BuildTekLogo size={36} />
-      </div>
-      <span className="brand-text">BuildTek</span>
+      <BuildTekLogo size={40} />
     </div>
   );
 }

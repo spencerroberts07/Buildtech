@@ -98,22 +98,7 @@ h2 { font-size: 16px; font-weight: 600; margin-top: 2rem; color: var(--color-tex
 }
 
 /* Brand */
-.brand { display: flex; align-items: center; gap: 12px; }
-.brand-mark {
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-}
-.brand-mark svg { display: block; }
-.brand-text {
-  color: white;
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: -0.5px;
-}
+.brand { display: flex; align-items: center; }
 
 /* ---------- Sidebar ---------- */
 .app-sidebar {
@@ -438,13 +423,6 @@ tr.material-row.deleted-row td {
 .login-brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  color: white;
-}
-.login-brand .brand-text {
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: -0.5px;
 }
 .login-wrap {
   width: 100%;
@@ -507,5 +485,4 @@ tr.material-row td:first-child {
   .app-sidebar { display: none; }
   .container { padding: 1rem; }
   .topbar { padding: 0 1rem; }
-  .brand-text { font-size: 18px; }
 }
