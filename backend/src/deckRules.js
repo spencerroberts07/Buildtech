@@ -6,29 +6,72 @@
 const num = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
 
 export const DECK_SECTION = 'Deck';
+
+// Category labels are exact strings so the material list renders the
+// breakdown the user expects (Posts vs Post Caps vs Beam, etc.) rather
+// than collapsing every framing row under a single "Posts & Beams" bucket.
+// Footing label is dynamic to surface the footing type chosen.
 export const DECK_CATEGORIES = {
-  FOOTINGS:        'Footings',
-  POSTS_AND_BEAMS: 'Posts & Beams',
-  LEDGER:          'Ledger',
-  JOISTS:          'Joists & Framing',
-  DECKING:         'Decking',
-  FASCIA:          'Fascia',
-  RAILING:         'Railing',
-  STAIRS:          'Stairs',
-  HARDWARE:        'Hardware',
-  FASTENERS:       'Fasteners',
+  FOOTINGS_DECK_BLOCKS: 'Footings — Deck Blocks',
+  FOOTINGS_SONOTUBE:    'Footings — Sonotube',
+  FOOTINGS_CONCRETE:    'Footings — Concrete',
+  POSTS:                'Posts',
+  POST_CAPS:            'Post Caps',
+  POST_BASES:           'Post Bases',
+  BEAM:                 'Beam',
+  BEAM_HARDWARE:        'Beam Hardware',
+  LEDGER:               'Ledger',
+  LEDGER_HARDWARE:      'Ledger Hardware',
+  JOISTS:               'Joists',
+  RIM_JOISTS:           'Rim Joists',
+  BLOCKING:             'Blocking',
+  JOIST_HANGERS:        'Joist Hangers',
+  JOIST_HARDWARE:       'Joist Hardware',
+  DECKING_BOARDS:       'Decking Boards',
+  FASCIA_BOARDS:        'Fascia Boards',
+  DECK_FASTENERS:       'Deck Fasteners',
+  RAILING_POSTS:        'Railing — Posts',
+  RAILING_TOP_RAIL:     'Railing — Top Rail',
+  RAILING_TOP_CAP:      'Railing — Top Cap',
+  RAILING_BOTTOM_RAIL:  'Railing — Bottom Rail',
+  RAILING_BALUSTERS:    'Railing — Balusters',
+  RAILING_HARDWARE:     'Railing — Hardware',
+  RAILING_ALUMINUM:     'Railing — Aluminum Package',
+  STAIRS_STRINGERS:     'Stairs — Stringers',
+  STAIRS_RISERS:        'Stairs — Risers',
+  STAIRS_TREADS:        'Stairs — Treads',
+  STAIRS_HARDWARE:      'Stairs — Hardware',
 };
 export const DECK_CATEGORY_ORDER = [
-  DECK_CATEGORIES.FOOTINGS,
-  DECK_CATEGORIES.POSTS_AND_BEAMS,
+  DECK_CATEGORIES.FOOTINGS_DECK_BLOCKS,
+  DECK_CATEGORIES.FOOTINGS_SONOTUBE,
+  DECK_CATEGORIES.FOOTINGS_CONCRETE,
+  DECK_CATEGORIES.POSTS,
+  DECK_CATEGORIES.POST_CAPS,
+  DECK_CATEGORIES.POST_BASES,
+  DECK_CATEGORIES.BEAM,
+  DECK_CATEGORIES.BEAM_HARDWARE,
   DECK_CATEGORIES.LEDGER,
+  DECK_CATEGORIES.LEDGER_HARDWARE,
   DECK_CATEGORIES.JOISTS,
-  DECK_CATEGORIES.DECKING,
-  DECK_CATEGORIES.FASCIA,
-  DECK_CATEGORIES.RAILING,
-  DECK_CATEGORIES.STAIRS,
-  DECK_CATEGORIES.HARDWARE,
-  DECK_CATEGORIES.FASTENERS,
+  DECK_CATEGORIES.RIM_JOISTS,
+  DECK_CATEGORIES.BLOCKING,
+  DECK_CATEGORIES.JOIST_HANGERS,
+  DECK_CATEGORIES.JOIST_HARDWARE,
+  DECK_CATEGORIES.DECKING_BOARDS,
+  DECK_CATEGORIES.FASCIA_BOARDS,
+  DECK_CATEGORIES.DECK_FASTENERS,
+  DECK_CATEGORIES.RAILING_POSTS,
+  DECK_CATEGORIES.RAILING_TOP_RAIL,
+  DECK_CATEGORIES.RAILING_TOP_CAP,
+  DECK_CATEGORIES.RAILING_BOTTOM_RAIL,
+  DECK_CATEGORIES.RAILING_BALUSTERS,
+  DECK_CATEGORIES.RAILING_HARDWARE,
+  DECK_CATEGORIES.RAILING_ALUMINUM,
+  DECK_CATEGORIES.STAIRS_STRINGERS,
+  DECK_CATEGORIES.STAIRS_RISERS,
+  DECK_CATEGORIES.STAIRS_TREADS,
+  DECK_CATEGORIES.STAIRS_HARDWARE,
 ];
 
 // Waste factor defaults. The materialListBuilder loads these from
@@ -118,16 +161,16 @@ const GRAVEL_BAG_NAME       = 'GRAVEL 3/4" CLEAR 30KG BAG';
 const LAG_BOLT_NAME         = 'LAG BOLT 1/2" X 4" HDG';
 const LAG_WASHER_NAME       = 'LAG WASHER 1/2" HDG';
 const CARRIAGE_BOLT_6_NAME  = 'CARRIAGE BOLT 1/2" X 6" HDG';
-const CARRIAGE_BOLT_5_NAME  = 'CARRIAGE BOLT 1/2" X 5" HDG';
 const FLAT_WASHER_NAME      = 'FLAT WASHER 1/2" HDG';
 const HEX_NUT_NAME          = 'HEX NUT 1/2" HDG';
 const STRUCT_SCREW_NAME     = 'STRUCTURAL SCREW 1/4" X 4"';
 const LEDGER_FLASHING_NAME  = 'LEDGER FLASHING ALUMINUM (LF)';
 const JOIST_HANGER_NAILS    = 'JOIST HANGER NAILS 1-1/2" (LB)';
-const HURRICANE_TIE_NAME    = 'TIE,HURRICANE 18GA ZMAX H1Z';
 const JOIST_TAPE_NAME       = 'JOIST TAPE 1-5/8" X 75FT';
-const DECK_SCREWS_350       = 'DECK SCREWS 2-1/2" SQUARE 350/BX';
-const RAILING_SCREWS_BX     = 'WOOD SCREWS 2-1/2" SQUARE 350/BX';
+// Deck screws come in a 5lb box (1750 ct). 350ct boxes are too small for
+// real deck work — using them inflates SKU counts on every project.
+const DECK_SCREWS_NAME      = 'DECK SCREWS 2-1/2" SQUARE 1750/BX';
+const DECK_SCREWS_PER_BOX   = 1750;
 const BALUSTER_NAME         = '2 X 2 X 36 PT BALUSTER';
 const STAIR_BRACKET_NAME    = 'STAIR ANGLE BRACKET HDG';
 const STAIR_PRECUT_NAME     = (steps) => `PRE-CUT STRINGER ${steps}-STEP PT`;
@@ -167,7 +210,6 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
   const footingType    = deck.footing_type || 'deck_block';
   const deckingSize    = deck.decking_size || '5/4x6';
   const deckingPattern = deck.decking_pattern || 'perpendicular';
-  const includeRailing = deck.include_railing !== false && !deck.composite_package /* composite carries its own railing — wood railing math still applies if user opted in */;
   const railingType    = deck.railing_type || 'wood';
   const railingPostSpacing = num(deck.railing_post_spacing_ft) ?? 6.0;
   const includeFascia  = deck.fascia_board !== false;
@@ -199,13 +241,23 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
     }
   }
 
-  // Effective beam length = ledger length (beam runs parallel at distance).
-  // For L-shapes with two non-collinear ledger edges this is approximate;
-  // good enough for an estimate.
-  const beamLf = ledgerLf > 0 ? ledgerLf : (deckArea > 0 ? Math.sqrt(deckArea) : 0);
-  // Deck depth = area / beam-line length (approximation for non-rectangular).
-  const deckDepthFt = beamLf > 0 ? (deckArea / beamLf) : 0;
-  const deckWidthFt = beamLf; // parallel to ledger
+  // Deck width = parallel to the ledger (= the ledger run length).
+  // Deck depth = perpendicular distance from ledger to far edge, derived
+  // from area / width. Both are approximations for non-rectangular shapes
+  // — adequate for an estimate.
+  const deckWidthFt = ledgerLf > 0 ? ledgerLf : (deckArea > 0 ? Math.sqrt(deckArea) : 0);
+  const deckDepthFt = deckWidthFt > 0 ? (deckArea / deckWidthFt) : 0;
+
+  // Beam placement / count:
+  //   depth ≤ post_spacing      → 1 beam at the outer rim (acts as a
+  //                                doubled-up rim/beam supported by posts)
+  //   post_spacing < depth ≤ 2× → 1 beam at post_spacing from the ledger,
+  //                                outer portion cantilevers (≤ 2ft on 2x8)
+  //   depth > 2× post_spacing   → 2 beams (one at post_spacing, one at 2×)
+  // Beam length per beam is always = deckWidthFt; the count is what scales
+  // with depth, and posts scale 1:1 with beams.
+  const beamCount = deckDepthFt > 2 * postSpacingFt ? 2 : 1;
+  const beamLfPerBeam = deckWidthFt;
 
   const items = [];
   const add = (category, name, unit, quantity) => {
@@ -214,32 +266,33 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
   };
 
   // ---------- posts ----------
-  const postsAlongBeam = Math.max(2, Math.ceil(beamLf / postSpacingFt) + 1);
-  const totalPosts = postsAlongBeam; // L-shape corner posts handled by adding
-                                      // an extra ledger run; out of scope here.
+  const postsPerBeam = Math.max(2, Math.ceil(beamLfPerBeam / postSpacingFt) + 1);
+  const totalPosts = postsPerBeam * beamCount;
 
   // ---------- footings ----------
   if (footingType === 'deck_block') {
-    add(DECK_CATEGORIES.FOOTINGS, DECK_BLOCK_NAME, 'EA', totalPosts);
+    add(DECK_CATEGORIES.FOOTINGS_DECK_BLOCKS, DECK_BLOCK_NAME, 'EA', totalPosts);
   } else if (footingType === 'sonotube') {
-    add(DECK_CATEGORIES.FOOTINGS, SONOTUBE_NAME, 'LF', totalPosts * 4.5);
-    add(DECK_CATEGORIES.FOOTINGS, BIGFOOT_NAME, 'EA', totalPosts);
-    add(DECK_CATEGORIES.FOOTINGS, CONCRETE_BAG_NAME, 'BAG', totalPosts * 4 * (1 + dwf(projectSettings, 'concrete')));
-    add(DECK_CATEGORIES.FOOTINGS, GRAVEL_BAG_NAME, 'BAG', totalPosts);
-    add(DECK_CATEGORIES.FOOTINGS, postBaseName(postSize), 'EA', totalPosts);
+    add(DECK_CATEGORIES.FOOTINGS_SONOTUBE, SONOTUBE_NAME, 'LF', totalPosts * 4.5);
+    add(DECK_CATEGORIES.FOOTINGS_SONOTUBE, BIGFOOT_NAME, 'EA', totalPosts);
+    add(DECK_CATEGORIES.FOOTINGS_SONOTUBE, CONCRETE_BAG_NAME, 'BAG', totalPosts * 4 * (1 + dwf(projectSettings, 'concrete')));
+    add(DECK_CATEGORIES.FOOTINGS_SONOTUBE, GRAVEL_BAG_NAME, 'BAG', totalPosts);
   } else if (footingType === 'poured') {
-    add(DECK_CATEGORIES.FOOTINGS, CONCRETE_BAG_NAME, 'BAG', totalPosts * 5 * (1 + dwf(projectSettings, 'concrete')));
-    add(DECK_CATEGORIES.FOOTINGS, GRAVEL_BAG_NAME, 'BAG', totalPosts);
-    add(DECK_CATEGORIES.FOOTINGS, postBaseName(postSize), 'EA', totalPosts);
+    add(DECK_CATEGORIES.FOOTINGS_CONCRETE, CONCRETE_BAG_NAME, 'BAG', totalPosts * 5 * (1 + dwf(projectSettings, 'concrete')));
+    add(DECK_CATEGORIES.FOOTINGS_CONCRETE, GRAVEL_BAG_NAME, 'BAG', totalPosts);
   }
 
-  // ---------- posts (lumber) ----------
+  // ---------- posts (lumber + hardware) ----------
   const embed = footingType === 'deck_block' ? 0.5 : 1.0;
   const postLenFt = deckHeightFt + embed;
   const postLenStd = roundUpLumberLength(postLenFt);
-  add(DECK_CATEGORIES.POSTS_AND_BEAMS, ptLumberName(postSize, postLenStd), 'EA', totalPosts);
-  add(DECK_CATEGORIES.HARDWARE, postCapName(postSize), 'EA', totalPosts);
-  add(DECK_CATEGORIES.FASTENERS, STRUCT_SCREW_NAME, 'EA', totalPosts * 2);
+  add(DECK_CATEGORIES.POSTS, ptLumberName(postSize, postLenStd), 'EA', totalPosts);
+  add(DECK_CATEGORIES.POST_CAPS, postCapName(postSize), 'EA', totalPosts);
+  // Post bases are required for poured / sonotube footings only — deck
+  // blocks have an integrated pocket that holds the post directly.
+  if (footingType === 'sonotube' || footingType === 'poured') {
+    add(DECK_CATEGORIES.POST_BASES, postBaseName(postSize), 'EA', totalPosts);
+  }
 
   // ---------- ledger ----------
   if (ledgerLf > 0) {
@@ -247,27 +300,35 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
     add(DECK_CATEGORIES.LEDGER, ptLumberName(joistSize, 16), 'EA', ledgerBoards);
     // Lag bolts: 16" o.c., two rows staggered.
     const lagsPerRow = Math.ceil(ledgerLf * 12 / 16);
-    add(DECK_CATEGORIES.FASTENERS, LAG_BOLT_NAME, 'EA', lagsPerRow * 2);
-    add(DECK_CATEGORIES.FASTENERS, LAG_WASHER_NAME, 'EA', lagsPerRow * 2);
-    add(DECK_CATEGORIES.LEDGER, LEDGER_FLASHING_NAME, 'LF', ledgerLf);
+    add(DECK_CATEGORIES.LEDGER_HARDWARE, LAG_BOLT_NAME, 'EA', lagsPerRow * 2);
+    add(DECK_CATEGORIES.LEDGER_HARDWARE, LAG_WASHER_NAME, 'EA', lagsPerRow * 2);
+    add(DECK_CATEGORIES.LEDGER_HARDWARE, LEDGER_FLASHING_NAME, 'LF', ledgerLf);
   }
 
   // ---------- beam ----------
-  if (beamLf > 0) {
-    const beamBoards = Math.ceil(beamLf / 16) * beamPly;
-    add(DECK_CATEGORIES.POSTS_AND_BEAMS, ptLumberName(beamSize, 16), 'EA', beamBoards);
-    const beamBolts = Math.ceil(beamLf / 2) * beamPly;
-    add(DECK_CATEGORIES.FASTENERS, CARRIAGE_BOLT_6_NAME, 'EA', beamBolts);
-    add(DECK_CATEGORIES.FASTENERS, FLAT_WASHER_NAME, 'EA', beamBolts * 2);
-    add(DECK_CATEGORIES.FASTENERS, HEX_NUT_NAME, 'EA', beamBolts);
+  // Built-up beam: ceil(length/16) boards × beam_ply × beam_count. Beam
+  // hardware (carriage bolts/washers/nuts + post-to-beam structural
+  // screws) scales the same way.
+  if (beamLfPerBeam > 0) {
+    const beamBoards = Math.ceil(beamLfPerBeam / 16) * beamPly * beamCount;
+    add(DECK_CATEGORIES.BEAM, ptLumberName(beamSize, 16), 'EA', beamBoards);
+    const beamBolts = Math.ceil(beamLfPerBeam / 2) * beamPly * beamCount;
+    add(DECK_CATEGORIES.BEAM_HARDWARE, CARRIAGE_BOLT_6_NAME, 'EA', beamBolts);
+    add(DECK_CATEGORIES.BEAM_HARDWARE, FLAT_WASHER_NAME, 'EA', beamBolts * 2);
+    add(DECK_CATEGORIES.BEAM_HARDWARE, HEX_NUT_NAME, 'EA', beamBolts);
+    // Structural screws fasten post cap to beam (2 per post).
+    add(DECK_CATEGORIES.BEAM_HARDWARE, STRUCT_SCREW_NAME, 'EA', totalPosts * 2);
   }
 
   // ---------- joists ----------
-  // Spec formula: ceil(deck_depth_ft × 12 / joist_spacing_inches) + 1 per bay.
-  // Joist length = round up deck_depth (the perpendicular span between
-  // ledger and beam line). For the 16×12 test: 12 × 12 / 16 = 9 → +1 = 10.
-  const joistCount = beamLf > 0
-    ? (Math.ceil(deckDepthFt * 12 / joistSpacingIn) + 1)
+  // Joists run PERPENDICULAR to the ledger:
+  //   joist LENGTH = deck_depth  (spans from ledger to beam/outer rim)
+  //   joist COUNT  = ceil(deck_width × 12 / spacing) + 1  (one at each
+  //                                                        spacing along
+  //                                                        the ledger, plus
+  //                                                        the end joist)
+  const joistCount = deckWidthFt > 0
+    ? (Math.ceil(deckWidthFt * 12 / joistSpacingIn) + 1)
     : 0;
   const joistLenStd = roundUpLumberLength(deckDepthFt);
   if (joistCount > 0) {
@@ -281,42 +342,49 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
   // Rim joists run the full free perimeter (around all non-ledger edges).
   if (freePerimeterLf > 0) {
     const rimBoards = Math.ceil(freePerimeterLf / 16);
-    add(DECK_CATEGORIES.JOISTS, ptLumberName(joistSize, 16), 'EA', rimBoards);
+    add(DECK_CATEGORIES.RIM_JOISTS, ptLumberName(joistSize, 16), 'EA', rimBoards);
   }
-  // Mid-span blocking row when deck depth > 8ft.
+  // Mid-span blocking row only when deck depth exceeds 8ft. Shallower
+  // decks don't need blocking (joists span without lateral support).
   if (deckDepthFt > 8 && deckWidthFt > 0) {
     const blockingBoards = Math.ceil(deckWidthFt / 16);
-    add(DECK_CATEGORIES.JOISTS, ptLumberName(joistSize, 16), 'EA', blockingBoards);
+    add(DECK_CATEGORIES.BLOCKING, ptLumberName(joistSize, 16), 'EA', blockingBoards);
   }
-  // Joist hangers (ledger side only; beam side sits on top).
+  // Joist hangers (ledger side only; beam side sits on top of beam).
+  // One hanger per joist, regardless of beam direction.
   if (joistCount > 0 && ledgerLf > 0) {
-    add(DECK_CATEGORIES.HARDWARE, joistHangerName(joistSize), 'EA', joistCount);
-    add(DECK_CATEGORIES.FASTENERS, JOIST_HANGER_NAILS, 'LB', Math.ceil(joistCount * 8 / 100));
+    add(DECK_CATEGORIES.JOIST_HANGERS, joistHangerName(joistSize), 'EA', joistCount);
+    add(DECK_CATEGORIES.JOIST_HARDWARE, JOIST_HANGER_NAILS, 'LB', Math.ceil(joistCount * 8 / 100));
   }
   if (joistCount > 0) {
-    add(DECK_CATEGORIES.HARDWARE, HURRICANE_TIE_NAME, 'EA', joistCount);
     // Joist tape rolls @ 75LF each, covering joist + ledger + rim tops.
     const tapeLf = joistCount * joistLenStd + ledgerLf + freePerimeterLf;
-    add(DECK_CATEGORIES.HARDWARE, JOIST_TAPE_NAME, 'RL', Math.ceil(tapeLf / 75));
+    add(DECK_CATEGORIES.JOIST_HARDWARE, JOIST_TAPE_NAME, 'RL', Math.ceil(tapeLf / 75));
   }
 
   // ---------- decking ----------
+  // Track boards_needed at outer scope so the deck-screw calculation can
+  // reuse it. boardsNeededForScrews = the perpendicular row count (used
+  // even for parallel/boxed patterns — the screw count is dominated by
+  // joist crossings, which is the same regardless of pattern).
+  let boardsNeededForScrews = 0;
   if (compositePackage) {
-    add(DECK_CATEGORIES.DECKING, COMPOSITE_PKG_NAME, 'SF', deckArea);
+    add(DECK_CATEGORIES.DECKING_BOARDS, COMPOSITE_PKG_NAME, 'SF', deckArea);
   } else if (deckArea > 0) {
     const boardWidthFt = 5.5 / 12;
     const boardGapFt   = 0.125 / 12;
     const effWidth = boardWidthFt + boardGapFt;
     let boardsNeeded, boardLenStd, boardName;
+    // boards_needed (perpendicular row count) used by both the decking
+    // count and the deck-screw count.
+    boardsNeededForScrews = Math.ceil(deckDepthFt / effWidth);
     if (deckingPattern === 'parallel') {
-      boardsNeeded = Math.ceil(deckWidthFt / effWidth);
-      const eachLen = Math.ceil(deckDepthFt / 16) * 16 >= deckDepthFt ? roundUpDeckBoardLength(deckDepthFt) : 16;
-      boardLenStd = eachLen;
+      const rowCount = Math.ceil(deckWidthFt / effWidth);
+      boardLenStd = roundUpDeckBoardLength(deckDepthFt);
       const piecesPerRow = Math.ceil(deckDepthFt / boardLenStd);
-      boardsNeeded = boardsNeeded * piecesPerRow;
+      boardsNeeded = rowCount * piecesPerRow;
       boardName = ptDeckBoardName(deckingSize, boardLenStd);
     } else if (deckingPattern === 'boxed') {
-      // Border (2 rows around perimeter) + perpendicular field inside.
       const borderRows = 2;
       const fieldWidth = Math.max(0, deckWidthFt - borderRows * 2 * boardWidthFt);
       const fieldDepth = Math.max(0, deckDepthFt - borderRows * 2 * boardWidthFt);
@@ -324,34 +392,38 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
         ? Math.ceil(fieldDepth / effWidth) * Math.ceil(fieldWidth / 16)
         : 0;
       const borderBoards = Math.ceil(deckPerimeter * borderRows / 16);
-      boardsNeeded = fieldBoards + borderBoards;
+      boardsNeeded = (fieldBoards + borderBoards) * (1 + 0.15); // extra cuts
       boardLenStd = 16;
       boardName = ptDeckBoardName(deckingSize, 16);
-      // Boxed pattern carries higher waste from extra cuts.
-      boardsNeeded = boardsNeeded * (1 + 0.15);
     } else {
       // perpendicular (default)
-      boardsNeeded = Math.ceil(deckDepthFt / effWidth);
+      const rowCount = boardsNeededForScrews;
       boardLenStd = roundUpDeckBoardLength(deckWidthFt);
       const piecesPerRow = Math.ceil(deckWidthFt / boardLenStd);
-      boardsNeeded = boardsNeeded * piecesPerRow;
+      boardsNeeded = rowCount * piecesPerRow;
       boardName = ptDeckBoardName(deckingSize, boardLenStd);
     }
     add(
-      DECK_CATEGORIES.DECKING,
+      DECK_CATEGORIES.DECKING_BOARDS,
       boardName,
       'EA',
       boardsNeeded * (1 + dwf(projectSettings, 'decking'))
     );
-    // Deck screws — ~350 per 100sf, packaged 350/box.
-    const totalScrews = Math.ceil(deckArea / 100 * 350);
-    add(DECK_CATEGORIES.FASTENERS, DECK_SCREWS_350, 'BX', Math.ceil(totalScrews / 350));
   }
 
   // ---------- fascia ----------
   if (includeFascia && freePerimeterLf > 0) {
     const fasciaBoards = Math.ceil(freePerimeterLf / 16);
-    add(DECK_CATEGORIES.FASCIA, ptDeckBoardName(deckingSize, 16), 'EA', fasciaBoards);
+    add(DECK_CATEGORIES.FASCIA_BOARDS, ptDeckBoardName(deckingSize, 16), 'EA', fasciaBoards);
+  }
+
+  // ---------- deck screws ----------
+  // 2 screws per board per joist crossing. boardsNeededForScrews is the
+  // count of decking boards spanning the deck depth (one for each row of
+  // boards across the width). Single line item; box size = 1750.
+  if (joistCount > 0 && boardsNeededForScrews > 0) {
+    const totalScrews = joistCount * boardsNeededForScrews * 2;
+    add(DECK_CATEGORIES.DECK_FASTENERS, DECK_SCREWS_NAME, 'BX', Math.ceil(totalScrews / DECK_SCREWS_PER_BOX));
   }
 
   // ---------- railing ----------
@@ -360,22 +432,27 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
   const wantRailing = (deck.include_railing !== false) || deckHeightFt > 2;
   if (wantRailing && railingLf > 0) {
     if (railingType === 'aluminum') {
-      add(DECK_CATEGORIES.RAILING, ALUMINUM_RAILING_PKG, 'LF', railingLf);
+      add(DECK_CATEGORIES.RAILING_ALUMINUM, ALUMINUM_RAILING_PKG, 'LF', railingLf);
     } else {
       const railingPosts = Math.ceil(railingLf / railingPostSpacing) + 1;
       const railingPostLen = roundUpLumberLength(deckHeightFt + 1.5);
-      add(DECK_CATEGORIES.RAILING, ptLumberName(postSize, railingPostLen), 'EA', railingPosts);
-      const top2x4Boards    = Math.ceil(railingLf / 16);
-      const topCap2x4Boards = Math.ceil(railingLf / 16);
-      const bot2x4Boards    = Math.ceil(railingLf / 16);
-      add(DECK_CATEGORIES.RAILING, ptLumberName('2x4', 16), 'EA', top2x4Boards + topCap2x4Boards + bot2x4Boards);
+      add(DECK_CATEGORIES.RAILING_POSTS, ptLumberName(postSize, railingPostLen), 'EA', railingPosts);
+      // Three 2x4 PT runs along the railing: top rail (face), top cap
+      // (flat), bottom rail (face). Each is split into its own line so
+      // the takeoff makes the breakdown explicit.
+      const railingRunBoards = Math.ceil(railingLf / 16);
+      add(DECK_CATEGORIES.RAILING_TOP_RAIL,    ptLumberName('2x4', 16), 'EA', railingRunBoards);
+      add(DECK_CATEGORIES.RAILING_TOP_CAP,     ptLumberName('2x4', 16), 'EA', railingRunBoards);
+      add(DECK_CATEGORIES.RAILING_BOTTOM_RAIL, ptLumberName('2x4', 16), 'EA', railingRunBoards);
       // Balusters at 4.5" spacing centre-to-centre (4" clear + 0.5" baluster).
-      // Framing waste (typically +10%) handles extra cuts on long runs.
+      // Framing waste handles extra cuts on long runs.
       const balusters = Math.ceil(railingLf * 12 / 4.5) * (1 + dwf(projectSettings, 'framing'));
-      add(DECK_CATEGORIES.RAILING, BALUSTER_NAME, 'EA', balusters);
+      add(DECK_CATEGORIES.RAILING_BALUSTERS, BALUSTER_NAME, 'EA', balusters);
+      // Railing hardware: post bases + screws (reuses the same deck-screw
+      // SKU so the warehouse pulls from one bin).
+      add(DECK_CATEGORIES.RAILING_HARDWARE, postBaseName(postSize), 'EA', railingPosts);
       const railingScrews = Math.ceil(railingLf * 20);
-      add(DECK_CATEGORIES.FASTENERS, RAILING_SCREWS_BX, 'BX', Math.ceil(railingScrews / 350));
-      add(DECK_CATEGORIES.HARDWARE, postBaseName(postSize), 'EA', railingPosts);
+      add(DECK_CATEGORIES.RAILING_HARDWARE, DECK_SCREWS_NAME, 'BX', Math.ceil(railingScrews / DECK_SCREWS_PER_BOX));
     }
   }
 
@@ -387,23 +464,22 @@ export function computeDeckMaterials(deck, deckStairs = [], projectSettings = {}
     const treadMat = stair.tread_material || deckingSize;
     const stringerCount = widthFt <= 3.0 ? 2 : 3;
     if (numSteps <= 6) {
-      add(DECK_CATEGORIES.STAIRS, STAIR_PRECUT_NAME(numSteps), 'EA', stringerCount);
+      add(DECK_CATEGORIES.STAIRS_STRINGERS, STAIR_PRECUT_NAME(numSteps), 'EA', stringerCount);
     } else {
       const runFt = numSteps * 11 / 12;
       const stringerLenRaw = Math.sqrt(runFt * runFt + deckHeightFt * deckHeightFt) + 1;
       const stringerLenStd = Math.ceil(stringerLenRaw / 2) * 2;
-      add(DECK_CATEGORIES.STAIRS, ptLumberName('2x12', stringerLenStd), 'EA', stringerCount);
+      add(DECK_CATEGORIES.STAIRS_STRINGERS, ptLumberName('2x12', stringerLenStd), 'EA', stringerCount);
     }
     // Risers — 2x8 PT, one board per step, length = stair width rounded up.
     const riserLenStd = roundUpLumberLength(Math.max(widthFt, 4));
-    add(DECK_CATEGORIES.STAIRS, ptLumberName('2x8', riserLenStd), 'EA', numSteps);
+    add(DECK_CATEGORIES.STAIRS_RISERS, ptLumberName('2x8', riserLenStd), 'EA', numSteps);
     // Treads — two boards per step, length = stair width.
     const treadLenStd = roundUpLumberLength(Math.max(widthFt, 8));
-    add(DECK_CATEGORIES.STAIRS, ptDeckBoardName(treadMat, treadLenStd), 'EA', numSteps * 2);
-    // Landing pad — 3 bags concrete per staircase.
-    add(DECK_CATEGORIES.FOOTINGS, CONCRETE_BAG_NAME, 'BAG', 3);
-    // Stringer attachment brackets — two per stringer (top).
-    add(DECK_CATEGORIES.HARDWARE, STAIR_BRACKET_NAME, 'EA', stringerCount * 2);
+    add(DECK_CATEGORIES.STAIRS_TREADS, ptDeckBoardName(treadMat, treadLenStd), 'EA', numSteps * 2);
+    // Stairs hardware: angle brackets + landing-pad concrete bags.
+    add(DECK_CATEGORIES.STAIRS_HARDWARE, STAIR_BRACKET_NAME, 'EA', stringerCount * 2);
+    add(DECK_CATEGORIES.STAIRS_HARDWARE, CONCRETE_BAG_NAME, 'BAG', 3);
   }
 
   return items;

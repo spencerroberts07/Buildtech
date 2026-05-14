@@ -11,6 +11,7 @@ function test(name, fn) {
   catch (e) { console.log(`  FAIL  ${name}\n        ${e.message}`); failed++; }
 }
 const findRow = (rows, predicate) => rows.find(predicate);
+const findRows = (rows, predicate) => rows.filter(predicate);
 
 // Disable waste so the spec's pre-waste numbers match directly.
 const NO_WASTE = { wasteFactors: { deck_decking: 0, deck_framing: 0, deck_concrete: 0 }, scaleFtPerGrid: 1 };
@@ -43,64 +44,104 @@ const rectItems = sumMaterials(rectItemsRaw);
 test('all rows land in the Deck section', () => {
   for (const r of rectItems) assert.equal(r.section, 'Deck');
 });
-test('post count: ceil(16/8) + 1 = 3 (4x4 PT posts)', () => {
+test('post count: ceil(16/8) + 1 = 3 (4x4 PT posts, "Posts" category)', () => {
   const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.POSTS_AND_BEAMS && /^4 X 4 X \d+ PRESSURE TREATED$/.test(x.name));
-  assert.ok(r, 'expected 4x4 post row');
+    x.category === DECK_CATEGORIES.POSTS && /^4 X 4 X \d+ PRESSURE TREATED$/.test(x.name));
+  assert.ok(r, 'expected 4x4 post row in Posts category');
   assert.equal(r.quantity, 3);
 });
-test('deck blocks: 1 per post = 3', () => {
+test('deck blocks: 1 per post = 3 ("Footings — Deck Blocks")', () => {
   const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.FOOTINGS && /DECK BLOCK/.test(x.name));
+    x.category === DECK_CATEGORIES.FOOTINGS_DECK_BLOCKS && /DECK BLOCK/.test(x.name));
   assert.equal(r.quantity, 3);
 });
-test('joists: ceil(12 × 12 / 16) + 1 = 10 (2x8 PT @ 12ft)', () => {
+test('joists: ceil(16 × 12 / 16) + 1 = 13 (2x8 PT @ 12ft, uses deck_width)', () => {
   const r = findRow(rectItems, (x) =>
     x.category === DECK_CATEGORIES.JOISTS && x.name === '2 X 8 X 12 PRESSURE TREATED');
   assert.ok(r, 'expected 2 X 8 X 12 PT joist row');
-  assert.equal(r.quantity, 10);
+  assert.equal(r.quantity, 13);
 });
-test('ledger: 1 × 16ft 2x8 PT (16ft of ledger fits one 16ft board)', () => {
+test('joist hangers: equal joist_count = 13 ("Joist Hangers" category)', () => {
+  const r = findRow(rectItems, (x) =>
+    x.category === DECK_CATEGORIES.JOIST_HANGERS && /JOIST HANGER/.test(x.name));
+  assert.equal(r.quantity, 13);
+});
+test('no hurricane ties anywhere in deck output', () => {
+  const hits = findRows(rectItems, (x) => /HURRICANE/.test(x.name));
+  assert.equal(hits.length, 0, 'hurricane ties should not appear on a deck');
+});
+test('ledger: 1 × 16ft 2x8 PT ("Ledger" category, ceil(16/16)=1)', () => {
   const r = findRow(rectItems, (x) =>
     x.category === DECK_CATEGORIES.LEDGER && x.name === '2 X 8 X 16 PRESSURE TREATED');
   assert.equal(r.quantity, 1);
 });
-test('ledger flashing: 16 LF', () => {
-  const r = findRow(rectItems, (x) => /LEDGER FLASHING/.test(x.name));
+test('rim joists: ceil(40/16) = 3 × 2x8x16 PT ("Rim Joists" category)', () => {
+  const r = findRow(rectItems, (x) =>
+    x.category === DECK_CATEGORIES.RIM_JOISTS && x.name === '2 X 8 X 16 PRESSURE TREATED');
+  assert.equal(r.quantity, 3);
+});
+test('blocking: 12ft depth > 8 → 1 row of 2x8x16 ("Blocking" category)', () => {
+  const r = findRow(rectItems, (x) =>
+    x.category === DECK_CATEGORIES.BLOCKING && x.name === '2 X 8 X 16 PRESSURE TREATED');
+  assert.equal(r.quantity, 1);
+});
+test('ledger flashing: 16 LF ("Ledger Hardware")', () => {
+  const r = findRow(rectItems, (x) =>
+    x.category === DECK_CATEGORIES.LEDGER_HARDWARE && /LEDGER FLASHING/.test(x.name));
   assert.equal(r.quantity, 16);
 });
-test('beam: 1 × 16ft × 2 plies = 2 boards (2x10 PT)', () => {
+test('beam: ceil(16/16) × 2 plies × 1 beam = 2 boards ("Beam" category)', () => {
   const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.POSTS_AND_BEAMS && x.name === '2 X 10 X 16 PRESSURE TREATED');
+    x.category === DECK_CATEGORIES.BEAM && x.name === '2 X 10 X 16 PRESSURE TREATED');
   assert.equal(r.quantity, 2);
 });
-test('decking boards: ceil(12 / 0.469) = 26 × 16ft each (5/4 X 6 PT)', () => {
+test('post caps: 1 per post = 3 ("Post Caps" category)', () => {
   const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.DECKING && x.name === '5/4 X 6 X 16 PT DECK BOARD');
+    x.category === DECK_CATEGORIES.POST_CAPS && /POST CAP/.test(x.name));
+  assert.equal(r.quantity, 3);
+});
+test('deck blocks do not get post bases (integrated pocket)', () => {
+  const rows = findRows(rectItems, (x) => x.category === DECK_CATEGORIES.POST_BASES);
+  assert.equal(rows.length, 0);
+});
+test('decking boards: ceil(12 / 0.469) = 26 × 16ft each ("Decking Boards")', () => {
+  const r = findRow(rectItems, (x) =>
+    x.category === DECK_CATEGORIES.DECKING_BOARDS && x.name === '5/4 X 6 X 16 PT DECK BOARD');
   assert.equal(r.quantity, 26);
 });
-test('railing balusters: ceil(40 × 12 / 4.5) = 107', () => {
-  // railing_lf = 16 (rim, opposite ledger) + 12 + 12 (two sides) = 40
+test('deck screws: joist_count × boards_needed × 2 = 13 × 26 × 2 = 676 → 1 box (1750/BX)', () => {
+  // Single deck-screw row in "Deck Fasteners" only; railing hardware row
+  // is separate and lives under "Railing — Hardware".
   const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.RAILING && /BALUSTER/.test(x.name));
+    x.category === DECK_CATEGORIES.DECK_FASTENERS && /DECK SCREWS/.test(x.name));
+  assert.ok(r, 'expected a single deck screws row in Deck Fasteners');
+  assert.match(r.name, /1750\/BX/);
+  assert.equal(r.quantity, 1);
+});
+test('railing balusters: ceil(40 × 12 / 4.5) = 107 ("Railing — Balusters")', () => {
+  const r = findRow(rectItems, (x) =>
+    x.category === DECK_CATEGORIES.RAILING_BALUSTERS && /BALUSTER/.test(x.name));
   assert.equal(r.quantity, 107);
 });
-test('railing posts: ceil(40 / 6) + 1 = 8 (4x4 PT, 6ft length covers 3ft + 1.5ft)', () => {
+test('railing posts: ceil(40 / 6) + 1 = 8, 4x4x8 PT ("Railing — Posts")', () => {
   const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.RAILING && /^4 X 4 X \d+ PRESSURE TREATED$/.test(x.name));
-  assert.ok(r, 'expected railing 4x4 post row');
-  // post length round-up = roundUpLumberLength(3 + 1.5) = 8 (since 4.5 ≤ 8).
+    x.category === DECK_CATEGORIES.RAILING_POSTS && /^4 X 4 X \d+ PRESSURE TREATED$/.test(x.name));
+  assert.ok(r);
   assert.equal(r.name, '4 X 4 X 8 PRESSURE TREATED');
   assert.equal(r.quantity, 8);
 });
-test('no stair rows when deckStairs is empty', () => {
-  const stairRows = rectItems.filter((x) => x.category === DECK_CATEGORIES.STAIRS);
-  assert.equal(stairRows.length, 0);
+test('railing 2x4 runs: 3 separate categories (top rail / top cap / bottom rail), each ceil(40/16)=3', () => {
+  const top    = findRow(rectItems, (x) => x.category === DECK_CATEGORIES.RAILING_TOP_RAIL);
+  const cap    = findRow(rectItems, (x) => x.category === DECK_CATEGORIES.RAILING_TOP_CAP);
+  const bottom = findRow(rectItems, (x) => x.category === DECK_CATEGORIES.RAILING_BOTTOM_RAIL);
+  assert.ok(top && cap && bottom, 'expected all three railing 2x4 categories');
+  assert.equal(top.quantity, 3);
+  assert.equal(cap.quantity, 3);
+  assert.equal(bottom.quantity, 3);
 });
-test('joist hangers: 1 per joist (ledger side) = 10', () => {
-  const r = findRow(rectItems, (x) =>
-    x.category === DECK_CATEGORIES.HARDWARE && /JOIST HANGER/.test(x.name));
-  assert.equal(r.quantity, 10);
+test('no stair rows when deckStairs is empty', () => {
+  const stairRows = rectItems.filter((x) => /^Stairs — /.test(x.category || ''));
+  assert.equal(stairRows.length, 0);
 });
 
 // ---------- Test 2: same deck + one 36"-wide staircase ----------
@@ -110,33 +151,37 @@ const stairs = [{ width_ft: 3.0, edge_index: 2, position_fraction: 0.5, tread_ma
 const stairItemsRaw = computeDeckMaterials(rectDeck, stairs, NO_WASTE);
 const stairItems = sumMaterials(stairItemsRaw);
 
-test('num_steps: ceil(3 × 12 / 7) = 6 → 6-step pre-cut stringer × 2 (width = 36")', () => {
+test('num_steps: ceil(3 × 12 / 7) = 6 → 6-step pre-cut stringer × 2 ("Stairs — Stringers")', () => {
   const r = findRow(stairItems, (x) =>
-    x.category === DECK_CATEGORIES.STAIRS && /PRE-CUT STRINGER 6-STEP/.test(x.name));
+    x.category === DECK_CATEGORIES.STAIRS_STRINGERS && /PRE-CUT STRINGER 6-STEP/.test(x.name));
   assert.ok(r, 'expected pre-cut 6-step stringer row');
   assert.equal(r.quantity, 2);
 });
-test('risers: 6 × 2x8 PT (one per step)', () => {
+test('risers: 6 × 2x8 PT, one per step ("Stairs — Risers")', () => {
   const r = findRow(stairItems, (x) =>
-    x.category === DECK_CATEGORIES.STAIRS && /^2 X 8 X \d+ PRESSURE TREATED$/.test(x.name));
+    x.category === DECK_CATEGORIES.STAIRS_RISERS && /^2 X 8 X \d+ PRESSURE TREATED$/.test(x.name));
   assert.ok(r);
   assert.equal(r.quantity, 6);
 });
-test('treads: 12 × 5/4x6 PT deck boards (2 per step × 6)', () => {
+test('treads: 12 × 5/4x6 PT, 2 per step × 6 ("Stairs — Treads")', () => {
   const r = findRow(stairItems, (x) =>
-    x.category === DECK_CATEGORIES.STAIRS && /^5\/4 X 6 X \d+ PT DECK BOARD$/.test(x.name));
+    x.category === DECK_CATEGORIES.STAIRS_TREADS && /^5\/4 X 6 X \d+ PT DECK BOARD$/.test(x.name));
   assert.equal(r.quantity, 12);
 });
-test('stair landing pad: 3 concrete bags per staircase', () => {
-  // The deck itself uses deck_block footings (0 concrete bags), so the
-  // stair landing pad is the only source of CONCRETE MIX rows.
+test('stair landing pad: 3 concrete bags ("Stairs — Hardware")', () => {
   const r = findRow(stairItems, (x) =>
-    x.category === DECK_CATEGORIES.FOOTINGS && /CONCRETE MIX/.test(x.name));
+    x.category === DECK_CATEGORIES.STAIRS_HARDWARE && /CONCRETE MIX/.test(x.name));
   assert.equal(r.quantity, 3);
 });
-test('stair brackets: 2 × stringer_count = 4', () => {
-  const r = findRow(stairItems, (x) => /STAIR ANGLE BRACKET/.test(x.name));
+test('stair brackets: 2 × stringer_count = 4 ("Stairs — Hardware")', () => {
+  const r = findRow(stairItems, (x) =>
+    x.category === DECK_CATEGORIES.STAIRS_HARDWARE && /STAIR ANGLE BRACKET/.test(x.name));
   assert.equal(r.quantity, 4);
+});
+test('joist count unchanged when adding stairs (still 13)', () => {
+  const r = findRow(stairItems, (x) =>
+    x.category === DECK_CATEGORIES.JOISTS && x.name === '2 X 8 X 12 PRESSURE TREATED');
+  assert.equal(r.quantity, 13);
 });
 
 // ---------- Test 3: L-shaped 20x12 with 8x8 cutout ----------
@@ -171,23 +216,33 @@ const lDeck = {
 const lItemsRaw = computeDeckMaterials(lDeck, [], NO_WASTE);
 const lItems = sumMaterials(lItemsRaw);
 
-test('L-shape area = 20×12 − 8×8 = 176 sf (deck blocks reflect post count from 20ft ledger)', () => {
-  // beam_lf = 20, ceil(20/8) + 1 = 4 posts → 4 deck blocks
+test('L-shape posts: 4 (ceil(20/8) + 1) → 4 deck blocks', () => {
   const r = findRow(lItems, (x) =>
-    x.category === DECK_CATEGORIES.FOOTINGS && /DECK BLOCK/.test(x.name));
+    x.category === DECK_CATEGORIES.FOOTINGS_DECK_BLOCKS && /DECK BLOCK/.test(x.name));
   assert.equal(r.quantity, 4);
 });
-test('L-shape: 20ft ledger covered by 2 × 16ft 2x8 PT (ceil(20/16))', () => {
+test('L-shape joists: ceil(20 × 12 / 16) + 1 = 16 (uses deck_width, not depth)', () => {
+  // deck_width = 20 (ledger), so joist_count uses width.
+  // joist_length = round-up(deck_depth) = round-up(176/20=8.8) = 10ft.
+  const r = findRow(lItems, (x) =>
+    x.category === DECK_CATEGORIES.JOISTS && x.name === '2 X 8 X 10 PRESSURE TREATED');
+  assert.ok(r, 'expected 2 X 8 X 10 PT joist row (depth 8.8 rounds up to 10ft)');
+  assert.equal(r.quantity, 16);
+});
+test('L-shape ledger: 20ft covered by ceil(20/16) = 2 × 16ft 2x8 PT ("Ledger" only)', () => {
   const r = findRow(lItems, (x) =>
     x.category === DECK_CATEGORIES.LEDGER && x.name === '2 X 8 X 16 PRESSURE TREATED');
-  // Ledger + possible rim/blocking with same name sum into one row; filter
-  // by category to isolate the ledger contribution.
   assert.equal(r.quantity, 2);
 });
-test('L-shape: beam = ceil(20/16) × 2 plies = 4 boards (2x10 PT 16ft)', () => {
+test('L-shape beam: ceil(20/16) × 2 plies × 1 beam = 4 boards (2x10 PT 16ft)', () => {
+  // depth 8.8 < 2 × post_spacing (16), so still 1 beam.
   const r = findRow(lItems, (x) =>
-    x.category === DECK_CATEGORIES.POSTS_AND_BEAMS && x.name === '2 X 10 X 16 PRESSURE TREATED');
+    x.category === DECK_CATEGORIES.BEAM && x.name === '2 X 10 X 16 PRESSURE TREATED');
   assert.equal(r.quantity, 4);
+});
+test('L-shape: no hurricane ties', () => {
+  const hits = findRows(lItems, (x) => /HURRICANE/.test(x.name));
+  assert.equal(hits.length, 0);
 });
 
 // ---------- detectLedgerEdges ----------
