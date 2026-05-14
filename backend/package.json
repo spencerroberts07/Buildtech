@@ -8,7 +8,8 @@
     "dev": "node --watch src/index.js",
     "migrate": "node src/migrate.js",
     "verify-schema": "node src/verifySchema.js",
-    "test-rules": "node src/wallRules.test.js"
+    "test-rules": "node src/wallRules.test.js",
+    "test-deck": "node src/deckRules.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.2",

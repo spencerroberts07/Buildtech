@@ -12,6 +12,7 @@ import {
   LEVELS,
 } from './wallRules.js';
 import { ensureMaterial } from './materialUpsert.js';
+import { computeDeckMaterials } from './deckRules.js';
 
 // Compute the full material list for a project. Mirrors the GET /:id/material-list
 // behavior so the quote builder can reuse it. Returns the same row shape the route
@@ -55,6 +56,11 @@ export async function computeProjectMaterialList(projectId, options = {}) {
     concrete:   parseFloat(sys.waste_concrete)   || 0.05,
     housewrap:  parseFloat(sys.waste_housewrap)  || 0.10,
     insulation: parseFloat(sys.waste_insulation) || 0.00,
+    // Deck-specific waste factors. Fall back to the spec defaults when the
+    // system_settings rows haven't been migrated in yet on a fresh DB.
+    deck_decking:  parseFloat(sys.deck_waste_decking)  || 0.10,
+    deck_framing:  parseFloat(sys.deck_waste_framing)  || 0.05,
+    deck_concrete: parseFloat(sys.deck_waste_concrete) || 0.05,
   };
 
   // Default settings (Floor 1) used by legacy walls fallback
@@ -295,6 +301,38 @@ export async function computeProjectMaterialList(projectId, options = {}) {
         name: ceilingSheet.name, unit: 'sheet',
         quantity: Math.ceil(areaSf / ceilingSheet.sheetSf) * (1 + wasteFactors.sheet),
       });
+    }
+  }
+
+  // Deck items: load each deck + its stairs, compute via deckRules, append
+  // with a per-deck section name when more than one deck exists so they
+  // render as separate subsections in the material list.
+  const decks = (await query(
+    'SELECT * FROM decks WHERE project_id = $1 ORDER BY id', [id]
+  )).rows;
+  if (decks.length > 0) {
+    const allStairs = (await query(
+      `SELECT s.* FROM deck_stairs s
+       JOIN decks d ON d.id = s.deck_id
+       WHERE d.project_id = $1
+       ORDER BY s.deck_id, s.id`,
+      [id]
+    )).rows;
+    const stairsByDeck = new Map();
+    for (const s of allStairs) {
+      if (!stairsByDeck.has(s.deck_id)) stairsByDeck.set(s.deck_id, []);
+      stairsByDeck.get(s.deck_id).push(s);
+    }
+    const deckSettings = {
+      scaleFtPerGrid: Number(projectRow.scale_ft_per_grid) || 1,
+      wasteFactors,
+    };
+    for (const d of decks) {
+      const sectionLabel = decks.length > 1 ? `Deck — ${d.name || 'Deck'}` : 'Deck';
+      const stairs = stairsByDeck.get(d.id) || [];
+      wallItems.push(
+        ...computeDeckMaterials(d, stairs, deckSettings, { sectionLabel })
+      );
     }
   }
 

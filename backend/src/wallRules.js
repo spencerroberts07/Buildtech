@@ -31,6 +31,7 @@ const BASE_SECTIONS = {
 const SOLO_SECTIONS = {
   EXTERIOR_INSULATION: 'Exterior Insulation',
   INTERIOR_DOORS: 'Interior Doors',
+  DECK: 'Deck',
   ROOF: 'Roof',
   PACKAGES: 'Packages',
 };
@@ -80,6 +81,7 @@ function buildSectionOrder() {
   // sections (so headers/jacks across all floors appear together) and before
   // the standalone Roof / Packages buckets.
   out.push(SOLO_SECTIONS.INTERIOR_DOORS);
+  out.push(SOLO_SECTIONS.DECK);
   out.push(SOLO_SECTIONS.ROOF);
   out.push(SOLO_SECTIONS.PACKAGES);
   return out;
@@ -89,7 +91,14 @@ export const SECTION_ORDER = buildSectionOrder();
 export function sectionRank(section) {
   if (!section) return SECTION_ORDER.length + 1;
   const i = SECTION_ORDER.indexOf(section);
-  return i === -1 ? SECTION_ORDER.length : i;
+  if (i !== -1) return i;
+  // Multi-deck "Deck — <name>" sections share the Deck rank so they all
+  // sort together at the same position as the canonical Deck section.
+  if (typeof section === 'string' && section.startsWith('Deck — ')) {
+    const di = SECTION_ORDER.indexOf(SOLO_SECTIONS.DECK);
+    if (di !== -1) return di;
+  }
+  return SECTION_ORDER.length;
 }
 
 // Per-item category labels (sub-classification within a section).

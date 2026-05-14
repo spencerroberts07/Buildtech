@@ -345,6 +345,48 @@ CREATE TABLE IF NOT EXISTS training_examples (
 
 CREATE INDEX IF NOT EXISTS idx_training_examples_floor ON training_examples(floor_level);
 CREATE INDEX IF NOT EXISTS idx_training_examples_quality ON training_examples(quality_rating);
+
+CREATE TABLE IF NOT EXISTS decks (
+  id SERIAL PRIMARY KEY,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  floor_level TEXT NOT NULL DEFAULT 'floor1',
+  name TEXT NOT NULL DEFAULT 'Deck',
+  corners JSONB NOT NULL DEFAULT '[]'::jsonb,
+  attached_wall_edge JSONB,
+  deck_height_ft NUMERIC NOT NULL DEFAULT 3.0,
+  joist_size TEXT NOT NULL DEFAULT '2x8',
+  joist_spacing_inches INTEGER NOT NULL DEFAULT 16,
+  beam_ply INTEGER NOT NULL DEFAULT 2,
+  beam_size TEXT NOT NULL DEFAULT '2x10',
+  post_size TEXT NOT NULL DEFAULT '4x4',
+  post_spacing_ft NUMERIC NOT NULL DEFAULT 8.0,
+  footing_type TEXT NOT NULL DEFAULT 'deck_block',
+  decking_size TEXT NOT NULL DEFAULT '5/4x6',
+  decking_pattern TEXT NOT NULL DEFAULT 'perpendicular',
+  include_railing BOOLEAN NOT NULL DEFAULT true,
+  railing_type TEXT NOT NULL DEFAULT 'wood',
+  railing_post_spacing_ft NUMERIC NOT NULL DEFAULT 6.0,
+  fascia_board BOOLEAN NOT NULL DEFAULT true,
+  composite_package BOOLEAN NOT NULL DEFAULT false,
+  railing_sides JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS decks_project_id_idx ON decks(project_id);
+
+CREATE TABLE IF NOT EXISTS deck_stairs (
+  id SERIAL PRIMARY KEY,
+  deck_id INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+  edge_index INTEGER NOT NULL DEFAULT 0,
+  position_fraction NUMERIC NOT NULL DEFAULT 0.5,
+  width_ft NUMERIC NOT NULL DEFAULT 3.0,
+  num_steps INTEGER NOT NULL DEFAULT 4,
+  tread_material TEXT NOT NULL DEFAULT '5/4x6',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS deck_stairs_deck_id_idx ON deck_stairs(deck_id);
 `;
 
 const PROJECT_COLUMN_ALTERS = [
@@ -647,6 +689,14 @@ const SYSTEM_SETTINGS_DEFAULTS = [
   ['waste_concrete',   '0.05'],
   ['waste_housewrap',  '0.10'],
   ['waste_insulation', '0.00'],
+  // Deck defaults
+  ['default_deck_joist_size', '2x8'],
+  ['default_deck_post_spacing_ft', '8'],
+  ['default_deck_footing_type', 'deck_block'],
+  ['default_deck_post_size', '4x4'],
+  ['deck_waste_decking',  '0.10'],
+  ['deck_waste_framing',  '0.05'],
+  ['deck_waste_concrete', '0.05'],
 ];
 
 async function seedSkuCatalog() {

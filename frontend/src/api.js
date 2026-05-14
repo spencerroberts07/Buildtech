@@ -132,6 +132,21 @@ export const api = {
   updateRoofSectionEdge: (projectId, sid, eid, data) =>
     request(`/projects/${projectId}/roof-sections/${sid}/edges/${eid}`, { method: 'PUT', body: JSON.stringify(data) }),
 
+  // Decks (polygon + framing settings + stairs).
+  listDecks: (projectId) => request(`/projects/${projectId}/decks`),
+  createDeck: (projectId, data) =>
+    request(`/projects/${projectId}/decks`, { method: 'POST', body: JSON.stringify(data) }),
+  updateDeck: (projectId, did, data) =>
+    request(`/projects/${projectId}/decks/${did}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteDeck: (projectId, did) =>
+    request(`/projects/${projectId}/decks/${did}`, { method: 'DELETE' }),
+  createDeckStair: (projectId, did, data) =>
+    request(`/projects/${projectId}/decks/${did}/stairs`, { method: 'POST', body: JSON.stringify(data) }),
+  updateDeckStair: (projectId, did, sid, data) =>
+    request(`/projects/${projectId}/decks/${did}/stairs/${sid}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteDeckStair: (projectId, did, sid) =>
+    request(`/projects/${projectId}/decks/${did}/stairs/${sid}`, { method: 'DELETE' }),
+
   listSkuCatalog: () => request('/sku-catalog'),
 
   listCustomers: () => request('/customers'),

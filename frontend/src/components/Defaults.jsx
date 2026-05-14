@@ -65,6 +65,21 @@ const INTERIOR_STUD_OPTIONS = [
   { value: 'interior_2x4', label: 'Interior 2x4' },
   { value: 'interior_2x6', label: 'Interior 2x6' },
 ];
+const DECK_JOIST_OPTIONS = [
+  { value: '2x8',  label: '2x8' },
+  { value: '2x10', label: '2x10' },
+  { value: '2x12', label: '2x12' },
+];
+const DECK_POST_OPTIONS = [
+  { value: '4x4', label: '4x4' },
+  { value: '6x6', label: '6x6' },
+  { value: '8x8', label: '8x8' },
+];
+const DECK_FOOTING_OPTIONS = [
+  { value: 'deck_block', label: 'Deck Block' },
+  { value: 'sonotube',   label: 'Sonotube + BigFoot' },
+  { value: 'poured',     label: 'Poured Concrete 12x12x8' },
+];
 
 export default function Defaults() {
   const [unlocked, setUnlocked] = useState(false);
@@ -127,6 +142,23 @@ export default function Defaults() {
         >
           {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+        <button className="secondary" type="button" style={{ padding: '0.3rem 0.6rem' }} onClick={() => saveKey(key, settings[key])}>Save</button>
+        {savedKey === key && <span className="muted" style={{ color: '#16A34A' }}>Saved ✓</span>}
+      </div>
+    );
+  }
+
+  function numField(key, step = 0.5, suffix = '') {
+    return (
+      <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+        <input
+          type="number"
+          step={step}
+          style={{ width: '6rem' }}
+          value={settings[key] ?? ''}
+          onChange={(e) => setSettings((cur) => ({ ...cur, [key]: e.target.value }))}
+        />
+        {suffix && <span className="muted">{suffix}</span>}
         <button className="secondary" type="button" style={{ padding: '0.3rem 0.6rem' }} onClick={() => saveKey(key, settings[key])}>Save</button>
         {savedKey === key && <span className="muted" style={{ color: '#16A34A' }}>Saved ✓</span>}
       </div>
@@ -210,6 +242,17 @@ export default function Defaults() {
         <Row label="Concrete">{pctField('waste_concrete')}</Row>
         <Row label="Housewrap">{pctField('waste_housewrap')}</Row>
         <Row label="Insulation">{pctField('waste_insulation')}</Row>
+      </div>
+
+      <div className="form-section-band">Deck defaults</div>
+      <div className="card">
+        <Row label="Default joist size">{selectField('default_deck_joist_size', DECK_JOIST_OPTIONS)}</Row>
+        <Row label="Default post size">{selectField('default_deck_post_size', DECK_POST_OPTIONS)}</Row>
+        <Row label="Default footing type">{selectField('default_deck_footing_type', DECK_FOOTING_OPTIONS)}</Row>
+        <Row label="Default post spacing">{numField('default_deck_post_spacing_ft', 0.5, 'ft')}</Row>
+        <Row label="Deck board waste %">{pctField('deck_waste_decking')}</Row>
+        <Row label="Deck framing waste %">{pctField('deck_waste_framing')}</Row>
+        <Row label="Deck concrete waste %">{pctField('deck_waste_concrete')}</Row>
       </div>
 
       <div className="form-section-band">Training data (GPT-4o fine-tuning)</div>

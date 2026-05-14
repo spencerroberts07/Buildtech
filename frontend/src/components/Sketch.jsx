@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../api.js';
 import RoofSketch from './RoofSketch.jsx';
+import DeckSketch from './DeckSketch.jsx';
 import FloorPlanExtractionModal from './FloorPlanExtractionModal.jsx';
 import OpeningsOnlyModal from './OpeningsOnlyModal.jsx';
 
@@ -132,6 +133,7 @@ const LEVEL_TABS_BASE = [
   { value: 'floor1', label: 'Floor 1' },
   { value: 'floor2', label: 'Floor 2' },
   { value: 'roof', label: 'Roof' },
+  { value: 'deck', label: 'Deck' },
 ];
 
 export default function Sketch({
@@ -271,6 +273,21 @@ export default function Sketch({
           onMaterialsChanged={onMaterialsChanged}
           onProjectSettingsChange={onProjectSettingsChange}
           refetchProjectSettings={refetchProjectSettings}
+        />
+      </div>
+    );
+  }
+
+  if (activeLevel === 'deck') {
+    return (
+      <div>
+        <LevelTabs tabs={visibleLevels} active={activeLevel} onChange={setActiveLevel} />
+        <DeckSketch
+          projectId={projectId}
+          projectSettings={projectSettings}
+          level="floor1"
+          onMaterialsChanged={onMaterialsChanged}
+          onProjectSettingsChange={onProjectSettingsChange}
         />
       </div>
     );

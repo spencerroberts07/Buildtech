@@ -1253,6 +1253,224 @@ router.put('/:id/roof-sections/:sid/edges/:eid', async (req, res) => {
   res.json(rows[0]);
 });
 
+// ---------------- Decks (polygon-based deck takeoff) ----------------
+const DECK_FLOOR_LEVELS = ['floor1', 'floor2'];
+const DECK_JOIST_SIZES = ['2x8', '2x10', '2x12'];
+const DECK_BEAM_SIZES = ['2x8', '2x10', '2x12'];
+const DECK_POST_SIZES = ['4x4', '6x6', '8x8'];
+const DECK_FOOTING_TYPES = ['deck_block', 'sonotube', 'poured'];
+const DECK_DECKING_SIZES = ['5/4x6', '2x6'];
+const DECK_PATTERNS = ['perpendicular', 'parallel', 'boxed'];
+const DECK_RAILING_TYPES = ['wood', 'aluminum'];
+const DECK_FIELDS = [
+  'name', 'floor_level', 'corners', 'attached_wall_edge', 'deck_height_ft',
+  'joist_size', 'joist_spacing_inches', 'beam_ply', 'beam_size', 'post_size',
+  'post_spacing_ft', 'footing_type', 'decking_size', 'decking_pattern',
+  'include_railing', 'railing_type', 'railing_post_spacing_ft', 'fascia_board',
+  'composite_package', 'railing_sides',
+];
+const DECK_JSON_FIELDS = new Set(['corners', 'attached_wall_edge', 'railing_sides']);
+
+async function loadDeckWithStairs(projectId, deckId) {
+  const deck = (await query(
+    'SELECT * FROM decks WHERE id = $1 AND project_id = $2',
+    [deckId, projectId]
+  )).rows[0];
+  if (!deck) return null;
+  const stairs = (await query(
+    'SELECT * FROM deck_stairs WHERE deck_id = $1 ORDER BY id',
+    [deckId]
+  )).rows;
+  return { ...deck, stairs };
+}
+
+router.get('/:id/decks', async (req, res) => {
+  const { id } = req.params;
+  const decks = (await query(
+    'SELECT * FROM decks WHERE project_id = $1 ORDER BY id', [id]
+  )).rows;
+  if (decks.length === 0) return res.json([]);
+  const allStairs = (await query(
+    `SELECT s.* FROM deck_stairs s
+     JOIN decks d ON d.id = s.deck_id
+     WHERE d.project_id = $1
+     ORDER BY s.deck_id, s.id`,
+    [id]
+  )).rows;
+  const stairsByDeck = new Map();
+  for (const s of allStairs) {
+    if (!stairsByDeck.has(s.deck_id)) stairsByDeck.set(s.deck_id, []);
+    stairsByDeck.get(s.deck_id).push(s);
+  }
+  res.json(decks.map((d) => ({ ...d, stairs: stairsByDeck.get(d.id) || [] })));
+});
+
+router.post('/:id/decks', async (req, res) => {
+  const { id } = req.params;
+  const b = req.body || {};
+  if (b.floor_level && !DECK_FLOOR_LEVELS.includes(b.floor_level)) {
+    return res.status(400).json({ error: `floor_level must be one of: ${DECK_FLOOR_LEVELS.join(', ')}` });
+  }
+  const corners = Array.isArray(b.corners) ? b.corners : [];
+  const attached = Array.isArray(b.attached_wall_edge) ? b.attached_wall_edge : null;
+  try {
+    const { rows } = await query(
+      `INSERT INTO decks (project_id, floor_level, name, corners, attached_wall_edge, deck_height_ft)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6) RETURNING *`,
+      [
+        id,
+        b.floor_level || 'floor1',
+        b.name || 'Deck',
+        JSON.stringify(corners),
+        attached ? JSON.stringify(attached) : null,
+        b.deck_height_ft != null ? Number(b.deck_height_ft) : 3.0,
+      ]
+    );
+    await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+    res.status(201).json({ ...rows[0], stairs: [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/:id/decks/:did', async (req, res) => {
+  const { id, did } = req.params;
+  const b = req.body || {};
+  if ('floor_level' in b && !DECK_FLOOR_LEVELS.includes(b.floor_level)) {
+    return res.status(400).json({ error: 'invalid floor_level' });
+  }
+  if ('joist_size' in b && !DECK_JOIST_SIZES.includes(b.joist_size)) {
+    return res.status(400).json({ error: 'invalid joist_size' });
+  }
+  if ('beam_size' in b && !DECK_BEAM_SIZES.includes(b.beam_size)) {
+    return res.status(400).json({ error: 'invalid beam_size' });
+  }
+  if ('post_size' in b && !DECK_POST_SIZES.includes(b.post_size)) {
+    return res.status(400).json({ error: 'invalid post_size' });
+  }
+  if ('footing_type' in b && !DECK_FOOTING_TYPES.includes(b.footing_type)) {
+    return res.status(400).json({ error: 'invalid footing_type' });
+  }
+  if ('decking_size' in b && !DECK_DECKING_SIZES.includes(b.decking_size)) {
+    return res.status(400).json({ error: 'invalid decking_size' });
+  }
+  if ('decking_pattern' in b && !DECK_PATTERNS.includes(b.decking_pattern)) {
+    return res.status(400).json({ error: 'invalid decking_pattern' });
+  }
+  if ('railing_type' in b && !DECK_RAILING_TYPES.includes(b.railing_type)) {
+    return res.status(400).json({ error: 'invalid railing_type' });
+  }
+  const updates = [];
+  const values = [];
+  let p = 1;
+  for (const f of DECK_FIELDS) {
+    if (!(f in b)) continue;
+    const v = b[f];
+    if (DECK_JSON_FIELDS.has(f)) {
+      updates.push(`${f} = $${p++}::jsonb`);
+      values.push(v == null ? null : JSON.stringify(v));
+    } else {
+      updates.push(`${f} = $${p++}`);
+      values.push(v === '' ? null : v);
+    }
+  }
+  if (updates.length === 0) {
+    const full = await loadDeckWithStairs(id, did);
+    if (!full) return res.status(404).json({ error: 'not found' });
+    return res.json(full);
+  }
+  values.push(did, id);
+  const { rows } = await query(
+    `UPDATE decks SET ${updates.join(', ')}, updated_at = NOW()
+     WHERE id = $${p++} AND project_id = $${p}
+     RETURNING *`,
+    values
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  const full = await loadDeckWithStairs(id, did);
+  res.json(full);
+});
+
+router.delete('/:id/decks/:did', async (req, res) => {
+  const { id, did } = req.params;
+  const r = await query('DELETE FROM decks WHERE id = $1 AND project_id = $2', [did, id]);
+  if (r.rowCount === 0) return res.status(404).json({ error: 'not found' });
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
+// ---- Deck stairs (sub-resource on a deck) ----
+const STAIR_FIELDS = ['edge_index', 'position_fraction', 'width_ft', 'num_steps', 'tread_material'];
+
+router.post('/:id/decks/:did/stairs', async (req, res) => {
+  const { id, did } = req.params;
+  const b = req.body || {};
+  // Ownership check.
+  const owner = await query('SELECT id FROM decks WHERE id = $1 AND project_id = $2', [did, id]);
+  if (!owner.rows[0]) return res.status(404).json({ error: 'deck not found' });
+  const { rows } = await query(
+    `INSERT INTO deck_stairs (deck_id, edge_index, position_fraction, width_ft, num_steps, tread_material)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    [
+      did,
+      b.edge_index != null ? Number(b.edge_index) : 0,
+      b.position_fraction != null ? Number(b.position_fraction) : 0.5,
+      b.width_ft != null ? Number(b.width_ft) : 3.0,
+      b.num_steps != null ? Number(b.num_steps) : 4,
+      b.tread_material || '5/4x6',
+    ]
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(201).json(rows[0]);
+});
+
+router.put('/:id/decks/:did/stairs/:sid', async (req, res) => {
+  const { id, did, sid } = req.params;
+  const b = req.body || {};
+  // Ownership check.
+  const ownership = await query(
+    `SELECT s.id FROM deck_stairs s
+     JOIN decks d ON d.id = s.deck_id
+     WHERE s.id = $1 AND d.id = $2 AND d.project_id = $3`,
+    [sid, did, id]
+  );
+  if (!ownership.rows[0]) return res.status(404).json({ error: 'stair not found' });
+  const updates = [];
+  const values = [];
+  let p = 1;
+  for (const f of STAIR_FIELDS) {
+    if (!(f in b)) continue;
+    updates.push(`${f} = $${p++}`);
+    values.push(b[f] === '' ? null : b[f]);
+  }
+  if (updates.length === 0) {
+    const { rows } = await query('SELECT * FROM deck_stairs WHERE id = $1', [sid]);
+    return res.json(rows[0]);
+  }
+  values.push(sid);
+  const { rows } = await query(
+    `UPDATE deck_stairs SET ${updates.join(', ')} WHERE id = $${p} RETURNING *`,
+    values
+  );
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.json(rows[0]);
+});
+
+router.delete('/:id/decks/:did/stairs/:sid', async (req, res) => {
+  const { id, did, sid } = req.params;
+  const ownership = await query(
+    `SELECT s.id FROM deck_stairs s
+     JOIN decks d ON d.id = s.deck_id
+     WHERE s.id = $1 AND d.id = $2 AND d.project_id = $3`,
+    [sid, did, id]
+  );
+  if (!ownership.rows[0]) return res.status(404).json({ error: 'stair not found' });
+  await query('DELETE FROM deck_stairs WHERE id = $1', [sid]);
+  await query('UPDATE projects SET updated_at = NOW() WHERE id = $1', [id]);
+  res.status(204).end();
+});
+
 // ---------------- Packages (line items quoted separately) ----------------
 const PACKAGE_FIELDS = ['name', 'package_type', 'notes', 'quantity', 'unit', 'cost', 'price1', 'price2', 'price3', 'price4'];
 
