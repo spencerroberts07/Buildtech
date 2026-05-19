@@ -40,26 +40,27 @@ const INSULATION_OPTIONS = [
   { value: 'rockwool_sns_15', label: 'ROCKWOOL SAFE N SOUND 3X15', group: 'Rockwool' },
 ];
 
-// Section header — bold uppercase label with a 1px divider underneath.
-// The first section in the card passes first={true} so it sits flush
-// against the helper paragraph instead of pushing 1.5rem of space.
+// Section header — BuildTek-red left accent + bold near-black title + thin
+// bottom divider. Visually clear as a section band (distinct from field
+// labels) without going all the way to the heavyweight `form-section-band`
+// look used at the page top. The first section in the card passes
+// first={true} so it sits flush against the helper paragraph instead of
+// pushing the standard 1.75rem of space above.
 function SectionHeader({ title, first }) {
   return (
     <div style={{
-      marginTop: first ? 0 : '1.5rem',
-      marginBottom: '0.5rem',
-      paddingBottom: '0.4rem',
+      marginTop: first ? 0 : '1.75rem',
+      marginBottom: '0.75rem',
+      paddingTop: '0.25rem',
+      paddingBottom: '0.5rem',
+      paddingLeft: '0.6rem',
+      borderLeft: '3px solid var(--color-primary, #CC0000)',
       borderBottom: '1px solid var(--border, #e0e0e0)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.5rem',
     }}>
       <span style={{
-        fontWeight: 600,
-        fontSize: '0.8rem',
-        textTransform: 'uppercase',
-        letterSpacing: '0.06em',
-        color: 'var(--text-muted, #888)',
+        fontWeight: 700,
+        fontSize: '1rem',
+        color: 'var(--color-dark, #0A0A0A)',
       }}>
         {title}
       </span>
