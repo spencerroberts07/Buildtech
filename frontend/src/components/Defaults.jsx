@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 
@@ -209,6 +209,15 @@ export default function Defaults() {
       <p><Link to="/projects">← All projects</Link></p>
       <h1>Defaults</h1>
       {error && <p className="error">{error}</p>}
+
+      {/* SKU Catalog is the FIRST section because it's the most important
+          onboarding step for a new store — every other calculation
+          surfaces "TBD" pricing until this Excel import is run.
+          TODO: when role-based access lands, a read-only "Last Import"
+          view should live somewhere a non-admin can reach (e.g. a small
+          mapping-progress chip on the projects list page). */}
+      <div className="form-section-band">SKU Catalog</div>
+      <SkuCatalogPanel />
 
       <div className="form-section-band">Wall defaults</div>
       <div className="card">
@@ -504,6 +513,376 @@ function RatingStars({ value, editing, onOpen, onClose, onChange }) {
         onClick={onClose}
         style={{ background: 'transparent', border: 'none', cursor: 'pointer', marginLeft: 4, fontSize: 11, color: '#6B7280' }}
       >×</button>
+    </div>
+  );
+}
+
+// ============================================================
+// SKU Catalog Excel import panel.
+// Three states:
+//   A: no preview yet (or after Cancel/Upload-new) → upload dropzone
+//   B: preview loaded                              → table + Confirm/Cancel
+//   C: import just succeeded                       → success banner,
+//                                                    auto-collapses into the
+//                                                    "Last Import" card on
+//                                                    next mount.
+// The Last Import card + mapping progress bar render alongside the
+// dropzone whenever there's a prior import on file.
+// ============================================================
+const STATUS_LABEL = {
+  MATCH_NEW:    { label: '🟢 New mapping',    color: '#15803D', bg: '#DCFCE7', border: '#86EFAC' },
+  MATCH_UPDATE: { label: '🟡 Update existing', color: '#92400E', bg: '#FEF3C7', border: '#FDE68A' },
+  NO_MATCH:     { label: '🔴 No match found', color: '#991B1B', bg: '#FEE2E2', border: '#FCA5A5' },
+};
+
+function SkuCatalogPanel() {
+  const [file, setFile] = useState(null);
+  const [preview, setPreview] = useState(null);     // { rows, summary }
+  const [previewing, setPreviewing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmResult, setConfirmResult] = useState(null);
+  const [latest, setLatest] = useState(null);       // { exists, ...meta }
+  const [status, setStatus] = useState(null);       // { total, mapped, unmapped, percent_complete }
+  const [showUnmatched, setShowUnmatched] = useState(false);
+  const [err, setErr] = useState('');
+  const [dragOver, setDragOver] = useState(false);
+
+  async function loadMeta() {
+    try {
+      const [l, s] = await Promise.all([
+        api.getLatestSkuImport().catch(() => ({ exists: false })),
+        api.getSkuImportStatus().catch(() => null),
+      ]);
+      setLatest(l);
+      setStatus(s);
+    } catch (e) { setErr(e.message); }
+  }
+  useEffect(() => { loadMeta(); }, []);
+
+  async function onFileSelected(f) {
+    if (!f) return;
+    if (!/\.xlsx$/i.test(f.name)) {
+      setErr('Please upload an Excel file (.xlsx)');
+      return;
+    }
+    setErr('');
+    setFile(f);
+    setPreviewing(true);
+    setPreview(null);
+    setConfirmResult(null);
+    try {
+      const result = await api.previewSkuImport(f);
+      setPreview(result);
+    } catch (e) {
+      setErr(e.message);
+      setFile(null);
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function onConfirm() {
+    if (!file) return;
+    setConfirming(true);
+    setErr('');
+    try {
+      const res = await api.confirmSkuImport(file);
+      setConfirmResult(res);
+      setPreview(null);
+      setFile(null);
+      // Reload the Last Import card + mapping progress now that there's
+      // a fresh import on file.
+      await loadMeta();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  function onCancel() {
+    setFile(null);
+    setPreview(null);
+    setErr('');
+  }
+
+  // STATE B — preview loaded
+  if (preview) {
+    const visibleRows = preview.rows.filter((r) =>
+      r.status === 'MATCH_NEW' ||
+      r.status === 'MATCH_UPDATE' ||
+      (showUnmatched && r.status === 'NO_MATCH')
+    );
+    const unmatchedCount = preview.summary.unmatched || 0;
+    return (
+      <div className="card">
+        {err && <p className="error">{err}</p>}
+        <SummaryBar summary={preview.summary} />
+        <div style={{ marginTop: 12, marginBottom: 8, fontSize: '0.85rem', color: '#6B7280' }}>
+          Reviewing <strong>{file?.name || 'upload'}</strong> — nothing has been saved yet.
+        </div>
+        <div style={{ overflowX: 'auto', maxHeight: 480, border: '1px solid #E5E7EB', borderRadius: 6 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+            <thead style={{ position: 'sticky', top: 0, background: '#F9FAFB' }}>
+              <tr>
+                <Th>Sheet</Th>
+                <Th>Material</Th>
+                <Th>Catalog #</Th>
+                <Th>Item #</Th>
+                <Th>Status</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.map((r, i) => (
+                <tr key={i} style={{ borderTop: '1px solid #F3F4F6' }}>
+                  <Td>{r.sheet}</Td>
+                  <Td>{r.material}</Td>
+                  <Td>{r.catalog_number || <span style={{ color: '#9CA3AF' }}>—</span>}</Td>
+                  <Td>{r.item_number || <span style={{ color: '#9CA3AF' }}>—</span>}</Td>
+                  <Td><StatusBadge status={r.status} /></Td>
+                </tr>
+              ))}
+              {visibleRows.length === 0 && (
+                <tr><Td colSpan={5}><span className="muted">No rows to review.</span></Td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {unmatchedCount > 0 && (
+          <div style={{ marginTop: 8, fontSize: '0.85rem' }}>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setShowUnmatched((v) => !v)}
+              style={{ padding: '0.3rem 0.6rem' }}
+            >
+              {showUnmatched
+                ? `Hide ${unmatchedCount} unmatched row${unmatchedCount === 1 ? '' : 's'}`
+                : `Show ${unmatchedCount} unmatched row${unmatchedCount === 1 ? '' : 's'}`}
+            </button>
+            <span className="muted" style={{ marginLeft: 8 }}>
+              Unmatched rows are rows in your Excel that BuildTek doesn't recognize — these are not written and can be ignored or reviewed.
+            </span>
+          </div>
+        )}
+        <div style={{ marginTop: 16, display: 'flex', gap: 12 }}>
+          <button
+            type="button"
+            className="primary"
+            disabled={confirming || (preview.summary.new + preview.summary.updates === 0)}
+            onClick={onConfirm}
+          >
+            {confirming ? 'Importing…' : 'Confirm Import'}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={onCancel}
+            disabled={confirming}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // STATE A + C — dropzone (plus last-import card + progress bar if present)
+  return (
+    <div className="card">
+      {err && <p className="error">{err}</p>}
+
+      {confirmResult && (
+        <div style={{
+          padding: 12, marginBottom: 16, borderRadius: 6,
+          background: '#DCFCE7', border: '1px solid #86EFAC', color: '#15803D',
+          fontSize: '0.9rem',
+        }}>
+          ✓ Import complete — {confirmResult.summary.new} SKUs mapped,
+          {' '}{confirmResult.summary.updates} updated
+          {confirmResult.summary.unmatched > 0
+            ? `, ${confirmResult.summary.unmatched} not matched`
+            : ''}.
+        </div>
+      )}
+
+      <p className="muted" style={{ marginTop: 0 }}>
+        Upload your completed onboarding Excel to connect your store's SKUs
+        to BuildTek's material calculations.
+      </p>
+
+      <Dropzone
+        previewing={previewing}
+        dragOver={dragOver}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          const f = e.dataTransfer?.files?.[0];
+          if (f) onFileSelected(f);
+        }}
+        onSelect={onFileSelected}
+      />
+
+      <div style={{ marginTop: 10, fontSize: '0.85rem' }}>
+        Don't have the template?{' '}
+        <a
+          href={`${(import.meta.env.VITE_API_BASE || 'http://localhost:4000')}/sku-import/template`}
+          target="_blank"
+          rel="noreferrer"
+        >Download it here</a>
+        .
+        {/* The template Excel must be uploaded once manually to R2 at
+            key 'sku-catalog/templates/BuildTek_SKU_Catalog_Template.xlsx'.
+            The /sku-import/template route 302-redirects to that public URL. */}
+      </div>
+
+      {latest?.exists && (
+        <LastImportCard latest={latest} status={status} />
+      )}
+    </div>
+  );
+}
+
+function SummaryBar({ summary }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, fontSize: '0.85rem', flexWrap: 'wrap' }}>
+      <Chip color="#15803D" bg="#DCFCE7" border="#86EFAC">
+        {summary.new} new
+      </Chip>
+      <Chip color="#92400E" bg="#FEF3C7" border="#FDE68A">
+        {summary.updates} update{summary.updates === 1 ? '' : 's'}
+      </Chip>
+      <Chip color="#6B7280" bg="#F3F4F6" border="#E5E7EB">
+        {summary.skipped} skipped
+      </Chip>
+      {summary.unmatched > 0 && (
+        <Chip color="#991B1B" bg="#FEE2E2" border="#FCA5A5">
+          {summary.unmatched} unmatched
+        </Chip>
+      )}
+    </div>
+  );
+}
+
+function Chip({ color, bg, border, children }) {
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 8px', borderRadius: 4,
+      color, background: bg, border: `1px solid ${border}`, fontWeight: 600,
+    }}>{children}</span>
+  );
+}
+
+function StatusBadge({ status }) {
+  const s = STATUS_LABEL[status] || STATUS_LABEL.NO_MATCH;
+  return (
+    <span style={{
+      display: 'inline-block', padding: '1px 6px', borderRadius: 4,
+      fontSize: 11, fontWeight: 600,
+      color: s.color, background: s.bg, border: `1px solid ${s.border}`,
+      whiteSpace: 'nowrap',
+    }}>{s.label}</span>
+  );
+}
+
+function Th({ children }) {
+  return <th style={{ padding: '6px 10px', textAlign: 'left', fontWeight: 600, color: '#374151' }}>{children}</th>;
+}
+function Td({ children, colSpan }) {
+  return <td colSpan={colSpan} style={{ padding: '6px 10px', verticalAlign: 'top' }}>{children}</td>;
+}
+
+function Dropzone({ previewing, dragOver, onDragOver, onDragLeave, onDrop, onSelect }) {
+  const inputRef = useRef(null);
+  return (
+    <div
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onClick={() => inputRef.current?.click()}
+      style={{
+        border: `2px dashed ${dragOver ? '#CC0000' : '#D1D5DB'}`,
+        background: dragOver ? '#FEF2F2' : '#F9FAFB',
+        borderRadius: 8, padding: 32, textAlign: 'center', cursor: 'pointer',
+        transition: 'all 100ms ease',
+      }}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        style={{ display: 'none' }}
+        onChange={(e) => onSelect(e.target.files?.[0])}
+      />
+      {previewing ? (
+        <span className="muted">Parsing Excel…</span>
+      ) : (
+        <>
+          <div style={{ fontSize: '1rem', fontWeight: 600, marginBottom: 4 }}>
+            Drag &amp; drop your Excel here, or click to browse
+          </div>
+          <div className="muted" style={{ fontSize: '0.85rem' }}>.xlsx only — max 25 MB</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LastImportCard({ latest, status }) {
+  return (
+    <div style={{
+      marginTop: 20, padding: 16, background: '#F9FAFB',
+      border: '1px solid #E5E7EB', borderRadius: 6,
+    }}>
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>Last Import</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr', rowGap: 4, fontSize: '0.85rem' }}>
+        <div className="muted">Filename:</div>
+        <div>{latest.filename}</div>
+        <div className="muted">Imported:</div>
+        <div>{new Date(latest.imported_at).toLocaleString()}</div>
+        <div className="muted">By:</div>
+        <div>{latest.imported_by_username || <span className="muted">—</span>}</div>
+        <div className="muted">Stats:</div>
+        <div>
+          Mapped: <strong>{latest.rows_matched}</strong>
+          {' · '}Updated: <strong>{latest.rows_updated}</strong>
+          {' · '}Skipped: <strong>{latest.rows_skipped}</strong>
+          {' · '}Unmatched: <strong>{latest.rows_unmatched}</strong>
+        </div>
+      </div>
+      {latest.download_url && (
+        <div style={{ marginTop: 12 }}>
+          <a
+            href={latest.download_url}
+            target="_blank"
+            rel="noreferrer"
+            className="secondary"
+            style={{
+              display: 'inline-block', padding: '0.4rem 0.8rem',
+              border: '1px solid #D1D5DB', borderRadius: 4,
+              textDecoration: 'none', color: '#374151', fontSize: '0.85rem',
+            }}
+          >Download Excel</a>
+        </div>
+      )}
+      {status && status.total > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: 4 }}>
+            <span>{status.mapped} of {status.total} materials mapped</span>
+            <strong>{status.percent_complete}%</strong>
+          </div>
+          <div style={{
+            height: 8, background: '#E5E7EB', borderRadius: 4, overflow: 'hidden',
+          }}>
+            <div style={{
+              width: `${status.percent_complete}%`, height: '100%',
+              background: '#CC0000', transition: 'width 200ms ease',
+            }} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

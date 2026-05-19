@@ -341,4 +341,43 @@ export const api = {
     }
     return res.blob();
   },
+
+  // ---------- SKU Catalog Excel import ----------
+  // Preview + Confirm both POST multipart/form-data with field 'file'.
+  // Mirrors the uploadPdf pattern above (FormData + manual fetch since
+  // request() always sends application/json).
+  previewSkuImport: async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/sku-import/preview`, {
+      method: 'POST', headers, body: fd,
+    });
+    if (!res.ok) {
+      let msg = 'Preview failed';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.json();
+  },
+  confirmSkuImport: async (file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    const headers = {};
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${BASE}/sku-import/confirm`, {
+      method: 'POST', headers, body: fd,
+    });
+    if (!res.ok) {
+      let msg = 'Import failed';
+      try { msg = (await res.json()).error || msg; } catch {}
+      throw new Error(msg);
+    }
+    return res.json();
+  },
+  getLatestSkuImport: () => request('/sku-import/latest'),
+  getSkuImportStatus: () => request('/sku-import/status'),
 };

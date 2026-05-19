@@ -375,6 +375,23 @@ CREATE TABLE IF NOT EXISTS decks (
 
 CREATE INDEX IF NOT EXISTS decks_project_id_idx ON decks(project_id);
 
+-- TODO: add org_id column when multitenancy arrives so each tenant's
+-- import history is isolated. Today the table is global single-tenant.
+CREATE TABLE IF NOT EXISTS sku_catalog_imports (
+  id SERIAL PRIMARY KEY,
+  r2_key TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  imported_by INTEGER REFERENCES users(id),
+  imported_at TIMESTAMPTZ DEFAULT NOW(),
+  rows_matched INTEGER DEFAULT 0,
+  rows_updated INTEGER DEFAULT 0,
+  rows_skipped INTEGER DEFAULT 0,
+  rows_unmatched INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS sku_catalog_imports_imported_at_idx
+  ON sku_catalog_imports(imported_at DESC);
+
 CREATE TABLE IF NOT EXISTS deck_stairs (
   id SERIAL PRIMARY KEY,
   deck_id INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
