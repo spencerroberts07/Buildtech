@@ -28,11 +28,26 @@ const BASE_SECTIONS = {
   FINISHINGS: 'Finishings',
   FLOOR: 'Floor',
 };
-const SOLO_SECTIONS = {
+// Exported so AUTO-calculation rules files (roofFinishingRules.js,
+// soffitFasciaRules.js, sidingRules.js, floorSystemRules.js,
+// drywallFinishingRules.js) can reference the section label by constant
+// rather than redefining the string — keeps sectionRank() in lockstep with
+// the actual section names emitted by each rules engine.
+export const SOLO_SECTIONS = {
   EXTERIOR_INSULATION: 'Exterior Insulation',
   INTERIOR_DOORS: 'Interior Doors',
+  // AUTO-calculation module sections (modules 1–8). FRAMING_NAILS is a
+  // project-wide rollup that runs last so its quantity reflects every piece
+  // of dimensional lumber pushed by every other module.
+  FLOOR_SYSTEM: 'Floor System',
+  ATTIC_INSULATION: 'Attic Insulation',
+  DRYWALL_FINISHING: 'Drywall Finishing',
   DECK: 'Deck',
   ROOF: 'Roof',
+  ROOF_FINISHING: 'Roof Finishing',
+  SOFFIT_FASCIA: 'Soffit & Fascia',
+  SIDING: 'Siding',
+  FRAMING_NAILS: 'Framing Nails',
   PACKAGES: 'Packages',
 };
 
@@ -81,8 +96,21 @@ function buildSectionOrder() {
   // sections (so headers/jacks across all floors appear together) and before
   // the standalone Roof / Packages buckets.
   out.push(SOLO_SECTIONS.INTERIOR_DOORS);
+  // AUTO-calc framing/finishing groups land between Interior Doors and Deck,
+  // keeping related trades contiguous.
+  out.push(SOLO_SECTIONS.FLOOR_SYSTEM);
+  out.push(SOLO_SECTIONS.ATTIC_INSULATION);
+  out.push(SOLO_SECTIONS.DRYWALL_FINISHING);
   out.push(SOLO_SECTIONS.DECK);
   out.push(SOLO_SECTIONS.ROOF);
+  // Roof envelope trades follow the roof bucket.
+  out.push(SOLO_SECTIONS.ROOF_FINISHING);
+  out.push(SOLO_SECTIONS.SOFFIT_FASCIA);
+  out.push(SOLO_SECTIONS.SIDING);
+  // Framing nails is the project-wide rollup — needs every lumber row to
+  // be present in wallItems before its quantity is calculated, so it sorts
+  // late but ahead of Packages.
+  out.push(SOLO_SECTIONS.FRAMING_NAILS);
   out.push(SOLO_SECTIONS.PACKAGES);
   return out;
 }
@@ -131,6 +159,9 @@ export const CATEGORY_ORDER = [
   CATEGORIES.HEADER,
   CATEGORIES.JACK_STUDS,
   CATEGORIES.SHIMS,
+  // Window & Door Accessories sits adjacent to the opening-header rows so
+  // the wall section reads in the natural build sequence.
+  'Window & Door Accessories',
   CATEGORIES.SHEATHING,
   CATEGORIES.EXTERIOR_INSULATION,
   CATEGORIES.BUILDING_WRAP,
@@ -147,6 +178,42 @@ export const CATEGORY_ORDER = [
   CATEGORIES.SUBFLOOR_ADHESIVE,
   'Hardware',
   'Blocking',
+  // AUTO-calculation category labels — order within their section is what
+  // drives the material list rendering. The strings here MUST match the
+  // CATEGORIES const in each rules file exactly.
+  // Roof Finishing
+  'Ice & Water Shield',
+  'Underlayment',
+  'Starter Strip',
+  'Shingles',
+  'Hip & Ridge Cap',
+  'Drip Edge',
+  'Valley Flashing',
+  'Roofing Fasteners',
+  // Soffit & Fascia
+  'Soffit',
+  'Soffit Trim',
+  'Fascia',
+  'Sub-Fascia',
+  // Siding
+  'Siding',
+  'Siding Accessories',
+  // Floor System
+  'Rim Joist',
+  'Floor Joists',
+  'Rim Insulation',
+  'Joist Tape',
+  'Centre Beam',
+  // Attic Insulation
+  'Attic Insulation',
+  // Drywall Finishing
+  'Corner Bead',
+  'Tape & Compound',
+  'Drywall Fasteners',
+  'Primer & Paint',
+  'Ceiling Strapping',
+  // Framing Nails
+  'Framing Nails',
 ];
 export function categoryRank(category) {
   if (!category) return CATEGORY_ORDER.length + 1;
@@ -807,7 +874,10 @@ export function roofSectionGeometry(section) {
 // an edge of B that are close-and-parallel (within 1ft, within ~5°) and
 // returns the shorter expanded edge length × valley factor of the steeper
 // pitch. Coarse, but adequate for an estimate. Returns 0 if no overlap found.
-function valleyBetween(secA, secB) {
+// Exported so materialListBuilder.js can aggregate per-pair valley length
+// alongside the per-section geometry from roofSectionGeometry() — the two
+// helpers together produce the totals the AUTO roof-finishing module needs.
+export function valleyBetween(secA, secB) {
   const ea = expandRoofPolygon(secA.corners || [], (secA.edges || []).map((e, i) => Number(e.overhang_ft ?? 1.5)));
   const eb = expandRoofPolygon(secB.corners || [], (secB.edges || []).map((e, i) => Number(e.overhang_ft ?? 1.5)));
   if (ea.length < 3 || eb.length < 3) return 0;
@@ -903,6 +973,125 @@ export function computeRoofMaterials(roofSections, projectSettings = {}) {
     items.push({ section: SOLO_SECTIONS.ROOF, category: 'Hip',
       name: 'HIP FLASHING (linear feet)', unit: 'LF', quantity: totalHip });
   }
+  return items;
+}
+
+// ---------- Module 3: Window & Door Accessories ----------
+// Pure compute. Inputs:
+//   openings: array of { type: 'window'|'door',
+//                        rough_opening_width  (inches),
+//                        rough_opening_height (inches),
+//                        wall_type            (drives ext-door filtering) }
+//   level: foundation/floor1/floor2 — drives the per-floor Windows section.
+// Interior doors are excluded (their accessories are inside the wall, not
+// the exterior trim/flashing trade these rows track). "ext_door" = a door
+// opening on an exterior_2x6 wall.
+//
+// All canonical names are placeholders seeded by migrate.js
+// (seedAutoModulePlaceholders) so the join key resolves from day one.
+const WIN_ACC_NAMES = {
+  TYPAR_9: 'TYPAR FLASHING 9IN X 75FT ROLL',
+  TYPAR_6: 'TYPAR FLASHING 6IN X 75FT ROLL',
+  TYPAR_4: 'TYPAR FLASHING 4IN X 75FT ROLL',
+  FOAM:    'GREAT STUFF WINDOW & DOOR FOAM 340G',
+  CAULK:   'EXTERIOR CAULKING PAINTABLE WHITE TUBE',
+  BRICK:   'BRICK MOULD EXTERIOR CASING LF',
+};
+export function computeWindowAccessoryMaterials(openings, settings, level = LEVELS.FLOOR1) {
+  const list = Array.isArray(openings) ? openings : [];
+  if (list.length === 0) return [];
+  // Filter to exterior openings only: every window and any door on an
+  // exterior wall. Doors on interior walls (interior_2x4 / interior_2x6)
+  // get their own header/jack rollup in computeProjectMaterials and don't
+  // need exterior flashing/foam/caulk/brick mould.
+  const ext = list.filter((o) => {
+    if (o.type === 'window') return true;
+    if (o.type === 'door' && o.wall_type === 'exterior_2x6') return true;
+    return false;
+  });
+  if (ext.length === 0) return [];
+
+  let allWidthsLf = 0;
+  let allHeightsLf = 0;
+  let windowWidthsLf = 0;
+  let windowPerimeterLf = 0;
+  let door3SideLf = 0;
+  for (const o of ext) {
+    const w = Number(o.rough_opening_width) / 12;
+    const h = Number(o.rough_opening_height) / 12;
+    allWidthsLf  += w;
+    allHeightsLf += h;
+    if (o.type === 'window') {
+      windowWidthsLf    += w;
+      windowPerimeterLf += 2 * w + 2 * h;
+    } else {
+      // ext_door — three sides of casing (two jambs + head, no sill).
+      door3SideLf += 2 * h + w;
+    }
+  }
+
+  const section = sectionFor('WINDOWS', level);
+  const category = 'Window & Door Accessories';
+  const items = [];
+  const add = (name, unit, quantity) => {
+    if (!(quantity > 0)) return;
+    items.push({ section, category, name, unit, quantity });
+  };
+  add(WIN_ACC_NAMES.TYPAR_9, 'RL', allWidthsLf / 75);
+  add(WIN_ACC_NAMES.TYPAR_6, 'RL', allWidthsLf / 75);
+  add(WIN_ACC_NAMES.TYPAR_4, 'RL', (allHeightsLf * 2) / 75);
+  add(WIN_ACC_NAMES.FOAM,    'EA', ext.length / 3);
+  add(WIN_ACC_NAMES.CAULK,   'EA', ext.length / 2);
+  add(WIN_ACC_NAMES.BRICK,   'LF', (windowPerimeterLf + door3SideLf) * 1.10);
+  return items;
+}
+
+// ---------- Module 6: Attic Insulation ----------
+// Pure compute. Inputs:
+//   geometry: { ceiling_area_sf, attic_insulation_type, attic_r_value }
+//             attic_insulation_type ∈ {'blown_in','batt','none'}
+//             attic_r_value         ∈ {'r40','r60'}
+//   settings: { wasteFactors: { attic_insulation } }
+// Returns []  when attic_insulation_type === 'none' OR ceiling_area_sf <= 0.
+//
+// Ceiling vapour barrier rides along with every non-none type (poly stops
+// air, batt/blown is just thermal). Uses a separate canonical name string
+// from the wall vapour barrier — seeded by migrate.js.
+const ATTIC_COVERAGE = {
+  blown_in: { r40: 40, r60: 25 },
+  batt:     { r40: 40, r60: 27 },
+};
+const ATTIC_NAMES = {
+  blown_in: { r40: 'BLOWN-IN INSULATION R40 BAG',   r60: 'BLOWN-IN INSULATION R60 BAG' },
+  batt:     { r40: 'ATTIC BATT INSULATION R40 BAG', r60: 'ATTIC BATT INSULATION R60 BAG' },
+};
+const CEILING_VAPOUR_BARRIER_NAME = 'VAPOUR BARRIER 6MIL 10FT ROLL 1500SF';
+const CEILING_VB_ROLL_SF = 1500;
+export function computeAtticInsulationMaterials(geometry, settings) {
+  const g = geometry || {};
+  const areaSf = Number(g.ceiling_area_sf) || 0;
+  const type = g.attic_insulation_type || 'blown_in';
+  if (type === 'none' || areaSf <= 0) return [];
+  const rValue = g.attic_r_value || 'r40';
+  const coverage = ATTIC_COVERAGE[type]?.[rValue];
+  const name = ATTIC_NAMES[type]?.[rValue];
+  if (!coverage || !name) {
+    throw new Error(`Unknown attic_insulation_type / r_value: ${type} / ${rValue}`);
+  }
+  const waste = settings?.wasteFactors?.attic_insulation ?? 0.05;
+  const section = SOLO_SECTIONS.ATTIC_INSULATION;
+  const category = 'Attic Insulation';
+  const items = [];
+  items.push({
+    section, category,
+    name, unit: 'BAG',
+    quantity: (areaSf / coverage) * (1 + waste),
+  });
+  items.push({
+    section, category,
+    name: CEILING_VAPOUR_BARRIER_NAME, unit: 'RL',
+    quantity: areaSf / CEILING_VB_ROLL_SF,
+  });
   return items;
 }
 

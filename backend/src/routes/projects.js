@@ -69,6 +69,14 @@ const PROJECT_SETTING_FIELDS = [
   'extracted_fascia_lf',
   'ceiling_drywall_type',
   'price_level',
+  // AUTO-calculation module inputs. These drive modules 5 (Floor System)
+  // and 6 (Attic Insulation). Allowed via the existing /:id/settings PUT
+  // — the same dropdowns in ProjectSettings.jsx submit through this list.
+  'foundation_type',
+  'joist_size',
+  'joist_spacing_in',
+  'attic_insulation_type',
+  'attic_r_value',
 ];
 
 const WALL_TYPES = ['exterior_2x6', 'interior_2x4', 'interior_2x6'];

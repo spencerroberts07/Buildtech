@@ -496,6 +496,15 @@ const PROJECT_COLUMN_ALTERS = [
   // tool — lets the user drag the PDF so it aligns with their drawn walls.
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_offset_x NUMERIC NOT NULL DEFAULT 0`,
   `ALTER TABLE projects ADD COLUMN IF NOT EXISTS pdf_offset_y NUMERIC NOT NULL DEFAULT 0`,
+  // Auto-calculation modules (floor system + attic). foundation_type drives
+  // whether the floor-system module emits joists (slab → []). joist_size /
+  // joist_spacing_in feed the floor-system calc. attic_* feed the attic
+  // insulation module's coverage-per-bag lookup.
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS foundation_type TEXT NOT NULL DEFAULT 'basement'`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS joist_size TEXT NOT NULL DEFAULT '2x8'`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS joist_spacing_in INTEGER NOT NULL DEFAULT 16`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS attic_insulation_type TEXT NOT NULL DEFAULT 'blown_in'`,
+  `ALTER TABLE projects ADD COLUMN IF NOT EXISTS attic_r_value TEXT NOT NULL DEFAULT 'r40'`,
 ];
 
 const SKU_CATALOG_SEED = [
@@ -697,7 +706,148 @@ const SYSTEM_SETTINGS_DEFAULTS = [
   ['deck_waste_decking',  '0.10'],
   ['deck_waste_framing',  '0.05'],
   ['deck_waste_concrete', '0.05'],
+  // Auto-calculation module waste factors. Loaded once in
+  // materialListBuilder's wasteFactors object — every module reads from
+  // that single chokepoint so org-scoping later is a one-query change.
+  ['roof_shingles_waste',    '0.10'],
+  ['siding_waste',           '0.10'],
+  ['siding_gable_waste',     '0.10'],
+  ['floor_framing_waste',    '0.05'],
+  ['attic_insulation_waste', '0.05'],
+  // Framing-nail box-coverage ratios (LF of lumber per box). Stored as
+  // adjustable settings so Spencer can calibrate per yard once real box
+  // counts are known, without a code change.
+  ['framing_nails_lf_per_box_3_25',  '2000'],
+  ['framing_nails_lf_per_box_2_375', '3000'],
 ];
+
+// Placeholder sku_catalog rows for every canonical name string emitted by
+// the AUTO-calculation modules (modules 1–8). Each row gets cost=0,
+// price1..4=0, item_number=NULL, catalog_number=NULL — so the material list
+// renders the line item with quantity from day one, and the customer-facing
+// surfaces show "—" for catalog#/item# and $0 for price until the store
+// uploads their onboarding Excel (which maps these descriptions to real
+// catalog rows by description match).
+//
+// Reuses (NO placeholder needed):
+//   '2 X 4 X 16 PREMIUM SPRUCE'        — module 2 sub-fascia
+//   '1 X 4 - 16 SPRUCE STRAPPING'      — module 7 ceiling strapping
+//   '2 X N X L PRESSURE TREATED'       — module 5 reuses the same naming
+//                                        convention as deckRules.js;
+//                                        seeded below for the joist sizes
+//                                        that aren't already in the catalog.
+const AUTO_MODULE_PLACEHOLDERS = [
+  // ----- Module 1: Roof Finishing -----
+  { desc: 'IKO STORMSHIELD ICE & WATER 36IN X 65.6FT ROLL', coverage_value: 200,   coverage_unit: 'sq ft' },
+  { desc: 'IKO STORMTITE UNDERLAYMENT 1000SF ROLL',         coverage_value: 1000,  coverage_unit: 'sq ft' },
+  { desc: 'IKO LEADING EDGE PLUS STARTER STRIP 123LF',      coverage_value: 123,   coverage_unit: 'linear ft' },
+  { desc: 'IKO CAMBRIDGE SHINGLES 33SF/BDL',                coverage_value: 33,    coverage_unit: 'sq ft' },
+  { desc: 'IKO HIP & RIDGE CAP 36.5LF/BDL',                 coverage_value: 36.5,  coverage_unit: 'linear ft' },
+  { desc: 'ALUMINUM DRIP EDGE 10FT',                        coverage_value: 10,    coverage_unit: 'linear ft' },
+  { desc: 'W-METAL VALLEY FLASHING 10FT',                   coverage_value: 10,    coverage_unit: 'linear ft' },
+  { desc: 'ROOFING NAILS 1-1/4IN GALV COIL',                coverage_value: null,  coverage_unit: null },
+
+  // ----- Module 2: Soffit & Fascia -----
+  { desc: 'ALUMINUM VENTED SOFFIT WHITE 100SF/SQ', coverage_value: 100, coverage_unit: 'sq ft' },
+  { desc: 'J-CHANNEL ALUMINUM 12FT',               coverage_value: 12,  coverage_unit: 'linear ft' },
+  { desc: 'F-CHANNEL ALUMINUM 12FT',               coverage_value: 12,  coverage_unit: 'linear ft' },
+  { desc: 'SOFFIT NAILS 1-1/4IN WHITE LB',         coverage_value: null, coverage_unit: null },
+  { desc: '6IN ALUMINUM FASCIA WHITE 10FT',        coverage_value: 10,  coverage_unit: 'linear ft' },
+
+  // ----- Module 3: Window & Door Accessories -----
+  { desc: 'TYPAR FLASHING 9IN X 75FT ROLL',          coverage_value: 75, coverage_unit: 'linear ft' },
+  { desc: 'TYPAR FLASHING 6IN X 75FT ROLL',          coverage_value: 75, coverage_unit: 'linear ft' },
+  { desc: 'TYPAR FLASHING 4IN X 75FT ROLL',          coverage_value: 75, coverage_unit: 'linear ft' },
+  { desc: 'GREAT STUFF WINDOW & DOOR FOAM 340G',     coverage_value: null, coverage_unit: null },
+  { desc: 'EXTERIOR CAULKING PAINTABLE WHITE TUBE',  coverage_value: null, coverage_unit: null },
+  { desc: 'BRICK MOULD EXTERIOR CASING LF',          coverage_value: null, coverage_unit: 'linear ft' },
+
+  // ----- Module 4: Siding -----
+  { desc: 'VINYL SIDING D4.5 DUTCH LAP 100SF/SQ',     coverage_value: 100, coverage_unit: 'sq ft' },
+  { desc: 'VINYL GABLE SIDING D4.5 100SF/SQ',         coverage_value: 100, coverage_unit: 'sq ft' },
+  { desc: 'VINYL SIDING STARTER STRIP 12FT',          coverage_value: 12,  coverage_unit: 'linear ft' },
+  { desc: 'VINYL SIDING J-CHANNEL 5/8IN 12FT',        coverage_value: 12,  coverage_unit: 'linear ft' },
+  { desc: 'VINYL SIDING OUTSIDE CORNER 3IN 10FT',     coverage_value: 10,  coverage_unit: 'linear ft' },
+  { desc: 'VINYL SIDING DRIP CAP 10FT',               coverage_value: 10,  coverage_unit: 'linear ft' },
+  { desc: 'VINYL SIDING UNDERSILL TRIM 10FT',         coverage_value: 10,  coverage_unit: 'linear ft' },
+  { desc: 'ALUMINUM SIDING NAILS 1-3/4IN LB',         coverage_value: null, coverage_unit: null },
+
+  // ----- Module 5: Floor System -----
+  // PT joist lumber across the standard length ladder (8/10/12/14/16ft) for
+  // the three available joist sizes. The lumber name convention matches
+  // deckRules.js ptLumberName(): "2 X 8 X 16 PRESSURE TREATED".
+  { desc: '2 X 8 X 8 PRESSURE TREATED',   coverage_value: null, coverage_unit: null },
+  { desc: '2 X 8 X 10 PRESSURE TREATED',  coverage_value: null, coverage_unit: null },
+  { desc: '2 X 8 X 12 PRESSURE TREATED',  coverage_value: null, coverage_unit: null },
+  { desc: '2 X 8 X 14 PRESSURE TREATED',  coverage_value: null, coverage_unit: null },
+  { desc: '2 X 8 X 16 PRESSURE TREATED',  coverage_value: null, coverage_unit: null },
+  { desc: '2 X 10 X 8 PRESSURE TREATED',  coverage_value: null, coverage_unit: null },
+  { desc: '2 X 10 X 10 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 10 X 12 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 10 X 14 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 10 X 16 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 12 X 8 PRESSURE TREATED',  coverage_value: null, coverage_unit: null },
+  { desc: '2 X 12 X 10 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 12 X 12 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 12 X 14 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: '2 X 12 X 16 PRESSURE TREATED', coverage_value: null, coverage_unit: null },
+  { desc: 'R20 SPACESAVER RIM JOIST INSULATION BAG',   coverage_value: 75,   coverage_unit: 'linear ft' },
+  { desc: 'PROTECTO WRAP JOIST TAPE 2.5IN ROLL',       coverage_value: 75,   coverage_unit: 'linear ft' },
+  // Centre beam is intentionally not a real SKU — it's an engineered item
+  // the framer sizes per project. The placeholder makes the line item
+  // render with $0 until the estimator manually swaps in the right SKU.
+  { desc: 'CENTRE BEAM — VERIFY SIZE WITH ENGINEER',   coverage_value: null, coverage_unit: null },
+
+  // ----- Module 6: Attic Insulation -----
+  { desc: 'BLOWN-IN INSULATION R40 BAG',              coverage_value: 40, coverage_unit: 'sq ft' },
+  { desc: 'BLOWN-IN INSULATION R60 BAG',              coverage_value: 25, coverage_unit: 'sq ft' },
+  { desc: 'ATTIC BATT INSULATION R40 BAG',            coverage_value: 40, coverage_unit: 'sq ft' },
+  { desc: 'ATTIC BATT INSULATION R60 BAG',            coverage_value: 27, coverage_unit: 'sq ft' },
+  // Ceiling vapour barrier — the spec's exact name string. Distinct from
+  // the existing wall vapour barrier (VAPOUR BARRIER 6M X1500 8'6") because
+  // the labelling convention differs; seeded as a separate placeholder so
+  // the join key resolves cleanly.
+  { desc: 'VAPOUR BARRIER 6MIL 10FT ROLL 1500SF',     coverage_value: 1500, coverage_unit: 'sq ft' },
+
+  // ----- Module 7: Drywall Finishing -----
+  { desc: 'METAL CORNER BEAD 1-1/4IN X 8FT',          coverage_value: 8,    coverage_unit: 'linear ft' },
+  { desc: 'PAPER JOINT TAPE 2IN X 500FT ROLL',        coverage_value: 500,  coverage_unit: 'linear ft' },
+  { desc: 'JOINT COMPOUND ALL-PURPOSE 17L PAIL',      coverage_value: 600,  coverage_unit: 'sq ft' },
+  { desc: 'DRYWALL SCREWS 1-5/8IN COARSE LB',         coverage_value: null, coverage_unit: null },
+  { desc: 'DRYWALL SCREWS 1-1/4IN FINE LB',           coverage_value: null, coverage_unit: null },
+  { desc: 'DRYWALL PRIMER SEALER LATEX 18.9L',        coverage_value: 400,  coverage_unit: 'sq ft' },
+  { desc: 'CEILING PAINT FLAT WHITE 18.9L',           coverage_value: 400,  coverage_unit: 'sq ft' },
+  { desc: 'WALL PAINT LATEX WHITE 18.9L',             coverage_value: 350,  coverage_unit: 'sq ft' },
+
+  // ----- Module 8: Framing Nails -----
+  { desc: 'FRAMING NAILS 3-1/4IN STRIP BOX',          coverage_value: null, coverage_unit: null },
+  { desc: 'FRAMING NAILS 2-3/8IN STRIP BOX',          coverage_value: null, coverage_unit: null },
+];
+
+// Seed placeholder sku_catalog rows for every canonical name emitted by an
+// auto-calculation module. Idempotent — uses ON CONFLICT (description) DO
+// NOTHING so re-running migrations doesn't disturb rows that have already
+// been enriched (with item_number/catalog_number/pricing) from an Excel
+// upload. Multitenancy hook: this function gets called per-org once
+// org-scoping lands; the AUTO_MODULE_PLACEHOLDERS list is the source of
+// truth for the canonical names regardless of which tenant we're seeding.
+async function seedAutoModulePlaceholders() {
+  let inserted = 0;
+  for (const p of AUTO_MODULE_PLACEHOLDERS) {
+    const r = await pool.query(
+      `INSERT INTO sku_catalog
+         (item_number, catalog_number, description, coverage_value, coverage_unit,
+          cost, price1, price2, price3, price4)
+       VALUES (NULL, NULL, $1, $2, $3, 0, 0, 0, 0, 0)
+       ON CONFLICT (description) DO NOTHING`,
+      [p.desc, p.coverage_value ?? null, p.coverage_unit ?? null]
+    );
+    inserted += r.rowCount || 0;
+  }
+  if (inserted > 0) {
+    console.log(`Auto-module placeholders: inserted ${inserted} sku_catalog rows.`);
+  }
+}
 
 async function seedSkuCatalog() {
   for (const s of SKU_CATALOG_SEED) {
@@ -987,6 +1137,8 @@ async function run() {
     await seedExamples();
     await seedSkuCatalog();
     console.log('SKU catalog seeded.');
+    await seedAutoModulePlaceholders();
+    console.log('Auto-module placeholders ensured.');
     await seedSystemSettings();
     console.log('System settings seeded.');
     console.log('Migration done.');

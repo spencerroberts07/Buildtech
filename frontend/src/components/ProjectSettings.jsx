@@ -190,6 +190,73 @@ export default function ProjectSettings({ settings, globalSettings, onChange }) 
           </select>
         </div>
       </div>
+
+      {/* AUTO-calculation module inputs (modules 5 + 6). foundation_type
+          drives whether the floor-system module emits joists; joist_size /
+          spacing pick the lumber SKU + count. attic_* drive the attic
+          insulation bag count. */}
+      <h3 style={{ marginTop: 24 }}>Foundation & Floor System</h3>
+      <div className="row">
+        <div>
+          <label>Foundation type</label>
+          <select
+            value={settings.foundation_type ?? 'basement'}
+            onChange={(e) => onChange('foundation_type', e.target.value)}
+          >
+            <option value="basement">Basement</option>
+            <option value="crawl_space">Crawl space</option>
+            <option value="slab">Slab (no floor joists)</option>
+          </select>
+        </div>
+        <div>
+          <label>Floor joist size</label>
+          <select
+            value={settings.joist_size ?? '2x8'}
+            onChange={(e) => onChange('joist_size', e.target.value)}
+          >
+            <option value="2x8">2 X 8</option>
+            <option value="2x10">2 X 10</option>
+            <option value="2x12">2 X 12</option>
+          </select>
+        </div>
+        <div>
+          <label>Joist spacing (in)</label>
+          <select
+            value={settings.joist_spacing_in ?? 16}
+            onChange={(e) => onChange('joist_spacing_in', Number(e.target.value))}
+          >
+            <option value={12}>12" o.c.</option>
+            <option value={16}>16" o.c.</option>
+            <option value={19.2}>19.2" o.c.</option>
+            <option value={24}>24" o.c.</option>
+          </select>
+        </div>
+      </div>
+
+      <h3 style={{ marginTop: 24 }}>Attic Insulation</h3>
+      <div className="row">
+        <div>
+          <label>Insulation type</label>
+          <select
+            value={settings.attic_insulation_type ?? 'blown_in'}
+            onChange={(e) => onChange('attic_insulation_type', e.target.value)}
+          >
+            <option value="blown_in">Blown-in</option>
+            <option value="batt">Batt</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+        <div>
+          <label>Target R-value</label>
+          <select
+            value={settings.attic_r_value ?? 'r40'}
+            onChange={(e) => onChange('attic_r_value', e.target.value)}
+          >
+            <option value="r40">R40</option>
+            <option value="r60">R60</option>
+          </select>
+        </div>
+      </div>
     </div>
   );
 }

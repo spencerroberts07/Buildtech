@@ -642,6 +642,18 @@ function MaterialRow({ row, sectionLabel, skusByDefinition, applyOverride, reset
             }}
           >📄 from plan</span>
         )}
+        {row.engineer_review && (
+          <span
+            title="Verify size with engineer"
+            style={{
+              display: 'inline-block', marginLeft: 6,
+              padding: '1px 6px', fontSize: 10, fontWeight: 600,
+              color: '#991B1B', background: '#FEE2E2',
+              border: '1px solid #FCA5A5', borderRadius: 4,
+              verticalAlign: 'middle', whiteSpace: 'nowrap',
+            }}
+          >⚠️ verify with engineer</span>
+        )}
       </td>
       <td style={cellStyle}>{Number(row.total_quantity)}</td>
       <td style={cellStyle}>{row.material_unit}</td>

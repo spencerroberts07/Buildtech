@@ -244,6 +244,26 @@ export default function Defaults() {
         <Row label="Insulation">{pctField('waste_insulation')}</Row>
       </div>
 
+      <div className="form-section-band">AUTO-calculation waste factors</div>
+      <div className="card">
+        <Row label="Roof shingles">{pctField('roof_shingles_waste')}</Row>
+        <Row label="Siding (field)">{pctField('siding_waste')}</Row>
+        <Row label="Siding (gable ends)">{pctField('siding_gable_waste')}</Row>
+        <Row label="Floor framing">{pctField('floor_framing_waste')}</Row>
+        <Row label="Attic insulation">{pctField('attic_insulation_waste')}</Row>
+      </div>
+
+      <div className="form-section-band">Framing nails — LF per box</div>
+      <div className="card">
+        <p className="muted" style={{ marginTop: 0, fontSize: '0.85rem' }}>
+          Adjust to match your yard's actual product coverage. The Framing
+          Nails module divides total dimensional-lumber LF by these numbers
+          to get box counts.
+        </p>
+        <Row label='3-1/4" framing nails (LF per box)'>{numField('framing_nails_lf_per_box_3_25', 50, 'LF')}</Row>
+        <Row label='2-3/8" framing nails (LF per box)'>{numField('framing_nails_lf_per_box_2_375', 50, 'LF')}</Row>
+      </div>
+
       <div className="form-section-band">Deck defaults</div>
       <div className="card">
         <Row label="Default joist size">{selectField('default_deck_joist_size', DECK_JOIST_OPTIONS)}</Row>
