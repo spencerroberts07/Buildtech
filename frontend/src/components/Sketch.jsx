@@ -1778,6 +1778,7 @@ function PolygonSketch({
         {polygonClosed && (
           <button className="danger" style={{ flex: '0 0 auto' }} onClick={clearFloorPlan}>Clear floor plan</button>
         )}
+        {/* AI extraction temporarily disabled — hidden to prevent accidental API charges while the AI is being trained. Re-enable by uncommenting.
         <button
           type="button"
           className="primary"
@@ -1788,6 +1789,8 @@ function PolygonSketch({
             ? 'Upload an architectural PDF to the project to enable AI extraction'
             : aiExtracting ? 'Extraction in progress…' : 'AI reads the uploaded PDF and populates this floor automatically'}
         >✨ Read Floor Plan</button>
+        */}
+        {/* AI extraction temporarily disabled — hidden to prevent accidental API charges while the AI is being trained. Re-enable by uncommenting.
         <button
           type="button"
           className="secondary"
@@ -1804,6 +1807,7 @@ function PolygonSketch({
                   : 'AI reads the door & window schedules and places them on your existing walls'
           }
         >✨ Place Openings</button>
+        */}
         {isAdmin && polygonClosedForAi && (
           <button
             type="button"

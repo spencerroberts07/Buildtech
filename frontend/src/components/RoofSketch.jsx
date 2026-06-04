@@ -1473,6 +1473,7 @@ function AIExtractionBar({
           style={{ padding: '0.4rem 0.55rem', fontSize: '0.85rem', color: '#991B1B', borderColor: '#FECACA' }}
         >×</button>
       )}
+      {/* AI extraction temporarily disabled — hidden to prevent accidental API charges while the AI is being trained. Re-enable by uncommenting.
       <button
         type="button"
         className="primary"
@@ -1484,6 +1485,7 @@ function AIExtractionBar({
           opacity: canExtract ? 1 : 0.55, cursor: canExtract ? 'pointer' : 'not-allowed',
         }}
       >✨ Extract from PDF</button>
+      */}
       <span className="muted" style={{ fontSize: '0.8rem', marginLeft: '0.25rem' }}>
         {hasTrussPdf && hasArchPdf
           ? 'Using both PDFs (architectural + truss).'
